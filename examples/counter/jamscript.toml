@@ -1,0 +1,8 @@
+[package]
+name = "counter"
+version = "0.1.0"
+entry = "src/service.ts"
+language = "0.1"
+
+[target.minijam]
+network = "stage0"

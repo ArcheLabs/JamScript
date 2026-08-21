@@ -1,0 +1,10 @@
+[package]
+name = "jamscript-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blake2b_simd.workspace = true
+schnorrkel.workspace = true
+thiserror.workspace = true

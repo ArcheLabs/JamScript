@@ -1,0 +1,13 @@
+[package]
+name = "jamscript-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jamscript-crypto = { path = "../jamscript-crypto" }
+jamscript-ir = { path = "../jamscript-ir" }
+thiserror.workspace = true
+
+[dev-dependencies]
+schnorrkel.workspace = true

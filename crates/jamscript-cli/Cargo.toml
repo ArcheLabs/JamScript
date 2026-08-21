@@ -1,0 +1,20 @@
+[package]
+name = "jamscript-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+jamscript-codegen-rust = { path = "../jamscript-codegen-rust" }
+jamscript-ir = { path = "../jamscript-ir" }
+jamscript-parser = { path = "../jamscript-parser" }
+jamscript-target-minijam = { path = "../jamscript-target-minijam" }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[[bin]]
+name = "jamscript"
+path = "src/main.rs"

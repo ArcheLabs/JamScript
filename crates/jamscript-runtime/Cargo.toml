@@ -1,0 +1,9 @@
+[package]
+name = "jamscript-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jamscript-crypto = { path = "../jamscript-crypto" }
+jamscript-protocol = { path = "../jamscript-protocol" }
