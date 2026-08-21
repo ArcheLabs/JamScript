@@ -19,6 +19,22 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  typescript-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/client/package-lock.json
+      - working-directory: packages/client
+        run: npm ci
+      - working-directory: packages/client
+        run: npm run build
+      - working-directory: packages/client
+        run: npm test
+
   minijam:
     runs-on: ubuntu-latest
     steps:

@@ -6,6 +6,7 @@ use jamscript_crypto::{blake2_256, verify_sr25519, Address};
 pub const RUNTIME_VERSION: &str = "0.1.0";
 pub const MAX_ACTION_BYTES: usize = 1_048_576;
 pub const MAX_RESULT_BYTES: usize = 1_048_576;
+/// Domain separator retained inside the SignedActionV1 digest.
 pub const ACTION_DOMAIN_V1: &[u8] = b"JAMSCRIPT_ACTION_V1";
 pub const STATE_KEY_DOMAIN_V1: &[u8] = b"jamscript/state/v1";
 pub const NONCE_SCHEMA_V1: &[u8] = b"__jamscript/runtime/auth/nonces/";
@@ -155,7 +156,7 @@ pub fn check_expiry(valid_until: u64, authoritative_tick: u64) -> Result<(), Run
     }
 }
 
-fn signing_digest(action: &SignedActionView<'_>) -> [u8; 32] {
+pub fn signing_digest(action: &SignedActionView<'_>) -> [u8; 32] {
     let mut preimage = [0u8; ACTION_DOMAIN_V1.len() + 1 + 32 + 4 + 8 + 1 + 8 + 8 + 32];
     let mut offset = 0;
     preimage[offset..offset + ACTION_DOMAIN_V1.len()].copy_from_slice(ACTION_DOMAIN_V1);
