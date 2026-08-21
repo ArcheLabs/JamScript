@@ -25,6 +25,10 @@ cargo run --locked --bin jamscript -- check examples/counter
 cargo run --locked --bin jamscript -- build examples/counter
 ```
 
+To run the real cross-process MiniJAM path:
+
+    ./scripts/minijam-network-e2e.sh
+
 The target adapter uses the MiniJAM SDK beside this repository by default. Set
 `JAMSCRIPT_MINIJAM_SDK` or `target.minijam.sdk_root` for another checkout.
 

@@ -1,7 +1,7 @@
-# M5 production client path
+# MiniJAM Client Integration
 
-M5 keeps application semantics in generated JamScript services. The client
-only derives the M4 ABI, creates the opaque SignedActionV1 payload, and
+JamScript application semantics remain in generated services. The client
+derives the JamScript ABI, creates the opaque SignedActionV1 payload, and
 submits one formal Work request.
 
 ## Client package
@@ -49,10 +49,23 @@ code hash, builds one WorkItem, stores its bundle, then submits the opaque
 package through the configured ingress relayer. It does not decode JamScript
 payloads or provide application query execution.
 
-The endpoint also applies an 8 MiB request-body limit and a bounded
-32-request admission semaphore. Public deployments should still place it
-behind per-IP/origin quotas at the edge.
+The endpoint also exposes GET /health/ready after the chain client connects
+and the bundle directory is initialized. It applies an 8 MiB request-body
+limit and a bounded 32-request admission semaphore.
 
 The client reads finalized service storage through the existing
-minijam_getServiceStorageAt method. Queries decode the M4 state value locally
-and return the finalized context used for the read.
+minijam_getServiceStorageAt method. Queries decode the ABI state value
+locally and return the finalized context used for the read.
+
+## Network E2E
+
+Run:
+
+    ./scripts/minijam-network-e2e.sh
+
+The test uses a pinned MiniJAM checkout, starts a real local node, formal Work
+RPC and Workers, provisions a JamScript Service, submits a wallet-signed
+action through the production client path, waits for finalized Work, and
+verifies finalized Service state.
+
+The test does not use the Playground Work endpoint.

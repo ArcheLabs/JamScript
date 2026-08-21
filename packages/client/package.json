@@ -8,7 +8,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:network": "node tests/minijam-network.e2e.mjs"
   },
   "dependencies": {
     "@polkadot/util": "^14.0.1",
