@@ -1,0 +1,12 @@
+diff --git a/crates/state-backend/src/mutators/refine/mod.rs b/crates/state-backend/src/mutators/refine/mod.rs
+index 93e824f..1f84992 100644
+--- a/crates/state-backend/src/mutators/refine/mod.rs
++++ b/crates/state-backend/src/mutators/refine/mod.rs
+@@ -304,6 +304,6 @@ where
+             // 13: p_w[φ11]_y
+             13 => self
+                 .work_package
+                 .items
+-                .get(a)
++                .get(self.item_idx)
+                 .map(|w| w.payload.as_slice().to_vec()),

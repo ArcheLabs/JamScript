@@ -24,6 +24,7 @@ uint32_t jamscript_native_game_replay_v1(const uint8_t *input,
   if (health == 0u || health > 1000u) return 3u;
   if (step_count > MAX_STEPS) return 4u;
   if (step_count > (input_len - 12u) / 4u) return 5u;
+  if (input_len != 12u + step_count * 4u) return 5u;
 
   uint64_t score = (uint64_t)health;
   for (uint32_t index = 0; index < step_count; ++index) {

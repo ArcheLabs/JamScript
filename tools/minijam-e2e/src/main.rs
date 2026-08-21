@@ -31,8 +31,9 @@ use minijam_protocol::{StateOperation, PROTOCOL_VERSION_V1};
 use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
 
 const SERVICE_ID: u32 = 1_000;
-const REFINE_GAS: u64 = 10_000_000;
-const ACCUMULATE_GAS: u64 = 10_000_000;
+const MAX_BLOCK_GAS: u64 = 20_000_000;
+const ITEM_GAS: u64 = 5_000_000;
+const NATIVE_ERROR_BASE: u32 = 0x8000_0000;
 
 #[derive(Default)]
 struct TestState(BTreeMap<[u8; 31], Vec<u8>>);
@@ -182,7 +183,7 @@ fn install_service(state: &mut TestState, blob: &[u8]) -> OpaqueHash {
     let code_hash = OpaqueHash(blake2b(blob));
     let mut info = ServiceInfo::new(
         code_hash,
-        ACCUMULATE_GAS,
+        ITEM_GAS,
         0,
         0,
         TimeSlot(0),
@@ -256,8 +257,8 @@ fn work_input(code_hash: OpaqueHash, payloads: Vec<Vec<u8>>, sequence: u8) -> Wo
             .map(|payload| WorkItem {
                 service: SERVICE_ID,
                 code_hash,
-                refine_gas_limit: REFINE_GAS,
-                accumulate_gas_limit: ACCUMULATE_GAS,
+                refine_gas_limit: ITEM_GAS,
+                accumulate_gas_limit: ITEM_GAS,
                 export_count: 0,
                 payload: ByteSequence::from(payload),
                 import_segments: Vec::new(),
@@ -291,6 +292,8 @@ fn new_state() -> TestState {
 }
 
 fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<u8>>, slot: u32) {
+    let action_count = actions.len();
+    let summary = state_summary(state, &actions);
     let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
     backend.load_tiny_from_db().unwrap();
     let report = compute_work_report::<
@@ -302,9 +305,30 @@ fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<
     >(
         &backend,
         work_input(code_hash, actions, slot as u8),
-        InterpBackend::default(),
+        InterpBackend,
     )
-    .expect("Refine execution");
+    .unwrap_or_else(|error| {
+        panic!("MiniJAM refine failed: slot={slot}, error={error:?}, state={summary}")
+    });
+    let result_summary = report
+        .report
+        .results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| match &result.result {
+            WorkExecResult::Ok(payload) => {
+                match jamscript_runtime_core::decode_refined_action(payload.as_ref()) {
+                    Ok(refined) => format!(
+                        "item={index},sender={:?},nonce={},result={:?}",
+                        refined.sender, refined.nonce, refined.result
+                    ),
+                    Err(error) => format!("item={index},error_payload={error:?}"),
+                }
+            }
+            result => format!("item={index},result={result:?}"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     let report_bytes = report.report.encode();
     drop(backend);
     let output = MiniJamExecutive
@@ -318,15 +342,27 @@ fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<
                 reports: vec![report_bytes.try_into().unwrap()].try_into().unwrap(),
                 preimages: Default::default(),
                 system_ops: Default::default(),
-                max_gas: ACCUMULATE_GAS,
+                max_gas: MAX_BLOCK_GAS,
             },
             state,
         )
-        .expect("Accumulate execution");
+        .unwrap_or_else(|error| {
+            panic!(
+                "MiniJAM accumulate failed: slot={slot}, actions={}, error={error:?}, state={summary}, results=[{result_summary}]",
+                action_count,
+            )
+        });
     state.apply(&output);
 }
 
-fn refine_only(state: &TestState, code_hash: OpaqueHash, action: Vec<u8>, slot: u32) {
+fn refine_native_failure(
+    state: &TestState,
+    code_hash: OpaqueHash,
+    action: Vec<u8>,
+    slot: u32,
+    expected_native_status: u32,
+) {
+    let summary = state_summary(state, std::slice::from_ref(&action));
     let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
     backend.load_tiny_from_db().unwrap();
     let report = compute_work_report::<
@@ -338,20 +374,61 @@ fn refine_only(state: &TestState, code_hash: OpaqueHash, action: Vec<u8>, slot: 
     >(
         &backend,
         work_input(code_hash, vec![action], slot as u8),
-        InterpBackend::default(),
+        InterpBackend,
     )
-    .expect("Refine execution");
+    .unwrap_or_else(|error| {
+        panic!(
+            "MiniJAM refine failed: slot={slot}, error={error:?}, state={}",
+            summary,
+        )
+    });
     match &report.report.results[0].result {
         WorkExecResult::Ok(payload) => {
-            assert!(jamscript_runtime_core::decode_refined_action(payload.as_ref()).is_err());
+            let expected = (NATIVE_ERROR_BASE | expected_native_status).to_le_bytes();
+            let actual: &[u8] = payload.as_ref();
+            assert_eq!(
+                actual,
+                expected.as_slice(),
+                "native error payload: slot={slot}, expected={expected:?}, actual={actual:?}, state={summary}"
+            );
         }
-        WorkExecResult::BadCode
-        | WorkExecResult::CodeOversize
-        | WorkExecResult::OutputOversize
-        | WorkExecResult::BadExports
-        | WorkExecResult::OutOfGas
-        | WorkExecResult::Panic => {}
+        result => panic!(
+            "native failure was not an Ok(error payload): slot={slot}, result={result:?}, state={}",
+            summary,
+        ),
     }
+}
+
+fn state_summary(state: &TestState, actions: &[Vec<u8>]) -> String {
+    let items = actions
+        .iter()
+        .enumerate()
+        .map(|(index, encoded)| match SignedActionV1::decode(encoded) {
+            Ok(action) if action.public_key.len() == 32 => {
+                let mut sender = [0u8; 32];
+                sender.copy_from_slice(&action.public_key);
+                format!(
+                    "item={index},sender={sender:?},nonce={},state_nonce={:?},score={:?},result={:?}",
+                    action.nonce,
+                    state.nonce(&sender),
+                    state.score(&sender),
+                    action.payload.get(..4),
+                )
+            }
+            Ok(action) => format!(
+                "item={index},sender_len={},nonce={},result={:?}",
+                action.public_key.len(),
+                action.nonce,
+                action.payload.get(..4),
+            ),
+            Err(error) => format!("item={index},decode_error={error:?}"),
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "service_id={SERVICE_ID},entries={},[{}]",
+        state.0.len(),
+        items.join("; ")
+    )
 }
 
 fn game_run(health: u32, steps: &[(u8, u8)]) -> Vec<u8> {
@@ -416,7 +493,14 @@ fn run_game(blob: &[u8]) {
     assert_eq!(state.nonce(&alice), Some(1));
 
     let (invalid, _) = signed_game(7, 1, 10, game_run(80, &[(9, 20)]));
-    refine_only(&state, code_hash, invalid.encode().unwrap(), 2);
+    refine_native_failure(&state, code_hash, invalid.encode().unwrap(), 2, 9);
+    assert_eq!(state.score(&alice), Some(100));
+    assert_eq!(state.nonce(&alice), Some(1));
+
+    let mut trailing_run = valid_100.clone();
+    trailing_run.push(0);
+    let (trailing, _) = signed_game(7, 1, 10, trailing_run);
+    refine_native_failure(&state, code_hash, trailing.encode().unwrap(), 2, 5);
     assert_eq!(state.score(&alice), Some(100));
     assert_eq!(state.nonce(&alice), Some(1));
 
@@ -459,11 +543,14 @@ fn run_game(blob: &[u8]) {
     let (good_a, sender_a) = signed_game(4, 0, 10, game_run(40, &[(1, 20)]));
     let (bad_b, sender_b) = signed_game(5, 0, 10, game_run(40, &[(8, 20)]));
     let (good_c, sender_c) = signed_game(6, 0, 10, game_run(40, &[(1, 30)]));
-    refine_only(&isolation_state, isolation_hash, bad_b.encode().unwrap(), 1);
     execute_batch(
         &mut isolation_state,
         isolation_hash,
-        vec![good_a.encode().unwrap(), good_c.encode().unwrap()],
+        vec![
+            good_a.encode().unwrap(),
+            bad_b.encode().unwrap(),
+            good_c.encode().unwrap(),
+        ],
         1,
     );
     assert_eq!(isolation_state.nonce(&sender_a), Some(1));

@@ -222,6 +222,36 @@ pub fn selector_hex(selector: [u8; 8]) -> String {
 }
 
 pub fn abi_for(ir: &ServiceIr) -> Abi {
+    let mut types = std::collections::BTreeMap::new();
+    for ty in ir
+        .actions
+        .iter()
+        .flat_map(|action| action.input.iter().map(|field| &field.ty))
+        .chain(ir.states.iter().map(|state| &state.value_type))
+    {
+        let (kind, max) = match ty {
+            TypeIr::U64 => ("u64", None),
+            TypeIr::Address => ("address", Some(32)),
+            TypeIr::U32 => ("u32", None),
+            TypeIr::U128 => ("u128", None),
+            TypeIr::Bool => ("bool", None),
+            TypeIr::Bytes { max } => ("bytes", Some(*max)),
+            TypeIr::String { max } => ("string", Some(*max)),
+            TypeIr::Unsupported(name) => (name.as_str(), None),
+        };
+        types.entry(ty.abi_name()).or_insert_with(|| AbiType {
+            kind: kind.into(),
+            max,
+        });
+    }
+    types.entry("u64".into()).or_insert_with(|| AbiType {
+        kind: "u64".into(),
+        max: None,
+    });
+    types.entry("address".into()).or_insert_with(|| AbiType {
+        kind: "address".into(),
+        max: Some(32),
+    });
     Abi {
         abi_version: ABI_VERSION,
         language_version: LANGUAGE_VERSION.into(),
@@ -279,24 +309,7 @@ pub fn abi_for(ir: &ServiceIr) -> Abi {
                 })
             })
             .collect(),
-        types: [
-            (
-                "u64".into(),
-                AbiType {
-                    kind: "u64".into(),
-                    max: None,
-                },
-            ),
-            (
-                "address".into(),
-                AbiType {
-                    kind: "address".into(),
-                    max: Some(32),
-                },
-            ),
-        ]
-        .into_iter()
-        .collect(),
+        types,
         state: ir
             .states
             .iter()
@@ -314,8 +327,37 @@ pub fn abi_for(ir: &ServiceIr) -> Abi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn selector_is_stable() {
         assert_eq!(action_selector("increment"), action_selector("increment"));
+    }
+
+    #[test]
+    fn abi_emits_bounded_bytes_descriptor() {
+        let abi = abi_for(&ServiceIr {
+            package_name: "game".into(),
+            package_version: "0.1.0".into(),
+            states: Vec::new(),
+            actions: vec![ActionIr {
+                name: "submit".into(),
+                auth: AuthKind::Wallet,
+                input: vec![FieldIr {
+                    name: "run".into(),
+                    ty: TypeIr::Bytes { max: 64 },
+                }],
+                compute: ComputeIr::ReturnInteger { value: 1 },
+                commit: None,
+            }],
+            queries: Vec::new(),
+            native_imports: Vec::new(),
+        });
+        assert_eq!(
+            abi.types.get("Bytes<64>"),
+            Some(&AbiType {
+                kind: "bytes".into(),
+                max: Some(64),
+            })
+        );
     }
 }

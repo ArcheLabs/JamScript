@@ -6,6 +6,7 @@ output="$(mktemp -d "${TMPDIR:-/tmp}/jamscript-e2e.XXXXXX")"
 trap 'rm -rf "$output"' EXIT
 
 cd "$root"
+./scripts/prepare-minijam-client.sh
 cargo run --locked --offline -p jamscript-cli -- build examples/counter --output "$output"
 
 game_output="$output/game"
@@ -28,6 +29,7 @@ rg -q 'native/game/replay.c' "$game_output/build.json"
 rg -q 'jamscript_native_game_replay_v1' "$game_output/generated_service.rs"
 rg -q 'best-score/v1' "$game_output/service.abi.json"
 rg -q 'getBestScore' "$game_output/service.abi.json"
+rg -q '"Bytes<262144>"' "$game_output/service.abi.json"
 
 cargo run --locked --offline \
   --manifest-path tools/minijam-e2e/Cargo.toml -- "$output/service.blob" "$game_output/service.blob"

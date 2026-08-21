@@ -30,6 +30,7 @@ jobs:
           repository: ArcheLabs/minijam-client
           ref: 1f96ebf46e11a489b7317e6f7768e37ed91ee6f7
           path: minijam-client
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-05-02
