@@ -294,43 +294,59 @@ fn new_state() -> TestState {
 fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<u8>>, slot: u32) {
     let action_count = actions.len();
     let summary = state_summary(state, &actions);
-    let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
-    backend.load_tiny_from_db().unwrap();
-    let report = compute_work_report::<
-        TinySpec,
-        MiniJamDb<'_>,
-        StateBackend<TinySpec, MiniJamDb<'_>>,
-        InterpBackend,
-        InnerEngine<InterpBackend>,
-    >(
-        &backend,
-        work_input(code_hash, actions, slot as u8),
-        InterpBackend,
-    )
-    .unwrap_or_else(|error| {
-        panic!("MiniJAM refine failed: slot={slot}, error={error:?}, state={summary}")
-    });
-    let result_summary = report
-        .report
-        .results
-        .iter()
-        .enumerate()
-        .map(|(index, result)| match &result.result {
-            WorkExecResult::Ok(payload) => {
-                match jamscript_runtime_core::decode_refined_action(payload.as_ref()) {
-                    Ok(refined) => format!(
-                        "item={index},sender={:?},nonce={},result={:?}",
-                        refined.sender, refined.nonce, refined.result
-                    ),
-                    Err(error) => format!("item={index},error_payload={error:?}"),
-                }
-            }
-            result => format!("item={index},result={result:?}"),
-        })
+    let mut report_bytes = Vec::with_capacity(actions.len());
+    let mut result_summaries = Vec::with_capacity(actions.len());
+    for (report_index, action) in actions.into_iter().enumerate() {
+        let action_summary = state_summary(state, std::slice::from_ref(&action));
+        let (encoded, result_summary) = {
+            let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
+            backend.load_tiny_from_db().unwrap();
+            let report = compute_work_report::<
+                TinySpec,
+                MiniJamDb<'_>,
+                StateBackend<TinySpec, MiniJamDb<'_>>,
+                InterpBackend,
+                InnerEngine<InterpBackend>,
+            >(
+                &backend,
+                work_input(code_hash, vec![action], slot as u8),
+                InterpBackend,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "MiniJAM refine failed: slot={slot}, report={report_index}, error={error:?}, state={action_summary}"
+                )
+            });
+            let result_summary = report
+                .report
+                .results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| match &result.result {
+                    WorkExecResult::Ok(payload) => {
+                        match jamscript_runtime_core::decode_refined_action(payload.as_ref()) {
+                            Ok(refined) => format!(
+                                "item={index},sender={:?},nonce={},result={:?}",
+                                refined.sender, refined.nonce, refined.result
+                            ),
+                            Err(error) => format!("item={index},error_payload={error:?}"),
+                        }
+                    }
+                    result => format!("item={index},result={result:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            (report.report.encode(), result_summary)
+        };
+        report_bytes.push(encoded);
+        result_summaries.push(format!("report={report_index}, {result_summary}"));
+    }
+    let reports = report_bytes
+        .into_iter()
+        .map(|bytes| bytes.try_into().unwrap())
         .collect::<Vec<_>>()
-        .join("; ");
-    let report_bytes = report.report.encode();
-    drop(backend);
+        .try_into()
+        .unwrap();
     let output = MiniJamExecutive
         .execute(
             MiniJamExecutionInput {
@@ -339,7 +355,7 @@ fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<
                 parent_hash: [0; 32],
                 parent_state_root: [0; 32],
                 entropy: [0; 32],
-                reports: vec![report_bytes.try_into().unwrap()].try_into().unwrap(),
+                reports,
                 preimages: Default::default(),
                 system_ops: Default::default(),
                 max_gas: MAX_BLOCK_GAS,
@@ -348,8 +364,9 @@ fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<
         )
         .unwrap_or_else(|error| {
             panic!(
-                "MiniJAM accumulate failed: slot={slot}, actions={}, error={error:?}, state={summary}, results=[{result_summary}]",
+                "MiniJAM accumulate failed: slot={slot}, actions={}, error={error:?}, state={summary}, results=[{}]",
                 action_count,
+                result_summaries.join("; "),
             )
         });
     state.apply(&output);

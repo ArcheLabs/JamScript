@@ -6,7 +6,6 @@ output="$(mktemp -d "${TMPDIR:-/tmp}/jamscript-e2e.XXXXXX")"
 trap 'rm -rf "$output"' EXIT
 
 cd "$root"
-./scripts/prepare-minijam-client.sh
 cargo run --locked --offline -p jamscript-cli -- build examples/counter --output "$output"
 
 game_output="$output/game"
