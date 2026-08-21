@@ -1,0 +1,27 @@
+[package]
+name = "jamscript-minijam-e2e"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+jam-codec = { version = "0.1.1", default-features = false, features = ["derive"] }
+jambda-minijam-executive = { path = "../../../minijam-client/external/jambda/crates/minijam-executive", features = ["std"] }
+jambda-refine = { path = "../../../minijam-client/external/jambda/crates/refine" }
+jambda-state-backend = { path = "../../../minijam-client/external/jambda/crates/state-backend", features = ["std"] }
+jamscript-crypto = { path = "../../crates/jamscript-crypto" }
+jamscript-ir = { path = "../../crates/jamscript-ir" }
+jamscript-protocol = { path = "../../crates/jamscript-protocol" }
+jamscript-runtime-core = { path = "../../crates/jamscript-runtime-core" }
+jp-core-primitives = { path = "../../../minijam-client/external/jambda/crates/core-primitives" }
+jp-vm-engine = { path = "../../../minijam-client/external/jambda/vm/engine" }
+jp-vm-interp = { path = "../../../minijam-client/external/jambda/vm/interp", features = ["std"] }
+minijam-jamcore-api = { path = "../../../minijam-client/crates/minijam-jamcore-api" }
+minijam-protocol = { path = "../../../minijam-client/crates/minijam-protocol" }
+parity-scale-codec = { version = "3.7.5", default-features = false }
+schnorrkel = { version = "0.11.5", default-features = false, features = ["std"] }
+
+[patch.crates-io]
+minijam-jamcore-api = { path = "../../../minijam-client/crates/minijam-jamcore-api" }
+minijam-protocol = { path = "../../../minijam-client/crates/minijam-protocol" }

@@ -32,10 +32,8 @@ M3.5 adds the no_std runtime boundary, wallet-envelope verification in the
 generated Refine entry point, host-backed Accumulate nonce persistence, and
 length-delimited state keys. Configure `target.minijam.service_id` and
 `target.minijam.genesis_hash` when building a wallet service. The current
-MiniJAM SDK exposes payload, result, and storage calls but no authoritative
-current-slot call; therefore expiry is intentionally rejected with the
-deterministic `AuthoritativeTickUnavailable` code until the SDK provides that
-standard context.
+MiniJAM Accumulate receives the authoritative slot through the standard VM
+initialization input; Refine remains free of durable nonce and expiry checks.
 
 The supplied specification is a product specification: its security and
 determinism requirements are implementation requirements, while examples and

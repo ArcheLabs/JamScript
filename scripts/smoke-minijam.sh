@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-output="$(mktemp -d "${TMPDIR:-/tmp}/jamscript-e2e.XXXXXX")"
+output="$(mktemp -d "${TMPDIR:-/tmp}/jamscript-smoke.XXXXXX")"
 trap 'rm -rf "$output"' EXIT
 
 cd "$root"
@@ -17,5 +17,4 @@ rg -q '"minijam_sdk_revision"' "$output/build.json"
 rg -q 'minijam_storage_write' "$output/generated_service.rs"
 rg -q 'verify_signed_action' "$output/generated_service.rs"
 
-cargo run --locked --offline \
-  --manifest-path tools/minijam-e2e/Cargo.toml -- "$output/service.blob"
+echo "MiniJAM artifact smoke passed."

@@ -24,7 +24,6 @@ pub enum RuntimeError {
     Expired = 9,
     NonceMismatch = 10,
     UnsupportedSigner = 11,
-    AuthoritativeTickUnavailable = 13,
     OutputTooLarge = 14,
 }
 
@@ -113,7 +112,6 @@ pub fn verify_signed_action<'a>(
     expected_genesis_hash: [u8; 32],
     expected_service_id: u32,
     expected_action_selector: [u8; 8],
-    authoritative_tick: Option<u64>,
 ) -> Result<VerifiedAction<'a>, RuntimeError> {
     if action.version != 1 {
         return Err(RuntimeError::UnsupportedVersion);
@@ -126,10 +124,6 @@ pub fn verify_signed_action<'a>(
     }
     if action.action_selector != expected_action_selector {
         return Err(RuntimeError::UnknownAction);
-    }
-    let tick = authoritative_tick.ok_or(RuntimeError::AuthoritativeTickUnavailable)?;
-    if tick > action.valid_until {
-        return Err(RuntimeError::Expired);
     }
     if action.signer_scheme != 0 {
         return Err(RuntimeError::UnsupportedSigner);
@@ -151,6 +145,14 @@ pub fn verify_signed_action<'a>(
         valid_until: action.valid_until,
         payload: action.payload,
     })
+}
+
+pub fn check_expiry(valid_until: u64, authoritative_tick: u64) -> Result<(), RuntimeError> {
+    if authoritative_tick > valid_until {
+        Err(RuntimeError::Expired)
+    } else {
+        Ok(())
+    }
 }
 
 fn signing_digest(action: &SignedActionView<'_>) -> [u8; 32] {
@@ -357,9 +359,9 @@ mod tests {
             [1; 32],
             182,
             [3; 8],
-            Some(10),
         )
         .unwrap();
+        check_expiry(verified.valid_until, 10).unwrap();
         assert_eq!(verified.nonce, 4);
         assert_eq!(verified.payload, 7u64.to_le_bytes());
     }

@@ -87,7 +87,13 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
 }}
 
 #[no_mangle]
-pub extern "C" fn minijam_accumulate() {{
+pub extern "C" fn minijam_accumulate(init_input: *const u8, init_size: usize) {{
+    let init_input = unsafe {{ core::slice::from_raw_parts(init_input, init_size) }};
+    let mut init_offset = 0usize;
+    let authoritative_tick = match read_fnencode(init_input, &mut init_offset) {{
+        Ok(value) => value,
+        Err(_) => return,
+    }};
     let count = unsafe {{ minijam_result_count() }};
     for index in 0..count {{
         let mut size = 0usize;
@@ -95,16 +101,41 @@ pub extern "C" fn minijam_accumulate() {{
         if status != 0 {{ continue; }}
         let refined = unsafe {{ core::slice::from_raw_parts(RESULT.as_ptr(), size) }};
         let Ok(action) = jamscript_runtime_core::decode_refined_action(refined) else {{ continue; }};
+        if jamscript_runtime_core::check_expiry(action.valid_until, authoritative_tick).is_err() {{ continue; }}
         let key = jamscript_runtime_core::state_key(SERVICE_ID, jamscript_runtime_core::NONCE_SCHEMA_V1, &action.sender);
         let mut nonce_bytes = [0u8; 8];
         let mut nonce_size = 0usize;
         let read_status = unsafe {{ minijam_storage_read(key.as_ptr(), key.len(), nonce_bytes.as_mut_ptr(), nonce_bytes.len(), &mut nonce_size) }};
-        let expected = if read_status == 0 && nonce_size == 8 {{ u64::from_le_bytes(nonce_bytes) }} else {{ 0 }};
+        let expected = match read_status {{
+            1 => 0,
+            0 if nonce_size == 8 => u64::from_le_bytes(nonce_bytes),
+            _ => accumulate_failure(),
+        }};
         if action.nonce != expected {{ continue; }}
         let Some(next) = expected.checked_add(1) else {{ continue; }};
         let next_bytes = next.to_le_bytes();
-        let _ = unsafe {{ minijam_storage_write(key.as_ptr(), key.len(), next_bytes.as_ptr(), next_bytes.len()) }};
+        let write_status = unsafe {{ minijam_storage_write(key.as_ptr(), key.len(), next_bytes.as_ptr(), next_bytes.len()) }};
+        if write_status != 0 {{ accumulate_failure(); }}
     }}
+}}
+
+fn read_fnencode(input: &[u8], offset: &mut usize) -> Result<u64, ()> {{
+    let first = *input.get(*offset).ok_or(())?;
+    *offset += 1;
+    if first < 0x80 {{ return Ok(first as u64); }}
+    let mut length = 0usize;
+    while length < 8 && (first & (0x80u8 >> length)) != 0 {{ length += 1; }}
+    if length == 0 || length > 7 || input.len().saturating_sub(*offset) < length {{ return Err(()); }}
+    let mut low = 0u64;
+    for index in 0..length {{
+        low |= (*input.get(*offset + index).ok_or(())? as u64) << (8 * index);
+    }}
+    *offset += length;
+    Ok(((first as u64 & (0x7fu64 >> length)) << (8 * length)) | low)
+}}
+
+fn accumulate_failure() -> ! {{
+    loop {{ core::hint::spin_loop(); }}
 }}
 
 fn refine_payload(input: &[u8]) -> Result<usize, u32> {{
@@ -155,7 +186,7 @@ fn auth_setup(action: &ActionIr, setup: &str) -> Result<String, String> {
             "let computed: Result<u64, ()> = (|| {{ {setup} Ok(value) }})();\n    let value = computed.map_err(|_| 1u32)?;\n    let bytes = value.to_le_bytes();\n    unsafe {{ OUTPUT[..8].copy_from_slice(&bytes); }}\n    Ok(8)"
         )),
         AuthKind::Wallet => Ok(format!(
-            "let signed = jamscript_runtime_core::decode_signed_action(input).map_err(|error| error as u32)?;\n    let verified = jamscript_runtime_core::verify_signed_action(signed, GENESIS_HASH, SERVICE_ID, ACTION_SELECTOR, None).map_err(|error| error as u32)?;\n    let input = verified.payload;\n    let computed: Result<u64, ()> = (|| {{ {setup} Ok(value) }})();\n    let value = computed.map_err(|_| 1u32)?;\n    let bytes = value.to_le_bytes();\n    let size = jamscript_runtime_core::encode_refined_action(&verified, &bytes, unsafe {{ &mut OUTPUT }}).map_err(|error| error as u32)?;\n    Ok(size)"
+            "let signed = jamscript_runtime_core::decode_signed_action(input).map_err(|error| error as u32)?;\n    let verified = jamscript_runtime_core::verify_signed_action(signed, GENESIS_HASH, SERVICE_ID, ACTION_SELECTOR).map_err(|error| error as u32)?;\n    let input = verified.payload;\n    let computed: Result<u64, ()> = (|| {{ {setup} Ok(value) }})();\n    let value = computed.map_err(|_| 1u32)?;\n    let bytes = value.to_le_bytes();\n    let size = jamscript_runtime_core::encode_refined_action(&verified, &bytes, unsafe {{ &mut OUTPUT }}).map_err(|error| error as u32)?;\n    Ok(size)"
         )),
     }
 }
@@ -217,8 +248,11 @@ mod tests {
         .unwrap();
         assert!(source.contains("verify_signed_action"));
         assert!(source.contains("minijam_storage_write"));
-        assert!(source.contains(
-            "verify_signed_action(signed, GENESIS_HASH, SERVICE_ID, ACTION_SELECTOR, None)"
-        ));
+        assert!(source
+            .contains("verify_signed_action(signed, GENESIS_HASH, SERVICE_ID, ACTION_SELECTOR)"));
+        assert!(source.contains("read_fnencode(init_input"));
+        assert!(source.contains("0 if nonce_size == 8"));
+        assert!(source.contains("write_status != 0"));
+        assert!(source.contains("check_expiry(action.valid_until, authoritative_tick)"));
     }
 }
