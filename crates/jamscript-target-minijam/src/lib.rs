@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use jamscript_codegen_rust::generate_no_std_rust;
+use jamscript_codegen_rust::{generate_no_std_rust_with_context, MiniJamContext};
 use jamscript_ir::{abi_for, ServiceIr};
 use serde::Serialize;
 use std::{
@@ -17,6 +17,10 @@ pub struct BuildMetadata {
     pub abi_version: u32,
     pub target_adapter_version: String,
     pub pvm_toolchain: String,
+    pub rust_toolchain: String,
+    pub clang_version: String,
+    pub minijam_sdk_revision: String,
+    pub converter_revision: String,
     pub source_hash: String,
     pub abi_hash: String,
     pub code_hash: Option<String>,
@@ -40,19 +44,30 @@ impl MiniJamTarget {
         }
     }
 
-    pub fn emit_generated_source(&self, ir: &ServiceIr, output: &Path) -> Result<()> {
+    pub fn emit_generated_source(
+        &self,
+        ir: &ServiceIr,
+        context: MiniJamContext,
+        output: &Path,
+    ) -> Result<()> {
         fs::write(
             output,
-            generate_no_std_rust(ir).map_err(|error| anyhow::anyhow!(error))?,
+            generate_no_std_rust_with_context(ir, context)
+                .map_err(|error| anyhow::anyhow!(error))?,
         )
         .with_context(|| format!("writing {}", output.display()))?;
         Ok(())
     }
 
-    pub fn build_probe(&self, ir: &ServiceIr, output_dir: &Path) -> Result<BuildMetadata> {
+    pub fn build_probe(
+        &self,
+        ir: &ServiceIr,
+        context: MiniJamContext,
+        output_dir: &Path,
+    ) -> Result<BuildMetadata> {
         fs::create_dir_all(output_dir)?;
         let generated = output_dir.join("generated_service.rs");
-        self.emit_generated_source(ir, &generated)?;
+        self.emit_generated_source(ir, context, &generated)?;
         let abi = abi_for(ir);
         fs::write(
             output_dir.join("service.abi.json"),
@@ -63,30 +78,33 @@ impl MiniJamTarget {
         let object = output_dir.join("generated_service.o");
         let guest_project = tempdir().context("creating Rust guest project")?;
         fs::create_dir_all(guest_project.path().join("src"))?;
+        let runtime_core = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../jamscript-runtime-core")
+            .canonicalize()?;
         fs::write(
             guest_project.path().join("Cargo.toml"),
-            "[package]\nname = \"jamscript_guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"lib\"]\n",
+            format!(
+                "[package]\nname = \"jamscript_guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"staticlib\"]\n[dependencies]\njamscript-runtime-core = {{ path = \"{}\", default-features = false }}\n",
+                runtime_core.display()
+            ),
         )?;
         fs::copy(&generated, guest_project.path().join("src/lib.rs"))?;
         let mut rust_build = Command::new("cargo");
         rust_build.args([
-            "+nightly",
+            "+nightly-2026-05-02",
             "-Z",
             "build-std=core",
             "-Z",
             "json-target-spec",
-            "rustc",
+            "build",
             "--release",
             "--target",
             self.rust_target.to_str().unwrap(),
             "--manifest-path",
             guest_project.path().join("Cargo.toml").to_str().unwrap(),
-            "--",
-            "-C",
-            "opt-level=z",
-            "-C",
-            "panic=abort",
-            "--emit=obj",
+            "--offline",
+            "-p",
+            "jamscript_guest",
         ]);
         let status = rust_build
             .status()
@@ -97,18 +115,16 @@ impl MiniJamTarget {
                 self.rust_target.display()
             );
         }
-        let guest_target = guest_project
+        let guest_library = guest_project
             .path()
             .join("target")
             .join("riscv64emac-unknown-none")
             .join("release")
-            .join("deps");
-        let guest_object = fs::read_dir(&guest_target)
-            .with_context(|| format!("reading Rust guest output {}", guest_target.display()))?
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .find(|path| path.extension().is_some_and(|extension| extension == "o"))
-            .ok_or_else(|| anyhow::anyhow!("Rust guest build did not emit an object file"))?;
-        fs::copy(guest_object, &object)?;
+            .join("libjamscript_guest.a");
+        if !guest_library.is_file() {
+            bail!("Rust guest build did not emit {}", guest_library.display());
+        }
+        fs::copy(guest_library, &object)?;
         let clang = std::env::var_os("JAMSCRIPT_CLANG")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-20/bin/clang"));
@@ -202,6 +218,16 @@ impl MiniJamTarget {
             )?;
         }
         fs::copy(&polkavm, output_dir.join("service.pvm"))?;
+        let clang_version = Command::new(&clang)
+            .arg("--version")
+            .output()
+            .context("reading Clang version")?;
+        let clang_version = String::from_utf8_lossy(&clang_version.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let sdk_revision = git_revision(&self.sdk_root)?;
         Ok(BuildMetadata {
             language_version: "0.1".into(),
             compiler_version: env!("CARGO_PKG_VERSION").into(),
@@ -210,6 +236,10 @@ impl MiniJamTarget {
             target_adapter_version: "minijam-0.1".into(),
             pvm_toolchain:
                 "custom riscv64emac/lp64e Rust target + clang 20 / polkavm-linker-0.30.0".into(),
+            rust_toolchain: "nightly-2026-05-02".into(),
+            clang_version,
+            minijam_sdk_revision: sdk_revision.clone(),
+            converter_revision: sdk_revision,
             source_hash,
             abi_hash,
             code_hash: Some(hash_file(&blob)?),
@@ -242,4 +272,15 @@ fn hash_file(path: &Path) -> Result<String> {
             .map(|b| format!("{b:02x}"))
             .collect::<String>()
     ))
+}
+
+fn git_revision(path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["-C", path.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .with_context(|| format!("reading git revision for {}", path.display()))?;
+    if !output.status.success() {
+        bail!("{} is not a git checkout", path.display());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

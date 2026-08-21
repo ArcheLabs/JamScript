@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use jamscript_codegen_rust::generate_no_std_rust;
+use jamscript_codegen_rust::{generate_no_std_rust_with_context, MiniJamContext};
 use jamscript_ir::abi_for;
 use jamscript_parser::parse_service;
 use jamscript_target_minijam::MiniJamTarget;
@@ -43,11 +43,13 @@ enum CommandKind {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     package: Package,
     target: Option<Target>,
 }
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Package {
     name: String,
     version: String,
@@ -55,12 +57,16 @@ struct Package {
     language: String,
 }
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Target {
     minijam: Option<MiniJamConfig>,
 }
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MiniJamConfig {
     sdk_root: Option<String>,
+    service_id: Option<u32>,
+    genesis_hash: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -106,7 +112,7 @@ fn new_project(name: &str) -> Result<()> {
         bail!("directory already exists: {}", root.display());
     }
     fs::create_dir_all(root.join("src"))?;
-    fs::write(root.join("jamscript.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/service.ts\"\nlanguage = \"0.1\"\n\n[target.minijam]\nnetwork = \"stage0\"\n"))?;
+    fs::write(root.join("jamscript.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/service.ts\"\nlanguage = \"0.1\"\n"))?;
     fs::write(root.join("src/service.ts"), "import { action, wallet, u64 } from \"jam\";\n\nexport const increment = action({\n  auth: wallet(),\n  input: { value: u64 },\n  compute(ctx, input) {\n    return input.value + 1;\n  },\n});\n")?;
     println!("created {}", root.display());
     Ok(())
@@ -114,6 +120,18 @@ fn new_project(name: &str) -> Result<()> {
 
 fn build(path: &Path, output: &Path) -> Result<()> {
     let (manifest, ir) = load(path)?;
+    let minijam = manifest
+        .target
+        .as_ref()
+        .and_then(|target| target.minijam.as_ref());
+    let context = MiniJamContext {
+        service_id: minijam.and_then(|target| target.service_id).unwrap_or(0),
+        genesis_hash: minijam
+            .and_then(|target| target.genesis_hash.as_deref())
+            .map(parse_hash)
+            .transpose()?
+            .unwrap_or([0; 32]),
+    };
     fs::create_dir_all(output)?;
     let abi = abi_for(&ir);
     fs::write(
@@ -122,12 +140,10 @@ fn build(path: &Path, output: &Path) -> Result<()> {
     )?;
     fs::write(
         output.join("generated_service.rs"),
-        generate_no_std_rust(&ir).map_err(|e| anyhow::anyhow!(e))?,
+        generate_no_std_rust_with_context(&ir, context).map_err(|e| anyhow::anyhow!(e))?,
     )?;
-    let sdk_root = manifest
-        .target
-        .and_then(|target| target.minijam)
-        .and_then(|target| target.sdk_root)
+    let sdk_root = minijam
+        .and_then(|target| target.sdk_root.as_deref())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("JAMSCRIPT_MINIJAM_SDK").map(PathBuf::from))
         .or_else(|| {
@@ -145,7 +161,7 @@ fn build(path: &Path, output: &Path) -> Result<()> {
             )
         })?;
     let metadata = MiniJamTarget::from_sdk_root(sdk_root)
-        .build_probe(&ir, output)
+        .build_probe(&ir, context, output)
         .context("MiniJAM target build")?;
     fs::write(
         output.join("build.json"),
@@ -153,4 +169,17 @@ fn build(path: &Path, output: &Path) -> Result<()> {
     )?;
     println!("built {}", output.display());
     Ok(())
+}
+
+fn parse_hash(value: &str) -> Result<[u8; 32]> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.len() != 64 {
+        bail!("genesis_hash must contain exactly 32 bytes of hexadecimal data");
+    }
+    let mut hash = [0u8; 32];
+    for (index, byte) in hash.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .with_context(|| "genesis_hash contains invalid hexadecimal data")?;
+    }
+    Ok(hash)
 }

@@ -1,3 +1,5 @@
+#![no_std]
+
 use blake2b_simd::Params;
 use schnorrkel::{context::signing_context, PublicKey, Signature};
 use thiserror::Error;

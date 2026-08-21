@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["std"]
+std = ["schnorrkel/std", "thiserror/std"]
+
 [dependencies]
 blake2b_simd.workspace = true
-schnorrkel.workspace = true
-thiserror.workspace = true
+schnorrkel = { workspace = true, default-features = false }
+thiserror = { workspace = true, default-features = false }

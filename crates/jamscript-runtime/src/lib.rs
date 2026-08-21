@@ -9,11 +9,13 @@ pub type StateKey = [u8; 32];
 
 pub fn state_key(service_id: u32, schema_id: &[u8], canonical_user_key: &[u8]) -> StateKey {
     let mut preimage = Vec::with_capacity(
-        STATE_KEY_DOMAIN_V1.len() + 4 + schema_id.len() + canonical_user_key.len(),
+        STATE_KEY_DOMAIN_V1.len() + 4 + 4 + schema_id.len() + 4 + canonical_user_key.len(),
     );
     preimage.extend_from_slice(STATE_KEY_DOMAIN_V1);
     preimage.extend_from_slice(&service_id.to_le_bytes());
+    preimage.extend_from_slice(&(schema_id.len() as u32).to_le_bytes());
     preimage.extend_from_slice(schema_id);
+    preimage.extend_from_slice(&(canonical_user_key.len() as u32).to_le_bytes());
     preimage.extend_from_slice(canonical_user_key);
     jamscript_crypto::blake2_256(&preimage)
 }
@@ -322,5 +324,6 @@ mod tests {
             state_key(1, RUNTIME_NONCE_NAMESPACE_V1, b"alice"),
             state_key(1, b"scores", b"alice")
         );
+        assert_ne!(state_key(1, b"a", b"bc"), state_key(1, b"ab", b"c"));
     }
 }
