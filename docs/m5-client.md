@@ -16,6 +16,21 @@ SignedActionV1 signing digest. The digest contains the
 JAMSCRIPT_ACTION_V1 domain, while sr25519 verification uses the standard
 Substrate context.
 
+For production, compose the two endpoints explicitly. Node-backed reads stay
+on the MiniJAM node, while Work submission and status tracking use the
+standalone formal RPC:
+
+    const transport = new SplitRpcTransport(
+      new FetchRpcTransport("https://node.example"),
+      new FetchRpcTransport("https://formal.example"),
+    );
+    const client = new JamScriptClient(deployment, transport);
+
+SplitRpcTransport routes chain_getBlockHash,
+minijam_getFinalizedContext, and minijam_getServiceStorageAt to the node,
+and routes only minijam_submitWorkV1 and minijam_getWorkStatusV1 to the
+formal RPC.
+
 ## Formal Work RPC
 
 Run the standalone service next to a MiniJAM node and configure the worker

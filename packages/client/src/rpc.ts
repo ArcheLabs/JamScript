@@ -49,6 +49,23 @@ export interface RpcTransport {
   call<T>(method: string, params?: unknown): Promise<T>;
 }
 
+const FORMAL_WORK_METHODS = new Set([
+  "minijam_submitWorkV1",
+  "minijam_getWorkStatusV1",
+]);
+
+export class SplitRpcTransport implements RpcTransport {
+  constructor(
+    private readonly node: RpcTransport,
+    private readonly work: RpcTransport,
+  ) {}
+
+  call<T>(method: string, params?: unknown): Promise<T> {
+    const transport = FORMAL_WORK_METHODS.has(method) ? this.work : this.node;
+    return transport.call<T>(method, params);
+  }
+}
+
 export class FetchRpcTransport implements RpcTransport {
   private nextId = 1;
 
