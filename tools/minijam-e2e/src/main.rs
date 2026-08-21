@@ -71,6 +71,17 @@ impl TestState {
             .get(&storage_key)
             .map(|value| u64::from_le_bytes(value.as_slice().try_into().unwrap()))
     }
+
+    fn score(&self, sender: &[u8; 32]) -> Option<u64> {
+        let key = state_key(SERVICE_ID, b"best-score/v1", sender);
+        let storage_key =
+            StoreKey::new_service_storage_key(&SERVICE_ID, &ByteSequence::from(key.to_vec()))
+                .to_state_key()
+                .0;
+        self.0
+            .get(&storage_key)
+            .map(|value| u64::from_le_bytes(value.as_slice().try_into().unwrap()))
+    }
 }
 
 impl ProtocolStateReader for TestState {
@@ -200,18 +211,24 @@ fn install_service(state: &mut TestState, blob: &[u8]) -> OpaqueHash {
     code_hash
 }
 
-fn action(seed: u8, nonce: u64, valid_until: u64) -> (SignedActionV1, [u8; 32]) {
+fn action(
+    seed: u8,
+    nonce: u64,
+    valid_until: u64,
+    selector: [u8; 8],
+    payload: Vec<u8>,
+) -> (SignedActionV1, [u8; 32]) {
     let keypair = MiniSecretKey::from_bytes(&[seed; 32])
         .unwrap()
         .expand_to_keypair(ExpansionMode::Ed25519);
     let mut action = SignedActionV1::unsigned(
         [0; 32],
         SERVICE_ID,
-        jamscript_ir::action_selector("increment"),
+        selector,
         keypair.public.to_bytes(),
         nonce,
         valid_until,
-        7u64.to_le_bytes().to_vec(),
+        payload,
     )
     .unwrap();
     let signature = keypair.sign(signing_context(SR25519_CONTEXT).bytes(&action.signing_digest()));
@@ -219,7 +236,8 @@ fn action(seed: u8, nonce: u64, valid_until: u64) -> (SignedActionV1, [u8; 32]) 
     (action, keypair.public.to_bytes())
 }
 
-fn work_input(code_hash: OpaqueHash, payload: Vec<u8>, sequence: u8) -> WorkReportInput {
+fn work_input(code_hash: OpaqueHash, payloads: Vec<Vec<u8>>, sequence: u8) -> WorkReportInput {
+    let item_count = payloads.len();
     let package = WorkPackage {
         auth_code_host: SYSTEM_SERVICE_ID,
         auth_code_hash: OpaqueHash([0; 32]),
@@ -233,32 +251,31 @@ fn work_input(code_hash: OpaqueHash, payload: Vec<u8>, sequence: u8) -> WorkRepo
         },
         authorization: ByteSequence::from(Vec::new()),
         authorizer_config: ByteSequence::from(Vec::new()),
-        items: vec![WorkItem {
-            service: SERVICE_ID,
-            code_hash,
-            refine_gas_limit: REFINE_GAS,
-            accumulate_gas_limit: ACCUMULATE_GAS,
-            export_count: 0,
-            payload: ByteSequence::from(payload),
-            import_segments: Vec::new(),
-            extrinsic: Vec::new(),
-        }],
+        items: payloads
+            .into_iter()
+            .map(|payload| WorkItem {
+                service: SERVICE_ID,
+                code_hash,
+                refine_gas_limit: REFINE_GAS,
+                accumulate_gas_limit: ACCUMULATE_GAS,
+                export_count: 0,
+                payload: ByteSequence::from(payload),
+                import_segments: Vec::new(),
+                extrinsic: Vec::new(),
+            })
+            .collect(),
     };
     WorkReportInput {
         core_index: 0,
         work_package: Arc::new(package),
-        external_data: Arc::new(vec![Vec::new()]),
-        import_segments: Arc::new(vec![Vec::new()]),
+        external_data: Arc::new(vec![Vec::new(); item_count]),
+        import_segments: Arc::new(vec![Vec::new(); item_count]),
         import_proofs: ImportProofBundle::default(),
     }
 }
 
-fn main() {
-    let blob_path = env::args()
-        .nth(1)
-        .expect("usage: jamscript-minijam-e2e <service.blob>");
-    let blob = fs::read(blob_path).expect("read service blob");
-    let mut state = TestState::from_state(
+fn new_state() -> TestState {
+    TestState::from_state(
         system_service_genesis_state(SystemServiceGenesisConfig {
             code_blob: include_bytes!("../../../../minijam-client/artifacts/system-service.blob")
                 .to_vec(),
@@ -270,58 +287,218 @@ fn main() {
             parent_service: SYSTEM_SERVICE_ID,
         })
         .unwrap(),
-    );
-    let code_hash = install_service(&mut state, &blob);
-    let (_, sender) = action(7, 0, 10);
+    )
+}
 
+fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<u8>>, slot: u32) {
+    let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
+    backend.load_tiny_from_db().unwrap();
+    let report = compute_work_report::<
+        TinySpec,
+        MiniJamDb<'_>,
+        StateBackend<TinySpec, MiniJamDb<'_>>,
+        InterpBackend,
+        InnerEngine<InterpBackend>,
+    >(
+        &backend,
+        work_input(code_hash, actions, slot as u8),
+        InterpBackend::default(),
+    )
+    .expect("Refine execution");
+    let report_bytes = report.report.encode();
+    drop(backend);
+    let output = MiniJamExecutive
+        .execute(
+            MiniJamExecutionInput {
+                protocol_version: PROTOCOL_VERSION_V1,
+                slot,
+                parent_hash: [0; 32],
+                parent_state_root: [0; 32],
+                entropy: [0; 32],
+                reports: vec![report_bytes.try_into().unwrap()].try_into().unwrap(),
+                preimages: Default::default(),
+                system_ops: Default::default(),
+                max_gas: ACCUMULATE_GAS,
+            },
+            state,
+        )
+        .expect("Accumulate execution");
+    state.apply(&output);
+}
+
+fn refine_only(state: &TestState, code_hash: OpaqueHash, action: Vec<u8>, slot: u32) {
+    let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
+    backend.load_tiny_from_db().unwrap();
+    let report = compute_work_report::<
+        TinySpec,
+        MiniJamDb<'_>,
+        StateBackend<TinySpec, MiniJamDb<'_>>,
+        InterpBackend,
+        InnerEngine<InterpBackend>,
+    >(
+        &backend,
+        work_input(code_hash, vec![action], slot as u8),
+        InterpBackend::default(),
+    )
+    .expect("Refine execution");
+    match &report.report.results[0].result {
+        WorkExecResult::Ok(payload) => {
+            assert!(jamscript_runtime_core::decode_refined_action(payload.as_ref()).is_err());
+        }
+        WorkExecResult::BadCode
+        | WorkExecResult::CodeOversize
+        | WorkExecResult::OutputOversize
+        | WorkExecResult::BadExports
+        | WorkExecResult::OutOfGas
+        | WorkExecResult::Panic => {}
+    }
+}
+
+fn game_run(health: u32, steps: &[(u8, u8)]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(12 + steps.len() * 4);
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&health.to_le_bytes());
+    payload.extend_from_slice(&(steps.len() as u32).to_le_bytes());
+    for &(opcode, amount) in steps {
+        payload.extend_from_slice(&[opcode, amount, 0, 0]);
+    }
+    payload
+}
+
+fn signed_game(seed: u8, nonce: u64, valid_until: u64, run: Vec<u8>) -> (SignedActionV1, [u8; 32]) {
+    let mut payload = Vec::with_capacity(4 + run.len());
+    payload.extend_from_slice(&(run.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&run);
+    action(
+        seed,
+        nonce,
+        valid_until,
+        jamscript_ir::action_selector("submitRun"),
+        payload,
+    )
+}
+
+fn run_counter(blob: &[u8]) {
+    let mut state = new_state();
+    let code_hash = install_service(&mut state, blob);
+    let selector = jamscript_ir::action_selector("increment");
+    let (_, sender) = action(7, 0, 10, selector, 7u64.to_le_bytes().to_vec());
     for (slot, nonce, valid_until, expected) in [
         (1u32, 0u64, 10u64, 1u64),
         (2, 0, 10, 1),
         (3, 1, 10, 2),
         (11, 2, 10, 2),
     ] {
-        let (signed, action_sender) = action(7, nonce, valid_until);
+        let (signed, action_sender) =
+            action(7, nonce, valid_until, selector, 7u64.to_le_bytes().to_vec());
         assert_eq!(sender, action_sender);
-        let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(&state));
-        backend.load_tiny_from_db().unwrap();
-        let report = compute_work_report::<
-            TinySpec,
-            MiniJamDb<'_>,
-            StateBackend<TinySpec, MiniJamDb<'_>>,
-            InterpBackend,
-            InnerEngine<InterpBackend>,
-        >(
-            &backend,
-            work_input(code_hash, signed.encode().unwrap(), slot as u8),
-            InterpBackend::default(),
-        )
-        .expect("Refine execution");
-        assert!(matches!(
-            report.report.results[0].result,
-            WorkExecResult::Ok(_)
-        ));
-        let output = MiniJamExecutive
-            .execute(
-                MiniJamExecutionInput {
-                    protocol_version: PROTOCOL_VERSION_V1,
-                    slot,
-                    parent_hash: [0; 32],
-                    parent_state_root: [0; 32],
-                    entropy: [0; 32],
-                    reports: vec![report.report.encode().try_into().unwrap()]
-                        .try_into()
-                        .unwrap(),
-                    preimages: Default::default(),
-                    system_ops: Default::default(),
-                    max_gas: ACCUMULATE_GAS,
-                },
-                &state,
-            )
-            .expect("Accumulate execution");
-        state.apply(&output);
+        execute_batch(&mut state, code_hash, vec![signed.encode().unwrap()], slot);
         assert_eq!(state.nonce(&sender), Some(expected));
     }
+}
+
+fn run_game(blob: &[u8]) {
+    let selector = jamscript_ir::action_selector("submitRun");
+    let valid_100 = game_run(80, &[(1, 20)]);
+    let valid_80 = game_run(80, &[]);
+    let valid_150 = game_run(100, &[(1, 50)]);
+    let mut state = new_state();
+    let code_hash = install_service(&mut state, blob);
+    let (signed, alice) = signed_game(7, 0, 10, valid_100.clone());
+    execute_batch(&mut state, code_hash, vec![signed.encode().unwrap()], 1);
+    assert_eq!(state.score(&alice), Some(100));
+    assert_eq!(state.nonce(&alice), Some(1));
+
+    let (mut tampered, _) = signed_game(7, 1, 10, valid_100.clone());
+    tampered.payload[12] ^= 1;
+    execute_batch(&mut state, code_hash, vec![tampered.encode().unwrap()], 2);
+    assert_eq!(state.score(&alice), Some(100));
+    assert_eq!(state.nonce(&alice), Some(1));
+
+    let (invalid, _) = signed_game(7, 1, 10, game_run(80, &[(9, 20)]));
+    refine_only(&state, code_hash, invalid.encode().unwrap(), 2);
+    assert_eq!(state.score(&alice), Some(100));
+    assert_eq!(state.nonce(&alice), Some(1));
+
+    let (replay, _) = signed_game(7, 0, 10, valid_100.clone());
+    execute_batch(&mut state, code_hash, vec![replay.encode().unwrap()], 3);
+    assert_eq!(state.score(&alice), Some(100));
+    assert_eq!(state.nonce(&alice), Some(1));
+
+    let (lower, _) = signed_game(7, 1, 10, valid_80);
+    execute_batch(&mut state, code_hash, vec![lower.encode().unwrap()], 4);
+    assert_eq!(state.score(&alice), Some(100));
+    assert_eq!(state.nonce(&alice), Some(2));
+
+    let (higher, _) = signed_game(7, 2, 10, valid_150.clone());
+    execute_batch(&mut state, code_hash, vec![higher.encode().unwrap()], 5);
+    assert_eq!(state.score(&alice), Some(150));
+    assert_eq!(state.nonce(&alice), Some(3));
+
+    let (expired, _) = signed_game(7, 3, 10, valid_150);
+    execute_batch(&mut state, code_hash, vec![expired.encode().unwrap()], 11);
+    assert_eq!(state.score(&alice), Some(150));
+    assert_eq!(state.nonce(&alice), Some(3));
+
+    let mut batch_state = new_state();
+    let batch_hash = install_service(&mut batch_state, blob);
+    let mut batch = Vec::new();
+    let mut senders = Vec::new();
+    for (seed, score) in [(1u8, 40u8), (2, 50), (3, 60)] {
+        let (item, sender) = signed_game(seed, 0, 10, game_run(40, &[(1, score)]));
+        batch.push(item.encode().unwrap());
+        senders.push(sender);
+    }
+    execute_batch(&mut batch_state, batch_hash, batch, 1);
+    for sender in senders {
+        assert_eq!(batch_state.nonce(&sender), Some(1));
+    }
+
+    let mut isolation_state = new_state();
+    let isolation_hash = install_service(&mut isolation_state, blob);
+    let (good_a, sender_a) = signed_game(4, 0, 10, game_run(40, &[(1, 20)]));
+    let (bad_b, sender_b) = signed_game(5, 0, 10, game_run(40, &[(8, 20)]));
+    let (good_c, sender_c) = signed_game(6, 0, 10, game_run(40, &[(1, 30)]));
+    refine_only(&isolation_state, isolation_hash, bad_b.encode().unwrap(), 1);
+    execute_batch(
+        &mut isolation_state,
+        isolation_hash,
+        vec![good_a.encode().unwrap(), good_c.encode().unwrap()],
+        1,
+    );
+    assert_eq!(isolation_state.nonce(&sender_a), Some(1));
+    assert_eq!(isolation_state.nonce(&sender_b), None);
+    assert_eq!(isolation_state.nonce(&sender_c), Some(1));
+
+    let mut sequential_state = new_state();
+    let sequential_hash = install_service(&mut sequential_state, blob);
+    let (first, sequential_sender) = signed_game(8, 0, 10, game_run(80, &[(1, 20)]));
+    let (second, _) = signed_game(8, 1, 10, game_run(100, &[(1, 50)]));
+    execute_batch(
+        &mut sequential_state,
+        sequential_hash,
+        vec![first.encode().unwrap(), second.encode().unwrap()],
+        1,
+    );
+    assert_eq!(sequential_state.nonce(&sequential_sender), Some(2));
+    assert_eq!(sequential_state.score(&sequential_sender), Some(150));
+    let _ = selector;
+}
+
+fn main() {
+    let mut args = env::args().skip(1);
+    let counter_path = args
+        .next()
+        .expect("usage: jamscript-minijam-e2e <counter.blob> <game.blob>");
+    let game_path = args
+        .next()
+        .expect("usage: jamscript-minijam-e2e <counter.blob> <game.blob>");
+    let counter = fs::read(counter_path).expect("read counter service blob");
+    let game = fs::read(game_path).expect("read game service blob");
+    run_counter(&counter);
     println!(
         "MiniJAM wallet E2E passed: valid nonce, replay rejection, next nonce, expiry rejection."
     );
+    run_game(&game);
+    println!("MiniJAM M4 game E2E passed: canonical bytes, native replay, tamper/native failure isolation, max state, query ABI path, batch nonce semantics.");
 }

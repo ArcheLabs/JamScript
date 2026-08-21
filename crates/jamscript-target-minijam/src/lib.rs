@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use jamscript_codegen_rust::{generate_no_std_rust_with_context, MiniJamContext};
-use jamscript_ir::{abi_for, ServiceIr};
+use jamscript_ir::{abi_for, ServiceIr, NATIVE_ABI_VERSION};
 use serde::Serialize;
 use std::{
     fs,
@@ -24,6 +24,28 @@ pub struct BuildMetadata {
     pub source_hash: String,
     pub abi_hash: String,
     pub code_hash: Option<String>,
+    pub native_abi_version: u32,
+    pub native_modules: Vec<NativeModuleMetadata>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NativeModule {
+    pub name: String,
+    pub sources: Vec<PathBuf>,
+    pub include_dirs: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NativeModuleMetadata {
+    pub name: String,
+    pub language: String,
+    pub sources: Vec<NativeSourceMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NativeSourceMetadata {
+    pub path: String,
+    pub hash: String,
 }
 
 pub struct MiniJamTarget {
@@ -61,9 +83,11 @@ impl MiniJamTarget {
 
     pub fn build_probe(
         &self,
+        project_root: &Path,
         ir: &ServiceIr,
         context: MiniJamContext,
         output_dir: &Path,
+        native_modules: &[NativeModule],
     ) -> Result<BuildMetadata> {
         fs::create_dir_all(output_dir)?;
         let generated = output_dir.join("generated_service.rs");
@@ -164,6 +188,29 @@ impl MiniJamTarget {
                 .arg(&object);
             run(&mut command, &format!("compiling MiniJAM SDK {unit}.c"))?;
         }
+        let mut native_objects = Vec::new();
+        for module in native_modules {
+            for (index, source) in module.sources.iter().enumerate() {
+                let object = work
+                    .path()
+                    .join(format!("native_{}_{}.o", module.name, index));
+                let mut command = Command::new(&clang);
+                command.args(common).arg("-std=c11");
+                for include_dir in &module.include_dirs {
+                    command.arg("-I").arg(include_dir);
+                }
+                command.arg("-c").arg(source).arg("-o").arg(&object);
+                run(
+                    &mut command,
+                    &format!(
+                        "compiling native module {} source {}",
+                        module.name,
+                        source.display()
+                    ),
+                )?;
+                native_objects.push(object);
+            }
+        }
         let elf = work.path().join("service.elf");
         let mut link = Command::new(&clang);
         link.args([
@@ -178,6 +225,9 @@ impl MiniJamTarget {
         ]);
         for unit in ["host", "minijam", "crypto"] {
             link.arg(work.path().join(format!("{unit}.o")));
+        }
+        for object in &native_objects {
+            link.arg(object);
         }
         link.arg(&object).arg("-o").arg(&elf);
         run(&mut link, "linking Rust guest with the MiniJAM SDK")?;
@@ -228,6 +278,29 @@ impl MiniJamTarget {
             .unwrap_or_default()
             .to_string();
         let sdk_revision = git_revision(&self.sdk_root)?;
+        let native_modules = native_modules
+            .iter()
+            .map(|module| {
+                Ok(NativeModuleMetadata {
+                    name: module.name.clone(),
+                    language: "c".into(),
+                    sources: module
+                        .sources
+                        .iter()
+                        .map(|source| {
+                            Ok(NativeSourceMetadata {
+                                path: source
+                                    .strip_prefix(project_root)
+                                    .unwrap_or(source)
+                                    .to_string_lossy()
+                                    .replace('\\', "/"),
+                                hash: hash_file(source)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(BuildMetadata {
             language_version: "0.1".into(),
             compiler_version: env!("CARGO_PKG_VERSION").into(),
@@ -243,6 +316,8 @@ impl MiniJamTarget {
             source_hash,
             abi_hash,
             code_hash: Some(hash_file(&blob)?),
+            native_abi_version: NATIVE_ABI_VERSION,
+            native_modules,
         })
     }
 }

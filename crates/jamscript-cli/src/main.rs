@@ -2,10 +2,11 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use jamscript_codegen_rust::{generate_no_std_rust_with_context, MiniJamContext};
 use jamscript_ir::abi_for;
-use jamscript_parser::parse_service;
-use jamscript_target_minijam::MiniJamTarget;
+use jamscript_parser::parse_service_with_native_modules;
+use jamscript_target_minijam::{MiniJamTarget, NativeModule};
 use serde::Deserialize;
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -47,6 +48,7 @@ enum CommandKind {
 struct Manifest {
     package: Package,
     target: Option<Target>,
+    native: Option<BTreeMap<String, NativeConfig>>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +69,15 @@ struct MiniJamConfig {
     sdk_root: Option<String>,
     service_id: Option<u32>,
     genesis_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeConfig {
+    language: String,
+    sources: Vec<String>,
+    #[serde(default)]
+    include_dirs: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -101,8 +112,18 @@ fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
     let source_path = path.join(&manifest.package.entry);
     let source = fs::read_to_string(&source_path)
         .with_context(|| format!("reading {}", source_path.display()))?;
-    let ir = parse_service(&source, &manifest.package.name, &manifest.package.version)
-        .map_err(|e| anyhow::anyhow!("{}: {e}", source_path.display()))?;
+    let native_modules = manifest
+        .native
+        .as_ref()
+        .map(|modules| modules.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let ir = parse_service_with_native_modules(
+        &source,
+        &manifest.package.name,
+        &manifest.package.version,
+        &native_modules,
+    )
+    .map_err(|e| anyhow::anyhow!("{}: {e}", source_path.display()))?;
     Ok((manifest, ir))
 }
 
@@ -160,8 +181,12 @@ fn build(path: &Path, output: &Path) -> Result<()> {
                 "MiniJAM SDK not found; set target.minijam.sdk_root or JAMSCRIPT_MINIJAM_SDK"
             )
         })?;
+    let project_root = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing project root {}", path.display()))?;
+    let native_modules = resolve_native_modules(&project_root, manifest.native.as_ref())?;
     let metadata = MiniJamTarget::from_sdk_root(sdk_root)
-        .build_probe(&ir, context, output)
+        .build_probe(&project_root, &ir, context, output, &native_modules)
         .context("MiniJAM target build")?;
     fs::write(
         output.join("build.json"),
@@ -169,6 +194,59 @@ fn build(path: &Path, output: &Path) -> Result<()> {
     )?;
     println!("built {}", output.display());
     Ok(())
+}
+
+fn resolve_native_modules(
+    root: &Path,
+    configs: Option<&BTreeMap<String, NativeConfig>>,
+) -> Result<Vec<NativeModule>> {
+    let Some(configs) = configs else {
+        return Ok(Vec::new());
+    };
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalizing project root {}", root.display()))?;
+    configs
+        .iter()
+        .map(|(name, config)| {
+            if config.language != "c" {
+                bail!("native module `{name}` must use language = \"c\"");
+            }
+            if config.sources.is_empty() {
+                bail!("native module `{name}` must declare at least one source");
+            }
+            let sources = config
+                .sources
+                .iter()
+                .map(|value| resolve_project_path(&root, value, "native source"))
+                .collect::<Result<Vec<_>>>()?;
+            let include_dirs = config
+                .include_dirs
+                .iter()
+                .map(|value| resolve_project_path(&root, value, "native include directory"))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(NativeModule {
+                name: name.clone(),
+                sources,
+                include_dirs,
+            })
+        })
+        .collect()
+}
+
+fn resolve_project_path(root: &Path, value: &str, kind: &str) -> Result<PathBuf> {
+    let relative = Path::new(value);
+    if relative.is_absolute() {
+        bail!("{kind} `{value}` must be relative to the project root");
+    }
+    let path = root
+        .join(relative)
+        .canonicalize()
+        .with_context(|| format!("resolving {kind} `{value}`"))?;
+    if !path.starts_with(root) {
+        bail!("{kind} `{value}` escapes the project root");
+    }
+    Ok(path)
 }
 
 fn parse_hash(value: &str) -> Result<[u8; 32]> {
