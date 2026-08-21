@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ArcheLabs/minijam-client
-          ref: 1f96ebf46e11a489b7317e6f7768e37ed91ee6f7
+          ref: 7370681143ee34e5ec42bcfb1140dde5fa3b4695
           path: minijam-client
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
@@ -60,6 +60,8 @@ jobs:
         run: cargo fetch --locked --manifest-path tools/minijam-e2e/Cargo.toml
       - working-directory: JamScript
         run: cargo fmt --manifest-path tools/minijam-e2e/Cargo.toml -- --check
+      - working-directory: minijam-client
+        run: cargo test -p minijam-formal-rpc --locked
       - working-directory: JamScript
         env:
           JAMSCRIPT_MINIJAM_SDK: ../minijam-client

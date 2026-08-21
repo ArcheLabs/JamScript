@@ -34,6 +34,10 @@ code hash, builds one WorkItem, stores its bundle, then submits the opaque
 package through the configured ingress relayer. It does not decode JamScript
 payloads or provide application query execution.
 
+The endpoint also applies an 8 MiB request-body limit and a bounded
+32-request admission semaphore. Public deployments should still place it
+behind per-IP/origin quotas at the edge.
+
 The client reads finalized service storage through the existing
 minijam_getServiceStorageAt method. Queries decode the M4 state value locally
 and return the finalized context used for the read.

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import {
   actionSelector,
+  encodeValue,
   encodeSignedAction,
   parseHex,
   signingDigest,
@@ -30,4 +31,15 @@ test("SignedActionV1 matches the Rust golden vector", () => {
   assert.equal(toHex(actionSelector("increment")), vector.actionSelector);
   assert.equal(toHex(signingDigest(unsigned)), vector.signingDigest);
   assert.equal(toHex(encodeSignedAction(signed)), vector.encoded);
+});
+
+test("ABI integer and boolean encoders reject silent coercion and wrap", () => {
+  assert.throws(() => encodeValue("u32", -1), /u32 is out of range/);
+  assert.throws(() => encodeValue("u32", 2 ** 32), /u32 is out of range/);
+  assert.throws(() => encodeValue("u32", 1.5), /u32 must be/);
+  assert.throws(() => encodeValue("u64", -1n), /u64 is out of range/);
+  assert.throws(() => encodeValue("u64", 1n << 64n), /u64 is out of range/);
+  assert.throws(() => encodeValue("u128", -1n), /u128 is out of range/);
+  assert.throws(() => encodeValue("bool", 1), /bool must be a boolean/);
+  assert.deepEqual([...encodeValue("bool", true)], [1]);
 });

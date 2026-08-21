@@ -13,9 +13,9 @@ class Writer {
     this.push(Uint8Array.of(value & 0xff));
   }
 
-  u32(value: number): void {
+  u32(value: bigint): void {
     const bytes = new Uint8Array(4);
-    new DataView(bytes.buffer).setUint32(0, value, true);
+    new DataView(bytes.buffer).setUint32(0, Number(value), true);
     this.push(bytes);
   }
 
@@ -87,11 +87,19 @@ function asBytes(value: CodecValue): Uint8Array {
   return value;
 }
 
-function asBigInt(value: CodecValue): bigint {
-  if (typeof value === "bigint" || typeof value === "number" || typeof value === "string") {
-    return BigInt(value);
+function asUnsignedInteger(value: CodecValue, maximum: bigint, type: string): bigint {
+  let integer: bigint;
+  if (typeof value === "bigint") {
+    integer = value;
+  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
+    integer = BigInt(value);
+  } else {
+    throw new Error(type + " must be a bigint or safe integer");
   }
-  throw new Error("expected integer value");
+  if (integer < 0n || integer > maximum) {
+    throw new Error(type + " is out of range");
+  }
+  return integer;
 }
 
 function parseBounded(type: string): { kind: "bytes" | "string"; max: number } | undefined {
@@ -102,10 +110,14 @@ function parseBounded(type: string): { kind: "bytes" | "string"; max: number } |
 
 export function encodeValue(type: string, value: CodecValue): Uint8Array {
   const writer = new Writer();
-  if (type === "u64") writer.u64(asBigInt(value));
-  else if (type === "u32") writer.u32(Number(value));
-  else if (type === "u128") writer.u128(asBigInt(value));
-  else if (type === "bool") writer.u8(value === true ? 1 : 0);
+  if (type === "u64") writer.u64(asUnsignedInteger(value, 0xffffffffffffffffn, "u64"));
+  else if (type === "u32") writer.u32(asUnsignedInteger(value, 0xffffffffn, "u32"));
+  else if (type === "u128")
+    writer.u128(asUnsignedInteger(value, (1n << 128n) - 1n, "u128"));
+  else if (type === "bool") {
+    if (typeof value !== "boolean") throw new Error("bool must be a boolean");
+    writer.u8(value ? 1 : 0);
+  }
   else if (type === "address") {
     const bytes = asBytes(value);
     if (bytes.length !== 32) throw new Error("address must be 32 bytes");
@@ -118,7 +130,7 @@ export function encodeValue(type: string, value: CodecValue): Uint8Array {
         ? asBytes(value)
         : new TextEncoder().encode(String(value));
     if (bytes.length > bounded.max) throw new Error(type + " value exceeds its bound");
-    writer.u32(bytes.length);
+    writer.u32(BigInt(bytes.length));
     writer.push(bytes);
   }
   return writer.finish();
@@ -152,7 +164,11 @@ export function decodeValue(type: string, bytes: Uint8Array): CodecValue {
   if (type === "u64") result = reader.u64();
   else if (type === "u32") result = reader.u32();
   else if (type === "u128") result = reader.u128();
-  else if (type === "bool") result = reader.take(1)[0] !== 0;
+  else if (type === "bool") {
+    const value = reader.take(1)[0];
+    if (value > 1) throw new Error("invalid bool value");
+    result = value === 1;
+  }
   else if (type === "address") result = reader.take(32);
   else {
     const bounded = parseBounded(type);
