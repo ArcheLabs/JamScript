@@ -66,7 +66,7 @@ pub fn parse_service(
                     let Some(init) = declarator.init else {
                         return Err(diag("1005", "exported action must have an initializer"));
                     };
-                    actions.push(parse_action(&binding.id.sym.to_string(), &init)?);
+                    actions.push(parse_action(binding.id.sym.as_ref(), &init)?);
                 }
             }
             ModuleItem::Stmt(Stmt::Empty(..)) => {}
@@ -112,19 +112,7 @@ fn validate_import(import: &ImportDecl) -> Result<(), ParseError> {
                 ))
             }
         };
-        if !matches!(
-            name.as_str(),
-            "action"
-                | "wallet"
-                | "publicAction"
-                | "Address"
-                | "Bytes"
-                | "String"
-                | "u32"
-                | "u64"
-                | "u128"
-                | "bool"
-        ) {
+        if !matches!(name.as_str(), "action" | "wallet" | "publicAction" | "u64") {
             return Err(diag(
                 "1009",
                 format!("`{name}` is not part of the v0.1 standard library"),
@@ -274,10 +262,10 @@ fn parse_type(expr: &Expr) -> Result<TypeIr, ParseError> {
     };
     match name.sym.as_ref() {
         "u64" => Ok(TypeIr::U64),
-        "u32" => Ok(TypeIr::U32),
-        "u128" => Ok(TypeIr::U128),
-        "bool" => Ok(TypeIr::Bool),
-        other => Err(diag("1023", format!("unsupported input type `{other}`"))),
+        other => Err(diag(
+            "1023",
+            format!("unsupported v0.1 input type `{other}`; only `u64` is supported"),
+        )),
     }
 }
 
@@ -302,20 +290,45 @@ fn parse_compute(body: &Option<BlockStmt>) -> Result<ComputeIr, ParseError> {
     };
     match &**expr {
         Expr::Member(member) => { let Expr::Ident(object) = &*member.obj else { return Err(diag("1026", "compute may only read `input.field`")); }; if object.sym != *"input" { return Err(diag("1026", "compute may only read `input.field`")); } let MemberProp::Ident(property) = &member.prop else { return Err(diag("1026", "computed input properties are not supported")); }; Ok(ComputeIr::ReturnInputField { field: property.sym.to_string() }) }
-        Expr::Bin(binary) if binary.op == BinaryOp::Add => { let Expr::Member(member) = &*binary.left else { return Err(diag("1027", "M0 arithmetic must be `input.field + integer`")); }; let Expr::Ident(object) = &*member.obj else { return Err(diag("1027", "M0 arithmetic must use input.field")); }; if object.sym != *"input" { return Err(diag("1027", "M0 arithmetic must use input.field")); }; let MemberProp::Ident(property) = &member.prop else { return Err(diag("1027", "computed input properties are not supported")); }; let value = integer_literal(&binary.right).ok_or_else(|| diag("1027", "M0 arithmetic requires an integer literal on the right"))?; Ok(ComputeIr::AddInputField { field: property.sym.to_string(), value }) }
-        Expr::Lit(Lit::Num(value)) if value.value.fract() == 0.0 && value.value >= 0.0 => {
-            Ok(ComputeIr::ReturnInteger { value: value.value as u128 })
-        }
+        Expr::Bin(binary) if binary.op == BinaryOp::Add => { let Expr::Member(member) = &*binary.left else { return Err(diag("1027", "M0 arithmetic must be `input.field + integer`")); }; let Expr::Ident(object) = &*member.obj else { return Err(diag("1027", "M0 arithmetic must use input.field")); }; if object.sym != *"input" { return Err(diag("1027", "M0 arithmetic must use input.field")); }; let MemberProp::Ident(property) = &member.prop else { return Err(diag("1027", "computed input properties are not supported")); }; let value = integer_literal(&binary.right)?.ok_or_else(|| diag("1027", "M0 arithmetic requires an integer literal on the right"))?; Ok(ComputeIr::AddInputField { field: property.sym.to_string(), value }) }
+        Expr::Lit(Lit::Num(_)) => Ok(ComputeIr::ReturnInteger { value: integer_literal(expr)?.ok_or_else(|| diag("1028", "unsupported numeric literal"))? }),
         _ => Err(diag("1028", "unsupported compute expression; use `input.field`, `input.field + integer`, or an integer literal")),
     }
 }
 
-fn integer_literal(expr: &Expr) -> Option<u128> {
+fn integer_literal(expr: &Expr) -> Result<Option<u128>, ParseError> {
     match expr {
-        Expr::Lit(Lit::Num(value)) if value.value.fract() == 0.0 && value.value >= 0.0 => {
-            Some(value.value as u128)
+        Expr::Lit(Lit::Num(value)) => {
+            let raw = value
+                .raw
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| value.value.to_string());
+            let normalized = raw.replace('_', "");
+            if normalized.contains('.') || normalized.contains('e') || normalized.contains('E') {
+                return Err(diag(
+                    "1029",
+                    "floating-point and exponential numeric literals are not supported",
+                ));
+            }
+            let parsed = normalized
+                .parse::<u128>()
+                .map_err(|_| diag("1029", "invalid integer literal"))?;
+            if parsed > 9_007_199_254_740_991 {
+                return Err(diag(
+                    "1030",
+                    "integer literals above Number.MAX_SAFE_INTEGER are not supported in v0.1",
+                ));
+            }
+            if value.value.fract() != 0.0 || value.value < 0.0 {
+                return Err(diag(
+                    "1029",
+                    "only non-negative integer literals are supported",
+                ));
+            }
+            Ok(Some(parsed))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 fn key_name(key: &PropName) -> Option<String> {
@@ -344,6 +357,35 @@ mod tests {
                 field: "value".into(),
                 value: 1
             }
+        );
+    }
+
+    #[test]
+    fn rejects_non_u64_v01_types() {
+        for ty in ["u32", "u128", "bool", "Bytes", "String"] {
+            let source = format!(
+                "import {{ action, wallet, {ty} }} from \"jam\"; export const add = action({{ auth: wallet(), input: {{ value: {ty} }}, compute(ctx, input) {{ return input.value; }} }});"
+            );
+            let error = parse_service(&source, "counter", "0.1.0")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("not part of the v0.1 standard library")
+                    || error.contains("only `u64` is supported"),
+                "unexpected diagnostic: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_integer_literals_without_f64_rounding() {
+        let source = r#"import { action, wallet, u64 } from "jam"; export const add = action({ auth: wallet(), input: { value: u64 }, compute(ctx, input) { return input.value + 9007199254740992; } });"#;
+        let error = parse_service(source, "counter", "0.1.0")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Number.MAX_SAFE_INTEGER"),
+            "unexpected diagnostic: {error}"
         );
     }
 }

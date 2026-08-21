@@ -6,3 +6,8 @@ license.workspace = true
 
 [dependencies]
 blake2b_simd.workspace = true
+jamscript-crypto = { path = "../jamscript-crypto", default-features = false }
+
+[dev-dependencies]
+jamscript-protocol = { path = "../jamscript-protocol" }
+schnorrkel = { workspace = true, features = ["std"] }
