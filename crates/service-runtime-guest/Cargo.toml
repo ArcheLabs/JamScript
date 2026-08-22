@@ -9,3 +9,7 @@ default = []
 
 [dependencies]
 service-runtime-core = { path = "../service-runtime-core", default-features = false }
+service-runtime-state = { path = "../service-runtime-state", default-features = false }
+
+[dev-dependencies]
+service-runtime-state = { path = "../service-runtime-state", features = ["std"] }

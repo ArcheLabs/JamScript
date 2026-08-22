@@ -2618,6 +2618,7 @@ version = "0.1.0"
 dependencies = [
  "service-runtime-core",
  "service-runtime-guest",
+ "service-runtime-state",
 ]
 
 [[package]]
@@ -2917,6 +2918,7 @@ name = "service-runtime-guest"
 version = "0.1.0"
 dependencies = [
  "service-runtime-core",
+ "service-runtime-state",
 ]
 
 [[package]]

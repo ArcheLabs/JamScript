@@ -239,6 +239,7 @@ impl MiniJamTarget {
             "-nostdlib",
             "-Wl,--gc-sections",
             "-Wl,--emit-relocs",
+            "-Wl,--no-relax",
             "-Wl,-e,minijam_refine",
             "-Wl,-u,minijam_accumulate",
         ]);

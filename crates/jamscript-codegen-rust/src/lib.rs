@@ -24,13 +24,19 @@ pub fn generate_no_std_rust_with_context(
     let selector = action_selector(&action.name);
     let decoder = payload_decoder(action)?;
     let ActionBodyIr::Execute(execute) = &action.body;
-    let setup = compute_setup(&execute.operation, action, "decoded", &ir.native_imports)?;
-    let auth_setup = auth_setup(action, &setup);
+    let setup = application_setup(&execute.operation, action, "decoded", &ir.native_imports)?;
     let native_declarations = native_declarations(ir);
-    let state_effect = accumulate_state_effect(execute.state_effect.as_ref(), ir)?;
+    let application_effect = application_state_effect(execute.state_effect.as_ref(), ir)?;
+    let application_body = application_body(action, &setup, &application_effect);
     Ok(format!(
         r##"#![no_std]
 #![allow(static_mut_refs)]
+
+use service_runtime_core::{{
+    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV1,
+    ServiceApplication, StateAccessError, StateRoot, MANAGED_STATE_COMMITMENT_KEY_V1,
+}};
+use service_runtime_guest::refine;
 
 #[repr(C)]
 pub struct RefineOutput {{ pub data: *const u8, pub size: usize }}
@@ -67,7 +73,6 @@ static RUNTIME_ALLOCATOR: RuntimeAllocator = RuntimeAllocator;
 const SERVICE_ID: u32 = {service_id};
 const GENESIS_HASH: [u8; 32] = {genesis_hash};
 const ACTION_SELECTOR: [u8; 8] = {selector};
-const NATIVE_ERROR_BASE: u32 = 0x8000_0000;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {{ loop {{}} }}
@@ -93,6 +98,7 @@ impl<'a> PayloadReader<'a> {{
         self.offset = end; Ok(value)
     }}
     fn u32(&mut self) -> Result<u32, ()> {{ Ok(u32::from_le_bytes(self.take(4)?.try_into().map_err(|_| ())?)) }}
+    #[allow(dead_code)]
     fn u64(&mut self) -> Result<u64, ()> {{ Ok(u64::from_le_bytes(self.take(8)?.try_into().map_err(|_| ())?)) }}
     fn bounded_bytes(&mut self, max: usize) -> Result<&'a [u8], ()> {{ let length = self.u32()? as usize; if length > max {{ return Err(()); }} self.take(length) }}
 }}
@@ -105,47 +111,74 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
     let status = unsafe {{ minijam_payload(INPUT.as_mut_ptr(), 1048576, &mut input_size) }};
     if status != 0 {{ return error_output(1); }}
     let input = unsafe {{ core::slice::from_raw_parts(INPUT.as_ptr(), input_size) }};
-    match refine_payload(input) {{ Ok(size) => RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size }}, Err(code) => error_output(code) }}
+    let runtime_input = match RuntimeRefineInputV1::decode(input) {{
+        Ok(value) => value,
+        Err(_) => return error_output(1),
+    }};
+    let output = match refine(&GeneratedApplication, &runtime_input) {{
+        Ok(value) => value,
+        Err(error) => return error_output(match error {{
+            service_runtime_guest::GuestError::InvalidInput => 1,
+            service_runtime_guest::GuestError::State => 2,
+            service_runtime_guest::GuestError::Application => 3,
+        }}),
+    }};
+    let encoded = match output.encode() {{
+        Ok(value) => value,
+        Err(_) => return error_output(2),
+    }};
+    if encoded.len() > 1048704 {{ return error_output(14); }}
+    unsafe {{ OUTPUT[..encoded.len()].copy_from_slice(&encoded); }}
+    RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size: encoded.len() }}
 }}
 
 #[no_mangle]
 pub extern "C" fn minijam_accumulate(init_input: *const u8, init_size: usize) {{
-    let init_input = unsafe {{ core::slice::from_raw_parts(init_input, init_size) }};
-    let mut init_offset = 0usize;
-    let authoritative_tick = match read_fnencode(init_input, &mut init_offset) {{ Ok(value) => value, Err(_) => return }};
+    let _ = (init_input, init_size);
+    let mut current = match read_current_commitment() {{ Ok(root) => root, Err(_) => return }};
     let count = unsafe {{ minijam_result_count() }};
     for index in 0..count {{
         let mut size = 0usize;
         if unsafe {{ minijam_result(index, RESULT.as_mut_ptr(), 1048704, &mut size) }} != 0 {{ continue; }}
         let refined = unsafe {{ core::slice::from_raw_parts(RESULT.as_ptr(), size) }};
-        let Ok(action) = jamscript_runtime_core::decode_refined_action(refined) else {{ continue; }};
-        if jamscript_runtime_core::check_expiry(action.valid_until, authoritative_tick).is_err() {{ continue; }}
-        let nonce_key = jamscript_runtime_core::nonce_key(&action.sender);
-        let mut nonce_bytes = [0u8; 8];
-        let mut nonce_size = 0usize;
-        let read_status = unsafe {{ minijam_storage_read(nonce_key.as_ptr(), nonce_key.len(), nonce_bytes.as_mut_ptr(), nonce_bytes.len(), &mut nonce_size) }};
-        let expected = match read_status {{ 1 => 0, 0 if nonce_size == 8 => u64::from_le_bytes(nonce_bytes), 0 => accumulate_failure(), _ => accumulate_failure() }};
-        if action.nonce != expected {{ continue; }}
-        let Ok(score_bytes) = action.result.try_into() else {{ continue; }};
-        let score = u64::from_le_bytes(score_bytes);
-        {commit}
-        let Some(next) = expected.checked_add(1) else {{ continue; }};
-        let next_bytes = next.to_le_bytes();
-        if unsafe {{ minijam_storage_write(nonce_key.as_ptr(), nonce_key.len(), next_bytes.as_ptr(), next_bytes.len()) }} != 0 {{ accumulate_failure(); }}
+        let Ok(output) = RuntimeRefineOutputV1::decode(refined) else {{ continue; }};
+        if output.parent_root == current {{ current = output.new_root; }}
+    }}
+    if current != read_current_commitment().unwrap_or(current) {{
+        let commitment = ManagedStateCommitmentV1::new(current).encode();
+        let key = MANAGED_STATE_COMMITMENT_KEY_V1;
+        let _ = unsafe {{
+            minijam_storage_write(key.as_ptr(), key.len(), commitment.as_ptr(), commitment.len())
+        }};
     }}
 }}
 
-fn read_fnencode(input: &[u8], offset: &mut usize) -> Result<u64, ()> {{
-    let first = *input.get(*offset).ok_or(())?; *offset += 1;
-    if first < 0x80 {{ return Ok(first as u64); }}
-    let mut length = 0usize; while length < 8 && (first & (0x80u8 >> length)) != 0 {{ length += 1; }}
-    if length == 0 || length > 7 || input.len().saturating_sub(*offset) < length {{ return Err(()); }}
-    let mut low = 0u64; for index in 0..length {{ low |= (*input.get(*offset + index).ok_or(())? as u64) << (8 * index); }}
-    *offset += length; Ok(((first as u64 & (0x7fu64 >> length)) << (8 * length)) | low)
+fn read_current_commitment() -> Result<StateRoot, ()> {{
+    let key = MANAGED_STATE_COMMITMENT_KEY_V1;
+    let mut bytes = [0u8; 34];
+    let mut size = 0usize;
+    let status = unsafe {{
+        minijam_storage_read(key.as_ptr(), key.len(), bytes.as_mut_ptr(), bytes.len(), &mut size)
+    }};
+    match status {{
+        1 => Ok(service_runtime_core::EMPTY_STATE_ROOT_V1),
+        0 if size == bytes.len() => ManagedStateCommitmentV1::decode(&bytes)
+            .map(|commitment| commitment.root)
+            .map_err(|_| ()),
+        _ => Err(()),
+    }}
 }}
-fn accumulate_failure() -> ! {{ loop {{ core::hint::spin_loop(); }} }}
 
-fn refine_payload(input: &[u8]) -> Result<usize, u32> {{ {auth_setup} }}
+struct GeneratedApplication;
+impl ServiceApplication for GeneratedApplication {{
+    type Error = StateAccessError;
+    fn execute(
+        &self,
+        context: &mut service_runtime_core::ExecutionContext<'_>,
+        raw_action: &[u8],
+    ) -> Result<(), Self::Error> {{ {application_body} }}
+}}
+
 fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_slice(&code.to_le_bytes()); RefineOutput {{ data: OUTPUT.as_ptr(), size: 4 }} }} }}
 "##,
         service_id = context.service_id,
@@ -153,8 +186,7 @@ fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_sl
         selector = byte_array_literal(&selector),
         native_declarations = native_declarations,
         decoder = decoder,
-        auth_setup = auth_setup,
-        commit = state_effect,
+        application_body = application_body,
     ))
 }
 
@@ -201,7 +233,7 @@ fn payload_decoder(action: &ActionIr) -> Result<String, String> {
     Ok(format!("fn decode_input(input: &[u8]) -> Result<({tuple_types}), ()> {{ let mut reader = PayloadReader {{ input, offset: 0 }}; {reads} if reader.offset != input.len() {{ return Err(()); }} Ok(({tuple_values})) }}", reads = reads.join(" ")))
 }
 
-fn compute_setup(
+fn application_setup(
     operation: &ExecutionOpIr,
     action: &ActionIr,
     decoded: &str,
@@ -212,14 +244,14 @@ fn compute_setup(
             .input
             .iter()
             .position(|field| field.name == name)
-            .ok_or_else(|| format!("compute references unknown input field `{name}`"))
+            .ok_or_else(|| format!("execute references unknown input field `{name}`"))
     };
     match operation {
         ExecutionOpIr::ReturnInputField { field } => {
             Ok(format!("let value = {decoded}.{};", field_index(field)?))
         }
         ExecutionOpIr::AddInputField { field, value } => Ok(format!(
-            "let value = {decoded}.{}.checked_add({value}u128 as u64).ok_or(1u32)?;",
+            "let value = {decoded}.{}.checked_add({value}u128 as u64).ok_or(StateAccessError::Backend)?;",
             field_index(field)?
         )),
         ExecutionOpIr::ReturnInteger { value } => {
@@ -236,38 +268,55 @@ fn compute_setup(
                 .find(|item| item.module == *module && item.function == *function)
                 .ok_or_else(|| "native import is missing from IR".to_string())?;
             let symbol = native_symbol(&import.module, &import.function);
-            Ok(format!("let mut value = 0u64; let native_status = unsafe {{ {symbol}({decoded}.{index}.as_ptr(), {decoded}.{index}.len() as u32, &mut value) }}; if native_status != 0 {{ if native_status >= NATIVE_ERROR_BASE {{ return Err(NATIVE_ERROR_BASE); }} return Err(NATIVE_ERROR_BASE | native_status); }}"))
+            Ok(format!("let mut value = 0u64; let native_status = unsafe {{ {symbol}({decoded}.{index}.as_ptr(), {decoded}.{index}.len() as u32, &mut value) }}; if native_status != 0 {{ return Err(StateAccessError::Backend); }}"))
         }
     }
 }
 
-fn auth_setup(action: &ActionIr, setup: &str) -> String {
-    let decode = "let decoded = decode_input(input).map_err(|_| 1u32)?;";
-    match action.auth {
-        AuthKind::Public => format!("{decode} let computed: Result<u64, u32> = (|| {{ {setup} Ok(value) }})(); let value = computed?; let bytes = value.to_le_bytes(); unsafe {{ OUTPUT[..8].copy_from_slice(&bytes); }} Ok(8)"),
-        AuthKind::Wallet => format!("let signed = jamscript_runtime_core::decode_signed_action(input).map_err(|error| error as u32)?; let verified = jamscript_runtime_core::verify_signed_action(signed, GENESIS_HASH, SERVICE_ID, ACTION_SELECTOR).map_err(|error| error as u32)?; let input = verified.payload; {decode} let computed: Result<u64, u32> = (|| {{ {setup} Ok(value) }})(); let value = computed?; let bytes = value.to_le_bytes(); let size = jamscript_runtime_core::encode_refined_action(&verified, &bytes, unsafe {{ &mut OUTPUT }}).map_err(|error| error as u32)?; Ok(size)"),
-    }
+fn application_body(action: &ActionIr, setup: &str, effect: &str) -> String {
+    let auth = match action.auth {
+        AuthKind::Public => "let sender = [0u8; 32]; let input = raw_action;".to_string(),
+        AuthKind::Wallet => [
+            "let signed = jamscript_runtime_core::decode_signed_action(raw_action).map_err(|_| StateAccessError::Backend)?;",
+            "let verified = jamscript_runtime_core::verify_signed_action(signed, GENESIS_HASH, SERVICE_ID, ACTION_SELECTOR).map_err(|_| StateAccessError::Backend)?;",
+            "let sender = verified.sender;",
+            "let nonce_key = jamscript_runtime_core::nonce_key(&sender);",
+            "let nonce_bytes = context.state().get(&nonce_key)?.unwrap_or_default();",
+            "let expected_nonce = match nonce_bytes.as_slice() { [] => 0u64, bytes if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?), _ => return Err(StateAccessError::Backend) };",
+            "if verified.nonce != expected_nonce { return Err(StateAccessError::Backend); }",
+            "let next_nonce = expected_nonce.checked_add(1).ok_or(StateAccessError::Backend)?;",
+            "context.state().set(&nonce_key, &next_nonce.to_le_bytes())?;",
+            "let input = verified.payload;",
+        ].join(" ")
+    };
+    format!(
+        "{auth} context.begin_transaction()?; let business = (|| -> Result<(), StateAccessError> {{ let decoded = decode_input(input).map_err(|_| StateAccessError::Backend)?; let value: u64 = (|| -> Result<u64, StateAccessError> {{ {setup} Ok(value) }})()?; {effect} Ok(()) }})(); match business {{ Ok(()) => context.commit_transaction(), Err(StateAccessError::MissingWitness) => {{ context.rollback_transaction()?; Err(StateAccessError::MissingWitness) }}, Err(StateAccessError::InvalidProof) => {{ context.rollback_transaction()?; Err(StateAccessError::InvalidProof) }}, Err(_) => {{ context.rollback_transaction()?; Err(StateAccessError::ApplicationFailed(1)) }} }}"
+    )
 }
 
-fn accumulate_state_effect(
+fn application_state_effect(
     effect: Option<&StateEffectIr>,
     ir: &ServiceIr,
 ) -> Result<String, String> {
-    let Some(commit) = effect else {
+    let Some(effect) = effect else {
         return Ok(String::new());
     };
-    let state_name = match commit {
+    let state_name = match effect {
         StateEffectIr::Set { state } | StateEffectIr::Max { state } => state,
     };
     let state = ir
         .states
         .iter()
         .find(|state| state.name == *state_name)
-        .ok_or_else(|| format!("commit references unknown state `{state_name}`"))?;
+        .ok_or_else(|| format!("execute references unknown state {state_name}"))?;
     let schema = byte_array_literal(state.schema.as_bytes());
-    match commit {
-        StateEffectIr::Set { .. } => Ok(format!("let state_key = jamscript_runtime_core::state_key(SERVICE_ID, &{schema}, &action.sender); let value = score.to_le_bytes(); if unsafe {{ minijam_storage_write(state_key.as_ptr(), state_key.len(), value.as_ptr(), value.len()) }} != 0 {{ accumulate_failure(); }}")),
-        StateEffectIr::Max { .. } => Ok(format!("let state_key = jamscript_runtime_core::state_key(SERVICE_ID, &{schema}, &action.sender); let mut old_bytes = [0u8; 8]; let mut old_size = 0usize; let state_status = unsafe {{ minijam_storage_read(state_key.as_ptr(), state_key.len(), old_bytes.as_mut_ptr(), old_bytes.len(), &mut old_size) }}; let should_write = match state_status {{ 1 => true, 0 if old_size == 8 => score > u64::from_le_bytes(old_bytes), 0 => accumulate_failure(), _ => accumulate_failure() }}; if should_write {{ let value = score.to_le_bytes(); if unsafe {{ minijam_storage_write(state_key.as_ptr(), state_key.len(), value.as_ptr(), value.len()) }} != 0 {{ accumulate_failure(); }} }}")),
+    match effect {
+        StateEffectIr::Set { .. } => Ok(format!(
+            "let state_key = service_runtime_core::application_key_v1(&{schema}, &sender).map_err(|_| StateAccessError::Backend)?; context.state().set(&state_key, &value.to_le_bytes())?;"
+        )),
+        StateEffectIr::Max { .. } => Ok(format!(
+            "let state_key = service_runtime_core::application_key_v1(&{schema}, &sender).map_err(|_| StateAccessError::Backend)?; let should_write = match context.state().get(&state_key)? {{ None => true, Some(bytes) => {{ if bytes.len() != 8 {{ return Err(StateAccessError::Backend); }} let old = u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?); value > old }} }}; if should_write {{ context.state().set(&state_key, &value.to_le_bytes())?; }}"
+        )),
     }
 }
 
@@ -332,5 +381,43 @@ mod tests {
         assert!(source.contains("bounded_bytes(64usize)"));
         assert!(source.contains("jamscript_native_game_replay_v1"));
         assert!(source.contains("reader.offset != input.len()"));
+    }
+
+    #[test]
+    fn keeps_application_state_in_refine_and_accumulate_only_cas_commitment() {
+        let source = generate_no_std_rust(&ServiceIr {
+            package_name: "x".into(),
+            package_version: "0.1.0".into(),
+            states: vec![jamscript_ir::StateIr {
+                name: "score".into(),
+                schema: "score/v1".into(),
+                key_type: jamscript_ir::StateKeyType::Address,
+                value_type: TypeIr::U64,
+            }],
+            queries: Vec::new(),
+            native_imports: Vec::new(),
+            actions: vec![ActionIr {
+                name: "set".into(),
+                auth: AuthKind::Wallet,
+                input: vec![FieldIr {
+                    name: "score".into(),
+                    ty: TypeIr::U64,
+                }],
+                body: ActionBodyIr::Execute(jamscript_ir::ExecuteIr {
+                    operation: ExecutionOpIr::ReturnInputField {
+                        field: "score".into(),
+                    },
+                    state_effect: Some(StateEffectIr::Max {
+                        state: "score".into(),
+                    }),
+                }),
+            }],
+        })
+        .unwrap();
+        assert!(source.contains("context.state().get"));
+        assert!(source.contains("RuntimeRefineOutputV1::decode"));
+        assert!(source.contains("MANAGED_STATE_COMMITMENT_KEY_V1"));
+        assert!(!source.contains("minijam_storage_write(state_key"));
+        assert!(!source.contains("decode_refined_action"));
     }
 }

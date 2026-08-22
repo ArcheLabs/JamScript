@@ -1,9 +1,9 @@
 use service_runtime_core::{
-    ExecutionContext, ManagedStateAccess, RuntimeRefineInputV1, ServiceApplication,
-    StateAccessError, StateRoot,
+    ExecutionContext, ManagedStateWitnessV1, RuntimeRefineInputV1, ServiceApplication,
+    StateAccessError, StateChangeV1, StateDiffV1,
 };
-use service_runtime_guest::{refine, GuestError, GuestState};
-use std::collections::BTreeMap;
+use service_runtime_guest::refine;
+use service_runtime_state::FullState;
 
 struct Counter;
 
@@ -21,58 +21,38 @@ impl ServiceApplication for Counter {
     }
 }
 
-struct MemoryState {
-    root: StateRoot,
-    values: BTreeMap<Vec<u8>, Vec<u8>>,
-}
-
-impl ManagedStateAccess for MemoryState {
-    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
-        Ok(self.values.get(key).cloned())
-    }
-
-    fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), StateAccessError> {
-        self.values.insert(key.to_vec(), value.to_vec());
-        Ok(())
-    }
-
-    fn delete(&mut self, key: &[u8]) -> Result<(), StateAccessError> {
-        self.values.remove(key);
-        Ok(())
-    }
-}
-
-impl GuestState for MemoryState {
-    fn parent_root(&self) -> StateRoot {
-        self.root
-    }
-
-    fn finish_root(&mut self) -> Result<StateRoot, GuestError> {
-        self.root[0] = self
-            .values
-            .get(b"counter".as_slice())
-            .and_then(|value| value.first())
-            .copied()
-            .unwrap_or(0);
-        Ok(self.root)
-    }
-}
-
 fn main() {
-    let mut state = MemoryState {
-        root: [0; 32],
-        values: BTreeMap::new(),
-    };
+    let state = FullState::empty();
+    let parent_root = state.root();
+    let proof = state.proof_for(&[b"counter"]).unwrap();
+    let proof_nodes = proof.into_nodes().into_iter().collect();
     let input = RuntimeRefineInputV1 {
         version: 1,
-        managed_state: service_runtime_core::ManagedStateWitnessV1 {
+        managed_state: ManagedStateWitnessV1 {
             version: 1,
-            parent_root: [0; 32],
-            storage_proof: Vec::new(),
+            parent_root,
+            storage_proof: proof_nodes,
         },
         actions: vec![b"increment".to_vec()],
     };
-    let output = refine(&Counter, &mut state, &input).expect("counter transition");
-    assert_eq!(output.new_root[0], 1);
-    println!("direct Rust runtime transition: {:?}", output.new_root);
+    let output = refine(&Counter, &input).expect("counter transition");
+    let expected = state
+        .apply_diff(&StateDiffV1 {
+            changes: vec![StateChangeV1 {
+                key: b"counter".to_vec(),
+                value: Some(vec![1]),
+            }],
+        })
+        .unwrap();
+    assert_eq!(output.parent_root, parent_root);
+    assert_eq!(output.new_root, expected.root());
+    assert_eq!(output.receipts.len(), 1);
+    assert_eq!(
+        output.receipts[0].status,
+        service_runtime_core::ActionStatusV1::Applied
+    );
+    println!(
+        "authenticated Rust runtime transition: {:?}",
+        output.new_root
+    );
 }

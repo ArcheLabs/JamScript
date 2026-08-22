@@ -19,6 +19,11 @@ pub const APPLICATION_KEY_CLASS_V1: u8 = 0x01;
 pub const RUNTIME_KEY_CLASS_V1: u8 = 0x00;
 pub const WALLET_AUTH_MODULE_V1: u8 = 0x01;
 pub const MAX_RUNTIME_ACTIONS: usize = 1024;
+pub const MAX_WITNESS_NODES: usize = 4096;
+pub const MAX_WITNESS_NODE_BYTES: usize = 64 * 1024;
+pub const MAX_WITNESS_BYTES: usize = 1024 * 1024;
+pub const MAX_WITNESS_ENCODED_BYTES: usize =
+    1 + 32 + 4 + (MAX_WITNESS_NODES * 4) + MAX_WITNESS_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ManagedStateCommitmentV1 {
@@ -239,13 +244,26 @@ pub struct ManagedStateWitnessV1 {
 
 impl ManagedStateWitnessV1 {
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        if self.storage_proof.len() > MAX_WITNESS_NODES {
+            return Err(WireError::TooManyItems);
+        }
         let mut writer = Writer::new();
         writer.u8(self.version);
         writer.raw(&self.parent_root);
         let count =
             u32::try_from(self.storage_proof.len()).map_err(|_| WireError::LengthOverflow)?;
         writer.u32(count);
+        let mut total_bytes = 0usize;
         for node in &self.storage_proof {
+            if node.len() > MAX_WITNESS_NODE_BYTES {
+                return Err(WireError::TooManyItems);
+            }
+            total_bytes = total_bytes
+                .checked_add(node.len())
+                .ok_or(WireError::LengthOverflow)?;
+            if total_bytes > MAX_WITNESS_BYTES {
+                return Err(WireError::TooManyItems);
+            }
             writer.bytes_u32(node)?;
         }
         Ok(writer.finish())
@@ -259,9 +277,20 @@ impl ManagedStateWitnessV1 {
         }
         let parent_root = reader.array::<32>()?;
         let count = reader.u32()? as usize;
+        if count > MAX_WITNESS_NODES {
+            return Err(WireError::TooManyItems);
+        }
         let mut storage_proof = Vec::with_capacity(count);
+        let mut total_bytes = 0usize;
         for _ in 0..count {
-            storage_proof.push(reader.bytes_u32()?);
+            let remaining = MAX_WITNESS_BYTES
+                .checked_sub(total_bytes)
+                .ok_or(WireError::TooManyItems)?;
+            let node = reader.bytes_limited(remaining.min(MAX_WITNESS_NODE_BYTES))?;
+            total_bytes = total_bytes
+                .checked_add(node.len())
+                .ok_or(WireError::LengthOverflow)?;
+            storage_proof.push(node);
         }
         if reader.remaining() != 0 {
             return Err(WireError::InvalidEncoding);
@@ -304,7 +333,8 @@ impl RuntimeRefineInputV1 {
         if version != MANAGED_STATE_PROTOCOL_VERSION {
             return Err(WireError::UnsupportedVersion);
         }
-        let witness = ManagedStateWitnessV1::decode(&reader.bytes_u32()?)?;
+        let witness =
+            ManagedStateWitnessV1::decode(&reader.bytes_limited(MAX_WITNESS_ENCODED_BYTES)?)?;
         let count = reader.u32()? as usize;
         if count > MAX_RUNTIME_ACTIONS {
             return Err(WireError::TooManyItems);
@@ -517,12 +547,36 @@ impl<'a> ExecutionContext<'a> {
     pub fn sender(&self) -> Option<[u8; 32]> {
         self.sender
     }
+
+    pub fn begin_transaction(&mut self) -> Result<(), StateAccessError> {
+        self.state.begin_transaction()
+    }
+
+    pub fn commit_transaction(&mut self) -> Result<(), StateAccessError> {
+        self.state.commit_transaction()
+    }
+
+    pub fn rollback_transaction(&mut self) -> Result<(), StateAccessError> {
+        self.state.rollback_transaction()
+    }
 }
 
 pub trait ManagedStateAccess {
     fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError>;
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), StateAccessError>;
     fn delete(&mut self, key: &[u8]) -> Result<(), StateAccessError>;
+
+    fn begin_transaction(&mut self) -> Result<(), StateAccessError> {
+        Err(StateAccessError::Backend)
+    }
+
+    fn commit_transaction(&mut self) -> Result<(), StateAccessError> {
+        Err(StateAccessError::Backend)
+    }
+
+    fn rollback_transaction(&mut self) -> Result<(), StateAccessError> {
+        Err(StateAccessError::Backend)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -531,6 +585,7 @@ pub enum StateAccessError {
     InvalidProof,
     Backend,
     ReservedKey,
+    ApplicationFailed(u32),
 }
 
 pub trait RawJamStorage {
@@ -673,6 +728,14 @@ impl<'a> Reader<'a> {
         let length = self.u32()? as usize;
         Ok(self.take(length)?.to_vec())
     }
+
+    fn bytes_limited(&mut self, maximum: usize) -> Result<Vec<u8>, WireError> {
+        let length = self.u32()? as usize;
+        if length > maximum {
+            return Err(WireError::TooManyItems);
+        }
+        Ok(self.take(length)?.to_vec())
+    }
 }
 
 #[cfg(test)]
@@ -796,5 +859,23 @@ mod tests {
             ManagedStateCommitmentV1::decode(&storage.writes[0].1),
             Ok(ManagedStateCommitmentV1::new([7; 32]))
         );
+    }
+
+    #[test]
+    fn witness_decode_rejects_untrusted_allocation_sizes() {
+        let mut encoded = vec![1];
+        encoded.extend_from_slice(&[0; 32]);
+        encoded.extend_from_slice(&((MAX_WITNESS_NODES as u32) + 1).to_le_bytes());
+        assert_eq!(
+            ManagedStateWitnessV1::decode(&encoded),
+            Err(WireError::TooManyItems)
+        );
+
+        let oversized = ManagedStateWitnessV1 {
+            version: 1,
+            parent_root: [0; 32],
+            storage_proof: vec![vec![0; MAX_WITNESS_NODE_BYTES + 1]],
+        };
+        assert_eq!(oversized.encode(), Err(WireError::TooManyItems));
     }
 }

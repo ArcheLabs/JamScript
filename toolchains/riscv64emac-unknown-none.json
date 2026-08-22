@@ -14,8 +14,8 @@
   "panic-strategy": "abort",
   "disable-redzone": true,
   "features": "+m,+a,+c,+e",
-  "max-atomic-width": 0,
+  "max-atomic-width": 64,
   "relocation-model": "static",
-  "code-model": "medium",
+  "code-model": "small",
   "cpu": "generic-rv64"
 }

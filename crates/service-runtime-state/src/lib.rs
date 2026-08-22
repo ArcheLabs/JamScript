@@ -2,23 +2,20 @@
 
 extern crate alloc;
 
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, vec::Vec};
 use service_runtime_core::{
     ManagedStateAccess, StateAccessError, StateChangeV1, StateDiffV1, StateRoot,
 };
 
 #[cfg(feature = "std")]
+use alloc::collections::BTreeSet;
 use sp_core::{Blake2Hasher, H256};
 #[cfg(feature = "std")]
 use sp_trie::recorder_ext::RecorderExt;
 #[cfg(feature = "std")]
-use sp_trie::{
-    LayoutV1, MemoryDB, Recorder, StorageProof, Trie, TrieConfiguration, TrieDBBuilder,
-    TrieDBMutBuilder, TrieMut,
-};
+use sp_trie::Recorder;
+use sp_trie::TrieConfiguration;
+use sp_trie::{LayoutV1, MemoryDB, StorageProof, Trie, TrieDBBuilder, TrieDBMutBuilder, TrieMut};
 
 pub trait ManagedState {
     type Error;
@@ -37,20 +34,16 @@ pub enum StateError {
     Unsupported,
 }
 
-#[cfg(feature = "std")]
 pub type TrieLayout = LayoutV1<Blake2Hasher>;
 
-#[cfg(feature = "std")]
 pub fn empty_state_root() -> StateRoot {
     root_bytes(TrieLayout::trie_root(core::iter::empty::<(&[u8], &[u8])>()))
 }
 
-#[cfg(feature = "std")]
 fn root_bytes(root: H256) -> StateRoot {
     root.as_bytes().try_into().expect("H256 is 32 bytes")
 }
 
-#[cfg(feature = "std")]
 fn root_hash(root: StateRoot) -> H256 {
     H256::from(root)
 }
@@ -216,16 +209,18 @@ impl ManagedStateAccess for StateTransaction {
     }
 }
 
-#[cfg(feature = "std")]
 pub struct ProofState {
     db: MemoryDB<Blake2Hasher>,
     root: H256,
     writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    touched: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    transactions: Vec<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
 }
 
-#[cfg(feature = "std")]
 impl ProofState {
+    pub fn from_witness(root: StateRoot, proof: &[Vec<u8>]) -> Result<Self, StateError> {
+        Self::from_proof(root, StorageProof::new(proof.to_vec()))
+    }
+
     pub fn from_proof(root: StateRoot, proof: StorageProof) -> Result<Self, StateError> {
         let db = proof.into_memory_db::<Blake2Hasher>();
         let root = root_hash(root);
@@ -235,15 +230,37 @@ impl ProofState {
             db,
             root,
             writes: BTreeMap::new(),
-            touched: BTreeMap::new(),
+            transactions: Vec::new(),
         })
     }
 
+    pub fn parent_root(&self) -> StateRoot {
+        root_bytes(self.root)
+    }
+
+    pub fn begin_transaction(&mut self) {
+        self.transactions.push(BTreeMap::new());
+    }
+
+    pub fn commit_transaction(&mut self) -> Result<(), StateError> {
+        let changes = self.transactions.pop().ok_or(StateError::Backend)?;
+        if let Some(parent) = self.transactions.last_mut() {
+            parent.extend(changes);
+        } else {
+            self.writes.extend(changes);
+        }
+        Ok(())
+    }
+
+    pub fn rollback_transaction(&mut self) -> Result<(), StateError> {
+        self.transactions.pop().ok_or(StateError::Backend)?;
+        Ok(())
+    }
+
     pub fn finish(self) -> Result<(StateRoot, StateDiffV1), StateError> {
-        let mut state = FullState {
-            db: self.db,
-            root: self.root,
-        };
+        if !self.transactions.is_empty() {
+            return Err(StateError::Backend);
+        }
         let diff = StateDiffV1 {
             changes: self
                 .writes
@@ -251,53 +268,106 @@ impl ProofState {
                 .map(|(key, value)| StateChangeV1 { key, value })
                 .collect(),
         };
-        state = state.apply_diff(&diff)?;
-        Ok((state.root(), diff))
+        let mut db = self.db;
+        let mut root = self.root;
+        {
+            let mut trie = TrieDBMutBuilder::<TrieLayout>::new(&mut db, &mut root).build();
+            for change in &diff.changes {
+                match &change.value {
+                    Some(value) => {
+                        trie.insert(&change.key, value)
+                            .map_err(|_| StateError::Backend)?;
+                    }
+                    None => {
+                        let _ = trie.remove(&change.key).map_err(|_| StateError::Backend)?;
+                    }
+                }
+            }
+        }
+        Ok((root_bytes(root), diff))
+    }
+
+    fn overlay_value(&self, key: &[u8]) -> Option<Option<Vec<u8>>> {
+        for transaction in self.transactions.iter().rev() {
+            if let Some(value) = transaction.get(key) {
+                return Some(value.clone());
+            }
+        }
+        self.writes.get(key).cloned()
+    }
+
+    fn ensure_witness(&self, key: &[u8]) -> Result<(), StateError> {
+        let trie = TrieDBBuilder::<TrieLayout>::new(&self.db, &self.root).build();
+        trie.get(key)
+            .map(|_| ())
+            .map_err(|_| StateError::MissingWitness)
     }
 }
 
-#[cfg(feature = "std")]
 impl ManagedState for ProofState {
     type Error = StateError;
 
     fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
-        if let Some(value) = self.writes.get(key) {
-            return Ok(value.clone());
+        if let Some(value) = self.overlay_value(key) {
+            return Ok(value);
         }
         let trie = TrieDBBuilder::<TrieLayout>::new(&self.db, &self.root).build();
-        let value = trie.get(key).map_err(|_| StateError::MissingWitness)?;
-        let copied = value.as_ref().map(|value| value.to_vec());
-        self.touched.insert(key.to_vec(), copied.clone());
-        Ok(copied)
+        trie.get(key)
+            .map(|value| value.map(|value| value.to_vec()))
+            .map_err(|_| StateError::MissingWitness)
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
-        self.writes.insert(key.to_vec(), Some(value.to_vec()));
+        if self.overlay_value(key).is_none() {
+            self.ensure_witness(key)?;
+        }
+        let target = self.transactions.last_mut().unwrap_or(&mut self.writes);
+        target.insert(key.to_vec(), Some(value.to_vec()));
         Ok(())
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error> {
-        self.writes.insert(key.to_vec(), None);
+        if self.overlay_value(key).is_none() {
+            self.ensure_witness(key)?;
+        }
+        let target = self.transactions.last_mut().unwrap_or(&mut self.writes);
+        target.insert(key.to_vec(), None);
         Ok(())
     }
 }
 
-#[cfg(feature = "std")]
 impl ManagedStateAccess for ProofState {
     fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
-        ManagedState::get(self, key).map_err(|error| match error {
-            StateError::MissingWitness => StateAccessError::MissingWitness,
-            StateError::InvalidProof => StateAccessError::InvalidProof,
-            _ => StateAccessError::Backend,
-        })
+        ManagedState::get(self, key).map_err(state_access_error)
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), StateAccessError> {
-        ManagedState::set(self, key, value).map_err(|_| StateAccessError::Backend)
+        ManagedState::set(self, key, value).map_err(state_access_error)
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), StateAccessError> {
-        ManagedState::delete(self, key).map_err(|_| StateAccessError::Backend)
+        ManagedState::delete(self, key).map_err(state_access_error)
+    }
+
+    fn begin_transaction(&mut self) -> Result<(), StateAccessError> {
+        Self::begin_transaction(self);
+        Ok(())
+    }
+
+    fn commit_transaction(&mut self) -> Result<(), StateAccessError> {
+        Self::commit_transaction(self).map_err(|_| StateAccessError::Backend)
+    }
+
+    fn rollback_transaction(&mut self) -> Result<(), StateAccessError> {
+        Self::rollback_transaction(self).map_err(|_| StateAccessError::Backend)
+    }
+}
+
+fn state_access_error(error: StateError) -> StateAccessError {
+    match error {
+        StateError::MissingWitness => StateAccessError::MissingWitness,
+        StateError::InvalidProof => StateAccessError::InvalidProof,
+        _ => StateAccessError::Backend,
     }
 }
 

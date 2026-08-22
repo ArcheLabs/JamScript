@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 service-runtime-core = { path = "../../crates/service-runtime-core" }
 service-runtime-guest = { path = "../../crates/service-runtime-guest" }
+service-runtime-state = { path = "../../crates/service-runtime-state" }
