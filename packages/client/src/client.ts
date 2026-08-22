@@ -2,14 +2,14 @@ import { actionByName, queryByName, stateByName, type DeploymentDescriptor } fro
 import { decodeStateValue, decodeValue, encodeActionPayload, type CodecValue } from "./codec.js";
 import {
   actionSelector,
-  encodeSignedAction,
+  encodeSignedActionV2,
   MANAGED_STATE_COMMITMENT_KEY_V1,
   nonceKey,
   parseHex,
-  signingDigest,
+  signingDigestV2,
   stateKey,
   toHex,
-  type SignedAction,
+  type SignedActionV2,
 } from "./crypto.js";
 import { asWorkRpc, RpcError, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
@@ -73,10 +73,10 @@ export class JamScriptClient {
     const nonce = await this.readNonce(signer.publicKey, initialContext);
     const ttl = options.ttl ?? 64n;
     const validUntil = BigInt(initialContext.slot) + ttl;
-    const unsigned: Omit<SignedAction, "signature"> = {
-      version: 1,
-      genesisHash: parseHex(this.deployment.genesisHash, 32),
-      serviceId: this.deployment.serviceId,
+    const unsigned: Omit<SignedActionV2, "signature"> = {
+      version: 2,
+      networkDomain: parseHex(this.deployment.genesisHash, 32),
+      serviceKey: parseHex(this.deployment.serviceKey, 32),
       actionSelector: selector,
       signerScheme: 0,
       publicKey: signer.publicKey,
@@ -85,9 +85,9 @@ export class JamScriptClient {
       payloadHash: blake2(payload),
       payload,
     };
-    const signature = await signer.signRaw(signingDigest(unsigned));
+    const signature = await signer.signRaw(signingDigestV2(unsigned));
     if (signature.length !== 64) throw new Error("sr25519 signRaw must return a 64-byte signature");
-    const signed = encodeSignedAction({ ...unsigned, signature });
+    const signed = encodeSignedActionV2({ ...unsigned, signature });
     const requestBase = {
       serviceId: this.deployment.serviceId,
       serviceCodeHash: this.deployment.codeHash,
@@ -125,7 +125,7 @@ export class JamScriptClient {
     const valueBytes = await this.readManagedValue(
       context,
       root,
-      stateKey(this.deployment.serviceId, state.schema, key),
+      stateKey(state.schema, key),
     );
     return {
       value: valueBytes === null

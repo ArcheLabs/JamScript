@@ -8,3 +8,4 @@ license.workspace = true
 service-runtime-core = { path = "../../crates/service-runtime-core" }
 service-runtime-guest = { path = "../../crates/service-runtime-guest" }
 service-runtime-state = { path = "../../crates/service-runtime-state" }
+service-runtime-host = { path = "../../crates/service-runtime-host" }

@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use jamscript_codegen_rust::{generate_no_std_rust_with_context, MiniJamContext};
+use jamscript_codegen_rust::{generate_no_std_rust_with_context, PortableServiceContext};
 use jamscript_ir::{abi_for, ServiceIr, NATIVE_ABI_VERSION};
 use serde::Serialize;
 use service_runtime_core::{
@@ -14,6 +14,8 @@ use tempfile::tempdir;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct BuildMetadata {
+    #[serde(rename = "serviceKey")]
+    pub service_key: String,
     pub language_version: String,
     pub compiler_version: String,
     pub runtime_version: String,
@@ -80,7 +82,7 @@ impl MiniJamTarget {
     pub fn emit_generated_source(
         &self,
         ir: &ServiceIr,
-        context: MiniJamContext,
+        context: PortableServiceContext,
         output: &Path,
     ) -> Result<()> {
         fs::write(
@@ -96,7 +98,7 @@ impl MiniJamTarget {
         &self,
         project_root: &Path,
         ir: &ServiceIr,
-        context: MiniJamContext,
+        context: PortableServiceContext,
         output_dir: &Path,
         native_modules: &[NativeModule],
     ) -> Result<BuildMetadata> {
@@ -322,6 +324,14 @@ impl MiniJamTarget {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(BuildMetadata {
+            service_key: format!(
+                "0x{}",
+                context
+                    .service_key
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ),
             language_version: "0.1".into(),
             compiler_version: env!("CARGO_PKG_VERSION").into(),
             runtime_version: "0.1.0".into(),

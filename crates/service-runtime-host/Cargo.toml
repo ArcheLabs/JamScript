@@ -8,3 +8,6 @@ license.workspace = true
 service-runtime-core = { path = "../service-runtime-core" }
 service-runtime-state = { path = "../service-runtime-state" }
 sp-trie = { version = "=46.0.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+service-runtime-guest = { path = "../service-runtime-guest" }

@@ -1812,12 +1812,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "getrandom 0.3.4",
  "jamscript-codegen-rust",
  "jamscript-ir",
  "jamscript-parser",
  "jamscript-target-minijam",
  "serde",
  "serde_json",
+ "service-runtime-core",
  "toml",
 ]
 
@@ -1864,6 +1866,7 @@ dependencies = [
  "jamscript-crypto",
  "jamscript-ir",
  "schnorrkel",
+ "service-runtime-core",
  "thiserror 2.0.20",
 ]
 
@@ -2618,6 +2621,7 @@ version = "0.1.0"
 dependencies = [
  "service-runtime-core",
  "service-runtime-guest",
+ "service-runtime-host",
  "service-runtime-state",
 ]
 
@@ -2926,6 +2930,7 @@ name = "service-runtime-host"
 version = "0.1.0"
 dependencies = [
  "service-runtime-core",
+ "service-runtime-guest",
  "service-runtime-state",
  "sp-trie",
 ]

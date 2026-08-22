@@ -3,9 +3,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use service_runtime_core::StateDiffV1;
 use service_runtime_core::{
     blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, RuntimeRefineInputV1,
-    RuntimeRefineOutputV1, ServiceApplication, StateAccessError,
+    RuntimeRefineOutputV1, RuntimeRefineOutputV2, ServiceApplication, StateAccessError,
 };
 use service_runtime_state::ProofState;
 
@@ -20,6 +21,45 @@ pub fn refine<A>(
     application: &A,
     input: &RuntimeRefineInputV1,
 ) -> Result<RuntimeRefineOutputV1, GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
+    let (parent_root, new_root, receipts, _) = refine_internal(application, input)?;
+    Ok(RuntimeRefineOutputV1 {
+        version: 1,
+        parent_root,
+        new_root,
+        receipts,
+        recovery_commitment: None,
+    })
+}
+
+pub fn refine_v2<A>(
+    application: &A,
+    input: &RuntimeRefineInputV1,
+) -> Result<RuntimeRefineOutputV2, GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
+    let (parent_root, new_root, receipts, diff) = refine_internal(application, input)?;
+    RuntimeRefineOutputV2::from_diff(parent_root, new_root, receipts, diff)
+        .map_err(|_| GuestError::State)
+}
+
+fn refine_internal<A>(
+    application: &A,
+    input: &RuntimeRefineInputV1,
+) -> Result<
+    (
+        service_runtime_core::StateRoot,
+        service_runtime_core::StateRoot,
+        Vec<ActionReceiptV1>,
+        StateDiffV1,
+    ),
+    GuestError,
+>
 where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
@@ -78,14 +118,8 @@ where
             }
         }
     }
-    let (new_root, _) = state.finish().map_err(|_| GuestError::State)?;
-    Ok(RuntimeRefineOutputV1 {
-        version: 1,
-        parent_root,
-        new_root,
-        receipts,
-        recovery_commitment: None,
-    })
+    let (new_root, diff) = state.finish().map_err(|_| GuestError::State)?;
+    Ok((parent_root, new_root, receipts, diff))
 }
 
 #[cfg(test)]

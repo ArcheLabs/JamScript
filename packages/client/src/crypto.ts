@@ -2,17 +2,35 @@ import { hexToU8a, u8aToHex } from "@polkadot/util";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 
 export const ACTION_DOMAIN_V1 = new TextEncoder().encode("JAMSCRIPT_ACTION_V1");
+export const ACTION_DOMAIN_V2 = new TextEncoder().encode("JAMSCRIPT_ACTION_V2");
 export const APPLICATION_KEY_CLASS_V1 = 0x01;
 export const RUNTIME_KEY_CLASS_V1 = 0x00;
 export const WALLET_AUTH_MODULE_V1 = 0x01;
 export const MANAGED_STATE_COMMITMENT_KEY_V1 = new TextEncoder().encode(
   ":jam-service-runtime:managed-state:v1",
 );
+export const MAX_ACTION_PAYLOAD_BYTES = 1_048_576;
 
 export type SignedAction = {
   version: 1;
   genesisHash: Uint8Array;
   serviceId: number;
+  actionSelector: Uint8Array;
+  signerScheme: 0;
+  publicKey: Uint8Array;
+  nonce: bigint;
+  validUntil: bigint;
+  payloadHash: Uint8Array;
+  signature: Uint8Array;
+  payload: Uint8Array;
+};
+
+export type ServiceKeyV1 = Uint8Array;
+
+export type SignedActionV2 = {
+  version: 2;
+  networkDomain: Uint8Array;
+  serviceKey: ServiceKeyV1;
   actionSelector: Uint8Array;
   signerScheme: 0;
   publicKey: Uint8Array;
@@ -66,7 +84,6 @@ export function actionSelector(name: string): Uint8Array {
 }
 
 export function stateKey(
-  _serviceId: number,
   schema: Uint8Array | string,
   key: Uint8Array,
 ): Uint8Array {
@@ -102,6 +119,26 @@ export function signingDigest(action: Omit<SignedAction, "signature">): Uint8Arr
   );
 }
 
+export function signingDigestV2(action: Omit<SignedActionV2, "signature">): Uint8Array {
+  if (action.networkDomain.length !== 32 || action.serviceKey.length !== 32 || action.actionSelector.length !== 8) {
+    throw new Error("invalid SignedActionV2 fixed-width field");
+  }
+  return blake2AsU8a(
+    concat(
+      ACTION_DOMAIN_V2,
+      byte(action.version),
+      action.networkDomain,
+      action.serviceKey,
+      action.actionSelector,
+      byte(action.signerScheme),
+      u64(action.nonce),
+      u64(action.validUntil),
+      action.payloadHash,
+    ),
+    256,
+  );
+}
+
 export function encodeSignedAction(action: SignedAction): Uint8Array {
   if (action.genesisHash.length !== 32 || action.actionSelector.length !== 8) {
     throw new Error("invalid SignedAction fixed-width field");
@@ -125,4 +162,63 @@ export function encodeSignedAction(action: SignedAction): Uint8Array {
     u32(action.payload.length),
     action.payload,
   );
+}
+
+export function encodeSignedActionV2(action: SignedActionV2): Uint8Array {
+  if (action.networkDomain.length !== 32 || action.serviceKey.length !== 32 || action.actionSelector.length !== 8) {
+    throw new Error("invalid SignedActionV2 fixed-width field");
+  }
+  if (action.publicKey.length > 32 || action.signature.length > 64) {
+    throw new Error("SignedActionV2 variable-width field is too large");
+  }
+  if (action.payload.length > MAX_ACTION_PAYLOAD_BYTES) throw new Error("SignedActionV2 payload is too large");
+  return concat(
+    byte(action.version),
+    action.networkDomain,
+    action.serviceKey,
+    action.actionSelector,
+    byte(action.signerScheme),
+    byte(action.publicKey.length),
+    action.publicKey,
+    u64(action.nonce),
+    u64(action.validUntil),
+    action.payloadHash,
+    byte(action.signature.length),
+    action.signature,
+    u32(action.payload.length),
+    action.payload,
+  );
+}
+
+export function decodeSignedActionV2(bytes: Uint8Array): SignedActionV2 {
+  let offset = 0;
+  const take = (length: number): Uint8Array => {
+    const end = offset + length;
+    if (end > bytes.length) throw new Error("truncated SignedActionV2");
+    const value = bytes.slice(offset, end);
+    offset = end;
+    return value;
+  };
+  const readU8 = (): number => take(1)[0];
+  const readU32 = (): number => new DataView(take(4).buffer).getUint32(0, true);
+  const readU64 = (): bigint => new DataView(take(8).buffer).getBigUint64(0, true);
+  const version = readU8();
+  const networkDomain = take(32);
+  const serviceKey = take(32);
+  const actionSelector = take(8);
+  const signerScheme = readU8();
+  const publicKey = take(readU8());
+  const nonce = readU64();
+  const validUntil = readU64();
+  const payloadHash = take(32);
+  const signature = take(readU8());
+  const payload = take(readU32());
+  if (offset !== bytes.length) throw new Error("trailing SignedActionV2 bytes");
+  if (version !== 2 || signerScheme !== 0 || publicKey.length !== 32 || signature.length !== 64 || payload.length > MAX_ACTION_PAYLOAD_BYTES) {
+    throw new Error("unsupported SignedActionV2");
+  }
+  if (toHex(blake2AsU8a(payload, 256)) !== toHex(payloadHash)) {
+    throw new Error("SignedActionV2 payload hash mismatch");
+  }
+  return { version: 2, networkDomain, serviceKey, actionSelector, signerScheme: 0, publicKey, nonce, validUntil, payloadHash, signature, payload };
 }

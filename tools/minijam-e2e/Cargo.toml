@@ -14,6 +14,9 @@ jamscript-crypto = { path = "../../crates/jamscript-crypto" }
 jamscript-ir = { path = "../../crates/jamscript-ir" }
 jamscript-protocol = { path = "../../crates/jamscript-protocol" }
 jamscript-runtime-core = { path = "../../crates/jamscript-runtime-core" }
+service-runtime-core = { path = "../../crates/service-runtime-core" }
+service-runtime-host = { path = "../../crates/service-runtime-host" }
+service-runtime-state = { path = "../../crates/service-runtime-state" }
 jp-core-primitives = { path = "../../../minijam-client/external/jambda/crates/core-primitives" }
 jp-vm-engine = { path = "../../../minijam-client/external/jambda/vm/engine" }
 jp-vm-interp = { path = "../../../minijam-client/external/jambda/vm/interp", features = ["std"] }

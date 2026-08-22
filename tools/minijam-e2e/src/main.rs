@@ -10,8 +10,7 @@ use jambda_minijam_executive::{
 use jambda_refine::{compute_work_report, ImportProofBundle, WorkReportInput};
 use jambda_state_backend::StateBackend;
 use jamscript_crypto::SR25519_CONTEXT;
-use jamscript_protocol::SignedActionV1;
-use jamscript_runtime_core::{state_key, NONCE_SCHEMA_V1};
+use jamscript_protocol::SignedActionV2;
 use jp_core_primitives::{
     blake2b,
     crypto::OpaqueHash,
@@ -29,6 +28,11 @@ use minijam_jamcore_api::{
 };
 use minijam_protocol::{StateOperation, PROTOCOL_VERSION_V1};
 use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
+use service_runtime_core::{
+    application_key_v1, RuntimeRefineInputV1, RuntimeRefineOutputV2, ServiceKeyV1,
+    StateAccessPlanV1,
+};
+use service_runtime_host::{FullStateProvider, ServiceStateProvider};
 
 const SERVICE_ID: u32 = 1_000;
 const MAX_BLOCK_GAS: u64 = 20_000_000;
@@ -60,28 +64,6 @@ impl TestState {
                 }
             }
         }
-    }
-
-    fn nonce(&self, sender: &[u8; 32]) -> Option<u64> {
-        let key = state_key(SERVICE_ID, NONCE_SCHEMA_V1, sender);
-        let storage_key =
-            StoreKey::new_service_storage_key(&SERVICE_ID, &ByteSequence::from(key.to_vec()))
-                .to_state_key()
-                .0;
-        self.0
-            .get(&storage_key)
-            .map(|value| u64::from_le_bytes(value.as_slice().try_into().unwrap()))
-    }
-
-    fn score(&self, sender: &[u8; 32]) -> Option<u64> {
-        let key = state_key(SERVICE_ID, b"best-score/v1", sender);
-        let storage_key =
-            StoreKey::new_service_storage_key(&SERVICE_ID, &ByteSequence::from(key.to_vec()))
-                .to_state_key()
-                .0;
-        self.0
-            .get(&storage_key)
-            .map(|value| u64::from_le_bytes(value.as_slice().try_into().unwrap()))
     }
 }
 
@@ -213,18 +195,19 @@ fn install_service(state: &mut TestState, blob: &[u8]) -> OpaqueHash {
 }
 
 fn action(
+    service_key: ServiceKeyV1,
     seed: u8,
     nonce: u64,
     valid_until: u64,
     selector: [u8; 8],
     payload: Vec<u8>,
-) -> (SignedActionV1, [u8; 32]) {
+) -> (SignedActionV2, [u8; 32]) {
     let keypair = MiniSecretKey::from_bytes(&[seed; 32])
         .unwrap()
         .expand_to_keypair(ExpansionMode::Ed25519);
-    let mut action = SignedActionV1::unsigned(
+    let mut action = SignedActionV2::unsigned(
         [0; 32],
-        SERVICE_ID,
+        service_key,
         selector,
         keypair.public.to_bytes(),
         nonce,
@@ -291,13 +274,54 @@ fn new_state() -> TestState {
     )
 }
 
-fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<u8>>, slot: u32) {
+fn runtime_input(
+    provider: &FullStateProvider,
+    service_key: ServiceKeyV1,
+    action: &[u8],
+    application_schema: Option<&[u8]>,
+) -> Vec<u8> {
+    let signed = SignedActionV2::decode(action).expect("V2 action envelope");
+    let sender: [u8; 32] = signed
+        .public_key
+        .as_slice()
+        .try_into()
+        .expect("sr25519 key");
+    let application_keys = application_schema
+        .map(|schema| vec![application_key_v1(schema, &sender).unwrap()])
+        .unwrap_or_default();
+    let plan = StateAccessPlanV1::for_wallet(&sender, application_keys).expect("state access plan");
+    let parent_root = provider.current_root(service_key).expect("provider root");
+    let witness = provider
+        .build_witness(service_key, parent_root, &plan)
+        .expect("provider witness");
+    RuntimeRefineInputV1 {
+        version: 1,
+        managed_state: witness,
+        actions: vec![action.to_vec()],
+    }
+    .encode()
+    .expect("runtime input encoding")
+}
+
+fn execute_batch(
+    state: &mut TestState,
+    provider: &mut FullStateProvider,
+    service_key: ServiceKeyV1,
+    application_schema: Option<&[u8]>,
+    code_hash: OpaqueHash,
+    actions: Vec<Vec<u8>>,
+    slot: u32,
+) {
     let action_count = actions.len();
     let summary = state_summary(state, &actions);
     let mut report_bytes = Vec::with_capacity(actions.len());
     let mut result_summaries = Vec::with_capacity(actions.len());
+    let mut recovered = Vec::with_capacity(actions.len());
+    let mut planning_provider = provider.clone();
     for (report_index, action) in actions.into_iter().enumerate() {
         let action_summary = state_summary(state, std::slice::from_ref(&action));
+        let runtime_payload =
+            runtime_input(&planning_provider, service_key, &action, application_schema);
         let (encoded, result_summary) = {
             let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
             backend.load_tiny_from_db().unwrap();
@@ -309,7 +333,7 @@ fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<
                 InnerEngine<InterpBackend>,
             >(
                 &backend,
-                work_input(code_hash, vec![action], slot as u8),
+                work_input(code_hash, vec![runtime_payload], slot as u8),
                 InterpBackend,
             )
             .unwrap_or_else(|error| {
@@ -324,20 +348,35 @@ fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<
                 .enumerate()
                 .map(|(index, result)| match &result.result {
                     WorkExecResult::Ok(payload) => {
-                        match jamscript_runtime_core::decode_refined_action(payload.as_ref()) {
-                            Ok(refined) => format!(
-                                "item={index},sender={:?},nonce={},result={:?}",
-                                refined.sender, refined.nonce, refined.result
-                            ),
-                            Err(error) => format!("item={index},error_payload={error:?}"),
+                        match RuntimeRefineOutputV2::decode(payload.as_ref()) {
+                            Ok(refined) => {
+                                let parent = refined.parent_root;
+                                let next = refined.new_root;
+                                planning_provider
+                                    .apply_recovery(service_key, &refined)
+                                    .expect("planning provider recovery");
+                                recovered.push(Some(refined));
+                                format!(
+                                    "item={index},parent_root={parent:?},new_root={next:?},receipts={:?}",
+                                    recovered.last().and_then(|item| item.as_ref()).map(|item| &item.receipts)
+                                )
+                            }
+                            Err(error) => {
+                                recovered.push(None);
+                                format!("item={index},error_payload={error:?}")
+                            }
                         }
                     }
-                    result => format!("item={index},result={result:?}"),
+                    result => {
+                        recovered.push(None);
+                        format!("item={index},result={result:?}")
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
             (report.report.encode(), result_summary)
         };
+        eprintln!("slot={slot}, report={report_index}, {result_summary}");
         report_bytes.push(encoded);
         result_summaries.push(format!("report={report_index}, {result_summary}"));
     }
@@ -368,18 +407,26 @@ fn execute_batch(state: &mut TestState, code_hash: OpaqueHash, actions: Vec<Vec<
                 action_count,
                 result_summaries.join("; "),
             )
-        });
+    });
     state.apply(&output);
+    for refined in recovered.into_iter().flatten() {
+        provider
+            .apply_recovery(service_key, &refined)
+            .expect("provider recovery");
+    }
 }
 
 fn refine_native_failure(
     state: &TestState,
+    provider: &FullStateProvider,
+    service_key: ServiceKeyV1,
     code_hash: OpaqueHash,
     action: Vec<u8>,
     slot: u32,
     expected_native_status: u32,
 ) {
     let summary = state_summary(state, std::slice::from_ref(&action));
+    let runtime_payload = runtime_input(provider, service_key, &action, Some(b"best-score/v1"));
     let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
     backend.load_tiny_from_db().unwrap();
     let report = compute_work_report::<
@@ -390,7 +437,7 @@ fn refine_native_failure(
         InnerEngine<InterpBackend>,
     >(
         &backend,
-        work_input(code_hash, vec![action], slot as u8),
+        work_input(code_hash, vec![runtime_payload], slot as u8),
         InterpBackend,
     )
     .unwrap_or_else(|error| {
@@ -420,15 +467,12 @@ fn state_summary(state: &TestState, actions: &[Vec<u8>]) -> String {
     let items = actions
         .iter()
         .enumerate()
-        .map(|(index, encoded)| match SignedActionV1::decode(encoded) {
+        .map(|(index, encoded)| match SignedActionV2::decode(encoded) {
             Ok(action) if action.public_key.len() == 32 => {
-                let mut sender = [0u8; 32];
-                sender.copy_from_slice(&action.public_key);
                 format!(
-                    "item={index},sender={sender:?},nonce={},state_nonce={:?},score={:?},result={:?}",
+                    "item={index},sender={:?},nonce={},result={:?}",
+                    action.public_key,
                     action.nonce,
-                    state.nonce(&sender),
-                    state.score(&sender),
                     action.payload.get(..4),
                 )
             }
@@ -459,11 +503,18 @@ fn game_run(health: u32, steps: &[(u8, u8)]) -> Vec<u8> {
     payload
 }
 
-fn signed_game(seed: u8, nonce: u64, valid_until: u64, run: Vec<u8>) -> (SignedActionV1, [u8; 32]) {
+fn signed_game(
+    service_key: ServiceKeyV1,
+    seed: u8,
+    nonce: u64,
+    valid_until: u64,
+    run: Vec<u8>,
+) -> (SignedActionV2, [u8; 32]) {
     let mut payload = Vec::with_capacity(4 + run.len());
     payload.extend_from_slice(&(run.len() as u32).to_le_bytes());
     payload.extend_from_slice(&run);
     action(
+        service_key,
         seed,
         nonce,
         valid_until,
@@ -472,96 +523,235 @@ fn signed_game(seed: u8, nonce: u64, valid_until: u64, run: Vec<u8>) -> (SignedA
     )
 }
 
+fn provider_value(
+    provider: &FullStateProvider,
+    service_key: ServiceKeyV1,
+    key: &[u8],
+) -> Option<Vec<u8>> {
+    provider
+        .open(service_key, provider.current_root(service_key).unwrap())
+        .unwrap()
+        .get(key)
+        .unwrap()
+}
+
+fn provider_nonce(
+    provider: &FullStateProvider,
+    service_key: ServiceKeyV1,
+    sender: &[u8; 32],
+) -> Option<u64> {
+    provider_value(
+        provider,
+        service_key,
+        &service_runtime_core::wallet_nonce_key_v1(sender),
+    )
+    .map(|value| u64::from_le_bytes(value.try_into().unwrap()))
+}
+
+fn provider_score(
+    provider: &FullStateProvider,
+    service_key: ServiceKeyV1,
+    sender: &[u8; 32],
+) -> Option<u64> {
+    provider_value(
+        provider,
+        service_key,
+        &application_key_v1(b"best-score/v1", sender).unwrap(),
+    )
+    .map(|value| u64::from_le_bytes(value.try_into().unwrap()))
+}
+
 fn run_counter(blob: &[u8]) {
+    let service_key = ServiceKeyV1::new([0x22; 32]);
     let mut state = new_state();
+    let mut provider = FullStateProvider::default();
     let code_hash = install_service(&mut state, blob);
     let selector = jamscript_ir::action_selector("increment");
-    let (_, sender) = action(7, 0, 10, selector, 7u64.to_le_bytes().to_vec());
+    let (_, sender) = action(service_key, 7, 0, 10, selector, 7u64.to_le_bytes().to_vec());
     for (slot, nonce, valid_until, expected) in [
         (1u32, 0u64, 10u64, 1u64),
         (2, 0, 10, 1),
         (3, 1, 10, 2),
         (11, 2, 10, 2),
     ] {
-        let (signed, action_sender) =
-            action(7, nonce, valid_until, selector, 7u64.to_le_bytes().to_vec());
+        let (signed, action_sender) = action(
+            service_key,
+            7,
+            nonce,
+            valid_until,
+            selector,
+            7u64.to_le_bytes().to_vec(),
+        );
         assert_eq!(sender, action_sender);
-        execute_batch(&mut state, code_hash, vec![signed.encode().unwrap()], slot);
-        assert_eq!(state.nonce(&sender), Some(expected));
+        execute_batch(
+            &mut state,
+            &mut provider,
+            service_key,
+            None,
+            code_hash,
+            vec![signed.encode().unwrap()],
+            slot,
+        );
+        assert_eq!(
+            provider_nonce(&provider, service_key, &sender),
+            Some(expected)
+        );
     }
 }
 
 fn run_game(blob: &[u8]) {
+    let service_key = ServiceKeyV1::new([0x11; 32]);
     let selector = jamscript_ir::action_selector("submitRun");
     let valid_100 = game_run(80, &[(1, 20)]);
     let valid_80 = game_run(80, &[]);
     let valid_150 = game_run(100, &[(1, 50)]);
     let mut state = new_state();
+    let mut provider = FullStateProvider::default();
     let code_hash = install_service(&mut state, blob);
-    let (signed, alice) = signed_game(7, 0, 10, valid_100.clone());
-    execute_batch(&mut state, code_hash, vec![signed.encode().unwrap()], 1);
-    assert_eq!(state.score(&alice), Some(100));
-    assert_eq!(state.nonce(&alice), Some(1));
+    let (signed, alice) = signed_game(service_key, 7, 0, 10, valid_100.clone());
+    execute_batch(
+        &mut state,
+        &mut provider,
+        service_key,
+        Some(b"best-score/v1"),
+        code_hash,
+        vec![signed.encode().unwrap()],
+        1,
+    );
+    assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
+    assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
 
-    let (mut tampered, _) = signed_game(7, 1, 10, valid_100.clone());
+    let (mut tampered, _) = signed_game(service_key, 7, 1, 10, valid_100.clone());
     tampered.payload[12] ^= 1;
-    execute_batch(&mut state, code_hash, vec![tampered.encode().unwrap()], 2);
-    assert_eq!(state.score(&alice), Some(100));
-    assert_eq!(state.nonce(&alice), Some(1));
+    execute_batch(
+        &mut state,
+        &mut provider,
+        service_key,
+        Some(b"best-score/v1"),
+        code_hash,
+        vec![tampered.encode().unwrap()],
+        2,
+    );
+    assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
+    assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
 
-    let (invalid, _) = signed_game(7, 1, 10, game_run(80, &[(9, 20)]));
-    refine_native_failure(&state, code_hash, invalid.encode().unwrap(), 2, 9);
-    assert_eq!(state.score(&alice), Some(100));
-    assert_eq!(state.nonce(&alice), Some(1));
+    let (invalid, _) = signed_game(service_key, 7, 1, 10, game_run(80, &[(9, 20)]));
+    refine_native_failure(
+        &state,
+        &provider,
+        service_key,
+        code_hash,
+        invalid.encode().unwrap(),
+        2,
+        9,
+    );
+    assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
+    assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
 
     let mut trailing_run = valid_100.clone();
     trailing_run.push(0);
-    let (trailing, _) = signed_game(7, 1, 10, trailing_run);
-    refine_native_failure(&state, code_hash, trailing.encode().unwrap(), 2, 5);
-    assert_eq!(state.score(&alice), Some(100));
-    assert_eq!(state.nonce(&alice), Some(1));
+    let (trailing, _) = signed_game(service_key, 7, 1, 10, trailing_run);
+    refine_native_failure(
+        &state,
+        &provider,
+        service_key,
+        code_hash,
+        trailing.encode().unwrap(),
+        2,
+        5,
+    );
+    assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
+    assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
 
-    let (replay, _) = signed_game(7, 0, 10, valid_100.clone());
-    execute_batch(&mut state, code_hash, vec![replay.encode().unwrap()], 3);
-    assert_eq!(state.score(&alice), Some(100));
-    assert_eq!(state.nonce(&alice), Some(1));
+    let (replay, _) = signed_game(service_key, 7, 0, 10, valid_100.clone());
+    execute_batch(
+        &mut state,
+        &mut provider,
+        service_key,
+        Some(b"best-score/v1"),
+        code_hash,
+        vec![replay.encode().unwrap()],
+        3,
+    );
+    assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
+    assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
 
-    let (lower, _) = signed_game(7, 1, 10, valid_80);
-    execute_batch(&mut state, code_hash, vec![lower.encode().unwrap()], 4);
-    assert_eq!(state.score(&alice), Some(100));
-    assert_eq!(state.nonce(&alice), Some(2));
+    let (lower, _) = signed_game(service_key, 7, 1, 10, valid_80);
+    execute_batch(
+        &mut state,
+        &mut provider,
+        service_key,
+        Some(b"best-score/v1"),
+        code_hash,
+        vec![lower.encode().unwrap()],
+        4,
+    );
+    assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
+    assert_eq!(provider_nonce(&provider, service_key, &alice), Some(2));
 
-    let (higher, _) = signed_game(7, 2, 10, valid_150.clone());
-    execute_batch(&mut state, code_hash, vec![higher.encode().unwrap()], 5);
-    assert_eq!(state.score(&alice), Some(150));
-    assert_eq!(state.nonce(&alice), Some(3));
+    let (higher, _) = signed_game(service_key, 7, 2, 10, valid_150.clone());
+    execute_batch(
+        &mut state,
+        &mut provider,
+        service_key,
+        Some(b"best-score/v1"),
+        code_hash,
+        vec![higher.encode().unwrap()],
+        5,
+    );
+    assert_eq!(provider_score(&provider, service_key, &alice), Some(150));
+    assert_eq!(provider_nonce(&provider, service_key, &alice), Some(3));
 
-    let (expired, _) = signed_game(7, 3, 10, valid_150);
-    execute_batch(&mut state, code_hash, vec![expired.encode().unwrap()], 11);
-    assert_eq!(state.score(&alice), Some(150));
-    assert_eq!(state.nonce(&alice), Some(3));
+    let (expired, _) = signed_game(service_key, 7, 3, 10, valid_150);
+    execute_batch(
+        &mut state,
+        &mut provider,
+        service_key,
+        Some(b"best-score/v1"),
+        code_hash,
+        vec![expired.encode().unwrap()],
+        11,
+    );
+    assert_eq!(provider_score(&provider, service_key, &alice), Some(150));
+    assert_eq!(provider_nonce(&provider, service_key, &alice), Some(3));
 
     let mut batch_state = new_state();
+    let mut batch_provider = FullStateProvider::default();
     let batch_hash = install_service(&mut batch_state, blob);
     let mut batch = Vec::new();
     let mut senders = Vec::new();
     for (seed, score) in [(1u8, 40u8), (2, 50), (3, 60)] {
-        let (item, sender) = signed_game(seed, 0, 10, game_run(40, &[(1, score)]));
+        let (item, sender) = signed_game(service_key, seed, 0, 10, game_run(40, &[(1, score)]));
         batch.push(item.encode().unwrap());
         senders.push(sender);
     }
-    execute_batch(&mut batch_state, batch_hash, batch, 1);
+    execute_batch(
+        &mut batch_state,
+        &mut batch_provider,
+        service_key,
+        Some(b"best-score/v1"),
+        batch_hash,
+        batch,
+        1,
+    );
     for sender in senders {
-        assert_eq!(batch_state.nonce(&sender), Some(1));
+        assert_eq!(
+            provider_nonce(&batch_provider, service_key, &sender),
+            Some(1)
+        );
     }
 
     let mut isolation_state = new_state();
+    let mut isolation_provider = FullStateProvider::default();
     let isolation_hash = install_service(&mut isolation_state, blob);
-    let (good_a, sender_a) = signed_game(4, 0, 10, game_run(40, &[(1, 20)]));
-    let (bad_b, sender_b) = signed_game(5, 0, 10, game_run(40, &[(8, 20)]));
-    let (good_c, sender_c) = signed_game(6, 0, 10, game_run(40, &[(1, 30)]));
+    let (good_a, sender_a) = signed_game(service_key, 4, 0, 10, game_run(40, &[(1, 20)]));
+    let (bad_b, sender_b) = signed_game(service_key, 5, 0, 10, game_run(40, &[(8, 20)]));
+    let (good_c, sender_c) = signed_game(service_key, 6, 0, 10, game_run(40, &[(1, 30)]));
     execute_batch(
         &mut isolation_state,
+        &mut isolation_provider,
+        service_key,
+        Some(b"best-score/v1"),
         isolation_hash,
         vec![
             good_a.encode().unwrap(),
@@ -570,22 +760,41 @@ fn run_game(blob: &[u8]) {
         ],
         1,
     );
-    assert_eq!(isolation_state.nonce(&sender_a), Some(1));
-    assert_eq!(isolation_state.nonce(&sender_b), None);
-    assert_eq!(isolation_state.nonce(&sender_c), Some(1));
+    assert_eq!(
+        provider_nonce(&isolation_provider, service_key, &sender_a),
+        Some(1)
+    );
+    assert_eq!(
+        provider_nonce(&isolation_provider, service_key, &sender_b),
+        None
+    );
+    assert_eq!(
+        provider_nonce(&isolation_provider, service_key, &sender_c),
+        Some(1)
+    );
 
     let mut sequential_state = new_state();
+    let mut sequential_provider = FullStateProvider::default();
     let sequential_hash = install_service(&mut sequential_state, blob);
-    let (first, sequential_sender) = signed_game(8, 0, 10, game_run(80, &[(1, 20)]));
-    let (second, _) = signed_game(8, 1, 10, game_run(100, &[(1, 50)]));
+    let (first, sequential_sender) = signed_game(service_key, 8, 0, 10, game_run(80, &[(1, 20)]));
+    let (second, _) = signed_game(service_key, 8, 1, 10, game_run(100, &[(1, 50)]));
     execute_batch(
         &mut sequential_state,
+        &mut sequential_provider,
+        service_key,
+        Some(b"best-score/v1"),
         sequential_hash,
         vec![first.encode().unwrap(), second.encode().unwrap()],
         1,
     );
-    assert_eq!(sequential_state.nonce(&sequential_sender), Some(2));
-    assert_eq!(sequential_state.score(&sequential_sender), Some(150));
+    assert_eq!(
+        provider_nonce(&sequential_provider, service_key, &sequential_sender),
+        Some(2)
+    );
+    assert_eq!(
+        provider_score(&sequential_provider, service_key, &sequential_sender),
+        Some(150)
+    );
     let _ = selector;
 }
 

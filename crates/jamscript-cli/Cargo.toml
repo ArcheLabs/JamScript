@@ -14,6 +14,8 @@ jamscript-target-minijam = { path = "../jamscript-target-minijam" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+service-runtime-core = { path = "../service-runtime-core" }
+getrandom = "0.3.4"
 
 [[bin]]
 name = "jamscript"

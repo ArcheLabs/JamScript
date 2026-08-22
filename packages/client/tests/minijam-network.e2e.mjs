@@ -20,6 +20,7 @@ const nodeEndpoint = process.env.MINIJAM_NODE_RPC ?? "http://127.0.0.1:9944";
 const workEndpoint = process.env.MINIJAM_WORK_RPC ?? "http://127.0.0.1:8090";
 const artifacts = process.env.JAMSCRIPT_E2E_ARTIFACTS;
 const serviceId = Number(process.env.JAMSCRIPT_E2E_SERVICE_ID);
+const serviceKey = process.env.JAMSCRIPT_E2E_SERVICE_KEY;
 const codeHash = process.env.JAMSCRIPT_E2E_CODE_HASH;
 const genesisHash = process.env.JAMSCRIPT_E2E_GENESIS_HASH;
 const workerMetrics = [9616, 9617, 9618].map(
@@ -29,7 +30,7 @@ const workerLogDir = process.env.JAMSCRIPT_E2E_LOG_DIR;
 
 if (!artifacts || !Number.isInteger(serviceId) || !codeHash || !genesisHash) {
   throw new Error(
-    "JAMSCRIPT_E2E_ARTIFACTS, JAMSCRIPT_E2E_SERVICE_ID, " +
+      "JAMSCRIPT_E2E_ARTIFACTS, JAMSCRIPT_E2E_SERVICE_ID, " +
       "JAMSCRIPT_E2E_CODE_HASH and JAMSCRIPT_E2E_GENESIS_HASH are required",
   );
 }
@@ -192,9 +193,12 @@ function readAbi() {
 async function main() {
   await cryptoWaitReady();
   const [metadata, abi] = await Promise.all([readBuildMetadata(), readAbi()]);
+  const resolvedServiceKey = serviceKey ?? metadata.serviceKey ?? metadata.service_key;
+  if (!resolvedServiceKey) throw new Error("build metadata does not contain serviceKey");
   assert.equal(metadata.code_hash.toLowerCase(), codeHash.toLowerCase());
   const deployment = {
     genesisHash,
+    serviceKey: resolvedServiceKey,
     serviceId,
     codeHash,
     abiVersion: abi.abiVersion,

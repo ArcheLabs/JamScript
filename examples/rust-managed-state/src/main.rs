@@ -1,8 +1,9 @@
 use service_runtime_core::{
-    ExecutionContext, ManagedStateWitnessV1, RuntimeRefineInputV1, ServiceApplication,
-    StateAccessError, StateChangeV1, StateDiffV1,
+    ExecutionContext, RuntimeRefineInputV1, ServiceApplication, ServiceKeyV1, StateAccessError,
+    StateAccessPlanV1, StateChangeV1, StateDiffV1,
 };
-use service_runtime_guest::refine;
+use service_runtime_guest::refine_v2;
+use service_runtime_host::{FullStateProvider, ServiceStateProvider};
 use service_runtime_state::FullState;
 
 struct Counter;
@@ -22,20 +23,18 @@ impl ServiceApplication for Counter {
 }
 
 fn main() {
+    let service = ServiceKeyV1::new([9; 32]);
     let state = FullState::empty();
-    let parent_root = state.root();
-    let proof = state.proof_for(&[b"counter"]).unwrap();
-    let proof_nodes = proof.into_nodes().into_iter().collect();
+    let mut provider = FullStateProvider::default();
+    let parent_root = provider.insert(service, state.clone());
+    let plan = StateAccessPlanV1::for_public([b"counter".as_slice()]).unwrap();
+    let witness = provider.build_witness(service, parent_root, &plan).unwrap();
     let input = RuntimeRefineInputV1 {
         version: 1,
-        managed_state: ManagedStateWitnessV1 {
-            version: 1,
-            parent_root,
-            storage_proof: proof_nodes,
-        },
+        managed_state: witness,
         actions: vec![b"increment".to_vec()],
     };
-    let output = refine(&Counter, &input).expect("counter transition");
+    let output = refine_v2(&Counter, &input).expect("counter transition");
     let expected = state
         .apply_diff(&StateDiffV1 {
             changes: vec![StateChangeV1 {
@@ -51,8 +50,20 @@ fn main() {
         output.receipts[0].status,
         service_runtime_core::ActionStatusV1::Applied
     );
+    provider
+        .apply_recovery(service, &output)
+        .expect("provider recovery");
+    assert_eq!(provider.current_root(service).unwrap(), output.new_root);
+    assert_eq!(
+        provider
+            .open(service, output.new_root)
+            .unwrap()
+            .get(b"counter")
+            .unwrap(),
+        Some(vec![1])
+    );
     println!(
-        "authenticated Rust runtime transition: {:?}",
+        "authenticated Rust runtime transition and provider recovery: {:?}",
         output.new_root
     );
 }

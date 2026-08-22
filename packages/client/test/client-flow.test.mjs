@@ -9,6 +9,7 @@ import {
 
 const genesisHash = "0x" + "11".repeat(32);
 const codeHash = "0x" + "22".repeat(32);
+const serviceKey = "0x" + "aa".repeat(32);
 const emptyManagedStateRoot = "0x03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314";
 const initialContext = {
   blockHash: "0x" + "33".repeat(32),
@@ -24,6 +25,7 @@ const refreshedContext = {
 };
 const deployment = {
   genesisHash,
+  serviceKey,
   serviceId: 1000,
   codeHash,
   abiVersion: 1,

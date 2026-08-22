@@ -1,10 +1,11 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use jamscript_codegen_rust::{generate_no_std_rust_with_context, MiniJamContext};
+use jamscript_codegen_rust::{generate_no_std_rust_with_context, PortableServiceContext};
 use jamscript_ir::abi_for;
 use jamscript_parser::parse_service_with_native_modules;
 use jamscript_target_minijam::{MiniJamTarget, NativeModule};
 use serde::Deserialize;
+use service_runtime_core::ServiceKeyV1;
 use std::{
     collections::BTreeMap,
     fs,
@@ -50,6 +51,15 @@ struct Manifest {
     target: Option<Target>,
     native: Option<BTreeMap<String, NativeConfig>>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceMetadata {
+    version: u8,
+    #[serde(rename = "serviceKey")]
+    service_key: String,
+    name: String,
+}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Package {
@@ -67,6 +77,7 @@ struct Target {
 #[serde(deny_unknown_fields)]
 struct MiniJamConfig {
     sdk_root: Option<String>,
+    #[allow(dead_code)]
     service_id: Option<u32>,
     genesis_hash: Option<String>,
 }
@@ -127,14 +138,39 @@ fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
     Ok((manifest, ir))
 }
 
+fn load_service_key(path: &Path) -> Result<ServiceKeyV1> {
+    let metadata_path = path.join(".jamscript/service.json");
+    let metadata: ServiceMetadata = serde_json::from_str(
+        &fs::read_to_string(&metadata_path)
+            .with_context(|| format!("reading {}", metadata_path.display()))?,
+    )?;
+    if metadata.version != 1 || metadata.name.is_empty() {
+        bail!("invalid service metadata in {}", metadata_path.display());
+    }
+    let bytes = parse_hash(&metadata.service_key)?;
+    Ok(ServiceKeyV1::new(bytes))
+}
+
 fn new_project(name: &str) -> Result<()> {
     let root = PathBuf::from(name);
     if root.exists() {
         bail!("directory already exists: {}", root.display());
     }
     fs::create_dir_all(root.join("src"))?;
+    fs::create_dir_all(root.join(".jamscript"))?;
+    let mut service_key = [0u8; 32];
+    getrandom::fill(&mut service_key)
+        .map_err(|error| anyhow::anyhow!("generating service key: {error:?}"))?;
+    let service_key = service_key
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     fs::write(root.join("jamscript.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/service.ts\"\nlanguage = \"0.1\"\n"))?;
     fs::write(root.join("src/service.ts"), "import { action, wallet, u64 } from \"jam\";\n\nexport const increment = action({\n  auth: wallet(),\n  input: { value: u64 },\n  execute(ctx, input) {\n    return input.value + 1;\n  },\n});\n")?;
+    fs::write(
+        root.join(".jamscript/service.json"),
+        format!("{{\n  \"version\": 1,\n  \"serviceKey\": \"0x{service_key}\",\n  \"name\": \"{name}\"\n}}\n"),
+    )?;
     println!("created {}", root.display());
     Ok(())
 }
@@ -145,8 +181,8 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         .target
         .as_ref()
         .and_then(|target| target.minijam.as_ref());
-    let context = MiniJamContext {
-        service_id: minijam.and_then(|target| target.service_id).unwrap_or(0),
+    let context = PortableServiceContext {
+        service_key: load_service_key(path)?.into_bytes(),
         genesis_hash: minijam
             .and_then(|target| target.genesis_hash.as_deref())
             .map(parse_hash)

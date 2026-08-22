@@ -4,18 +4,18 @@ use jamscript_ir::{
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct MiniJamContext {
-    pub service_id: u32,
+pub struct PortableServiceContext {
+    pub service_key: [u8; 32],
     pub genesis_hash: [u8; 32],
 }
 
 pub fn generate_no_std_rust(ir: &ServiceIr) -> Result<String, String> {
-    generate_no_std_rust_with_context(ir, MiniJamContext::default())
+    generate_no_std_rust_with_context(ir, PortableServiceContext::default())
 }
 
 pub fn generate_no_std_rust_with_context(
     ir: &ServiceIr,
-    context: MiniJamContext,
+    context: PortableServiceContext,
 ) -> Result<String, String> {
     let action = ir
         .actions
@@ -33,11 +33,10 @@ pub fn generate_no_std_rust_with_context(
 #![allow(static_mut_refs)]
 
 use service_runtime_core::{{
-    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV1,
-    ServiceApplication, StateAccessError, StateRoot, MANAGED_STATE_COMMITMENT_KEY_V1,
+    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV2,
+    ServiceApplication, ServiceKeyV1, StateAccessError, StateRoot,
+    MANAGED_STATE_COMMITMENT_KEY_V1,
 }};
-use service_runtime_guest::refine;
-
 #[repr(C)]
 pub struct RefineOutput {{ pub data: *const u8, pub size: usize }}
 
@@ -50,8 +49,8 @@ extern "C" {{
 {native_declarations}}}
 
 static mut INPUT: [u8; 1048576] = [0; 1048576];
-static mut RESULT: [u8; 1048704] = [0; 1048704];
-static mut OUTPUT: [u8; 1048704] = [0; 1048704];
+static mut RESULT: [u8; 2097152] = [0; 2097152];
+static mut OUTPUT: [u8; 2097152] = [0; 2097152];
 static mut RUNTIME_HEAP: [u8; 65536] = [0; 65536];
 static mut RUNTIME_HEAP_OFFSET: usize = 0;
 
@@ -70,7 +69,7 @@ unsafe impl core::alloc::GlobalAlloc for RuntimeAllocator {{
 #[global_allocator]
 static RUNTIME_ALLOCATOR: RuntimeAllocator = RuntimeAllocator;
 
-const SERVICE_ID: u32 = {service_id};
+const SERVICE_KEY: ServiceKeyV1 = ServiceKeyV1::new({service_key});
 const GENESIS_HASH: [u8; 32] = {genesis_hash};
 const ACTION_SELECTOR: [u8; 8] = {selector};
 
@@ -115,7 +114,7 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
         Ok(value) => value,
         Err(_) => return error_output(1),
     }};
-    let output = match refine(&GeneratedApplication, &runtime_input) {{
+    let output = match service_runtime_guest::refine_v2(&GeneratedApplication, &runtime_input) {{
         Ok(value) => value,
         Err(error) => return error_output(match error {{
             service_runtime_guest::GuestError::InvalidInput => 1,
@@ -127,7 +126,7 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
         Ok(value) => value,
         Err(_) => return error_output(2),
     }};
-    if encoded.len() > 1048704 {{ return error_output(14); }}
+    if encoded.len() > 2097152 {{ return error_output(14); }}
     unsafe {{ OUTPUT[..encoded.len()].copy_from_slice(&encoded); }}
     RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size: encoded.len() }}
 }}
@@ -139,10 +138,10 @@ pub extern "C" fn minijam_accumulate(init_input: *const u8, init_size: usize) {{
     let count = unsafe {{ minijam_result_count() }};
     for index in 0..count {{
         let mut size = 0usize;
-        if unsafe {{ minijam_result(index, RESULT.as_mut_ptr(), 1048704, &mut size) }} != 0 {{ continue; }}
+        if unsafe {{ minijam_result(index, RESULT.as_mut_ptr(), 2097152, &mut size) }} != 0 {{ continue; }}
         let refined = unsafe {{ core::slice::from_raw_parts(RESULT.as_ptr(), size) }};
-        let Ok(output) = RuntimeRefineOutputV1::decode(refined) else {{ continue; }};
-        if output.parent_root == current {{ current = output.new_root; }}
+        let Ok(header) = RuntimeRefineOutputV2::decode_transition_header(refined) else {{ continue; }};
+        if header.parent_root == current {{ current = header.new_root; }}
     }}
     if current != read_current_commitment().unwrap_or(current) {{
         let commitment = ManagedStateCommitmentV1::new(current).encode();
@@ -181,7 +180,7 @@ impl ServiceApplication for GeneratedApplication {{
 
 fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_slice(&code.to_le_bytes()); RefineOutput {{ data: OUTPUT.as_ptr(), size: 4 }} }} }}
 "##,
-        service_id = context.service_id,
+        service_key = byte_array_literal(&context.service_key),
         genesis_hash = byte_array_literal(&context.genesis_hash),
         selector = byte_array_literal(&selector),
         native_declarations = native_declarations,
@@ -277,8 +276,8 @@ fn application_body(action: &ActionIr, setup: &str, effect: &str) -> String {
     let auth = match action.auth {
         AuthKind::Public => "let sender = [0u8; 32]; let input = raw_action;".to_string(),
         AuthKind::Wallet => [
-            "let signed = jamscript_runtime_core::decode_signed_action(raw_action).map_err(|_| StateAccessError::Backend)?;",
-            "let verified = jamscript_runtime_core::verify_signed_action(signed, GENESIS_HASH, SERVICE_ID, ACTION_SELECTOR).map_err(|_| StateAccessError::Backend)?;",
+            "let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action).map_err(|_| StateAccessError::Backend)?;",
+            "let verified = jamscript_runtime_core::verify_signed_action_v2(signed, GENESIS_HASH, SERVICE_KEY, ACTION_SELECTOR).map_err(|_| StateAccessError::Backend)?;",
             "let sender = verified.sender;",
             "let nonce_key = jamscript_runtime_core::nonce_key(&sender);",
             "let nonce_bytes = context.state().get(&nonce_key)?.unwrap_or_default();",
@@ -415,8 +414,11 @@ mod tests {
         })
         .unwrap();
         assert!(source.contains("context.state().get"));
-        assert!(source.contains("RuntimeRefineOutputV1::decode"));
+        assert!(source.contains("RuntimeRefineOutputV2::decode_transition_header"));
         assert!(source.contains("MANAGED_STATE_COMMITMENT_KEY_V1"));
+        assert!(source.contains("SERVICE_KEY"));
+        assert!(!source.contains("SERVICE_ID"));
+        assert!(!source.contains("service_id"));
         assert!(!source.contains("minijam_storage_write(state_key"));
         assert!(!source.contains("decode_refined_action"));
     }

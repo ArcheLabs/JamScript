@@ -19,11 +19,41 @@ pub const APPLICATION_KEY_CLASS_V1: u8 = 0x01;
 pub const RUNTIME_KEY_CLASS_V1: u8 = 0x00;
 pub const WALLET_AUTH_MODULE_V1: u8 = 0x01;
 pub const MAX_RUNTIME_ACTIONS: usize = 1024;
+pub const MAX_RECOVERY_CHANGES: usize = 4096;
+pub const MAX_RECOVERY_BYTES: usize = 1024 * 1024;
+pub const MAX_STATE_KEY_BYTES: usize = 4096;
+pub const MAX_STATE_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_WITNESS_NODES: usize = 4096;
 pub const MAX_WITNESS_NODE_BYTES: usize = 64 * 1024;
 pub const MAX_WITNESS_BYTES: usize = 1024 * 1024;
 pub const MAX_WITNESS_ENCODED_BYTES: usize =
     1 + 32 + 4 + (MAX_WITNESS_NODES * 4) + MAX_WITNESS_BYTES;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ServiceKeyV1([u8; 32]);
+
+impl ServiceKeyV1 {
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() != 32 {
+            return Err(WireError::InvalidLength);
+        }
+        Ok(Self(
+            bytes.try_into().map_err(|_| WireError::InvalidLength)?,
+        ))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ManagedStateCommitmentV1 {
@@ -124,6 +154,25 @@ pub struct StateDiffV1 {
 }
 
 impl StateDiffV1 {
+    pub fn validate_limits(&self) -> Result<(), WireError> {
+        if self.changes.len() > MAX_RECOVERY_CHANGES {
+            return Err(WireError::TooManyItems);
+        }
+        for change in &self.changes {
+            if change.key.len() > MAX_STATE_KEY_BYTES {
+                return Err(WireError::TooManyItems);
+            }
+            if change
+                .value
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_STATE_VALUE_BYTES)
+            {
+                return Err(WireError::TooManyItems);
+            }
+        }
+        Ok(())
+    }
+
     pub fn canonicalize(&mut self) -> Result<(), WireError> {
         self.changes.sort_by(|left, right| left.key.cmp(&right.key));
         for pair in self.changes.windows(2) {
@@ -135,6 +184,7 @@ impl StateDiffV1 {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        self.validate_limits()?;
         let mut canonical = self.clone();
         canonical.canonicalize()?;
         let count =
@@ -161,15 +211,15 @@ impl StateDiffV1 {
             return Err(WireError::UnsupportedVersion);
         }
         let count = reader.u32()? as usize;
-        if count > MAX_RUNTIME_ACTIONS * 1024 {
+        if count > MAX_RECOVERY_CHANGES {
             return Err(WireError::TooManyItems);
         }
         let mut changes = Vec::with_capacity(count);
         for _ in 0..count {
-            let key = reader.bytes_u32()?;
+            let key = reader.bytes_limited(MAX_STATE_KEY_BYTES)?;
             let value = match reader.u8()? {
                 0 => None,
-                1 => Some(reader.bytes_u32()?),
+                1 => Some(reader.bytes_limited(MAX_STATE_VALUE_BYTES)?),
                 _ => return Err(WireError::InvalidEncoding),
             };
             changes.push(StateChangeV1 { key, value });
@@ -178,6 +228,7 @@ impl StateDiffV1 {
             return Err(WireError::InvalidEncoding);
         }
         let diff = Self { changes };
+        diff.validate_limits()?;
         let mut sorted = diff.clone();
         sorted.canonicalize()?;
         if sorted != diff {
@@ -188,6 +239,152 @@ impl StateDiffV1 {
 
     pub fn hash(&self) -> Result<StateRoot, WireError> {
         Ok(blake2_256(&self.encode()?))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateRecoveryV1 {
+    pub version: u8,
+    pub diff: StateDiffV1,
+}
+
+impl StateRecoveryV1 {
+    pub fn new(diff: StateDiffV1) -> Result<Self, WireError> {
+        let mut diff = diff;
+        diff.validate_limits()?;
+        diff.canonicalize()?;
+        Ok(Self {
+            version: RECOVERY_FORMAT_VERSION,
+            diff,
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        if self.version != RECOVERY_FORMAT_VERSION {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let diff = self.diff.encode()?;
+        let mut writer = Writer::new();
+        writer.u8(self.version);
+        writer.bytes_u32(&diff)?;
+        let encoded = writer.finish();
+        if encoded.len() > MAX_RECOVERY_BYTES {
+            return Err(WireError::TooManyItems);
+        }
+        Ok(encoded)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() > MAX_RECOVERY_BYTES {
+            return Err(WireError::TooManyItems);
+        }
+        let mut reader = Reader::new(bytes);
+        let version = reader.u8()?;
+        if version != RECOVERY_FORMAT_VERSION {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let diff = StateDiffV1::decode(&reader.bytes_limited(MAX_RECOVERY_BYTES)?)?;
+        if reader.remaining() != 0 {
+            return Err(WireError::InvalidEncoding);
+        }
+        Ok(Self { version, diff })
+    }
+
+    pub fn commitment(&self) -> Result<StateRoot, WireError> {
+        Ok(blake2_256(&self.encode()?))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateAccessPlanV1 {
+    pub version: u8,
+    pub keys: Vec<Vec<u8>>,
+}
+
+impl StateAccessPlanV1 {
+    pub fn for_wallet<I, K>(sender: &[u8; 32], application_keys: I) -> Result<Self, WireError>
+    where
+        I: IntoIterator<Item = K>,
+        K: AsRef<[u8]>,
+    {
+        let nonce_key = wallet_nonce_key_v1(sender);
+        let keys = core::iter::once(nonce_key).chain(
+            application_keys
+                .into_iter()
+                .map(|key| key.as_ref().to_vec()),
+        );
+        Self::from_keys(keys)
+    }
+
+    pub fn for_public<I, K>(application_keys: I) -> Result<Self, WireError>
+    where
+        I: IntoIterator<Item = K>,
+        K: AsRef<[u8]>,
+    {
+        Self::from_keys(application_keys)
+    }
+
+    pub fn from_keys<I, K>(keys: I) -> Result<Self, WireError>
+    where
+        I: IntoIterator<Item = K>,
+        K: AsRef<[u8]>,
+    {
+        let mut keys = keys
+            .into_iter()
+            .map(|key| key.as_ref().to_vec())
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        if keys.len() > MAX_RECOVERY_CHANGES
+            || keys.iter().any(|key| key.len() > MAX_STATE_KEY_BYTES)
+        {
+            return Err(WireError::TooManyItems);
+        }
+        Ok(Self {
+            version: MANAGED_STATE_PROTOCOL_VERSION,
+            keys,
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        if self.version != MANAGED_STATE_PROTOCOL_VERSION || self.keys.len() > MAX_RECOVERY_CHANGES
+        {
+            return Err(WireError::TooManyItems);
+        }
+        let mut writer = Writer::new();
+        writer.u8(self.version);
+        writer.u32(self.keys.len() as u32);
+        for key in &self.keys {
+            if key.len() > MAX_STATE_KEY_BYTES {
+                return Err(WireError::TooManyItems);
+            }
+            writer.bytes_u32(key)?;
+        }
+        Ok(writer.finish())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut reader = Reader::new(bytes);
+        let version = reader.u8()?;
+        if version != MANAGED_STATE_PROTOCOL_VERSION {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let count = reader.u32()? as usize;
+        if count > MAX_RECOVERY_CHANGES {
+            return Err(WireError::TooManyItems);
+        }
+        let mut keys = Vec::with_capacity(count);
+        for _ in 0..count {
+            keys.push(reader.bytes_limited(MAX_STATE_KEY_BYTES)?);
+        }
+        if reader.remaining() != 0 {
+            return Err(WireError::InvalidEncoding);
+        }
+        let canonical = Self::from_keys(&keys)?;
+        if canonical.keys != keys {
+            return Err(WireError::UnsortedKeys);
+        }
+        Ok(Self { version, keys })
     }
 }
 
@@ -458,9 +655,168 @@ impl RuntimeRefineOutputV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRefineOutputV2 {
+    pub version: u8,
+    pub parent_root: StateRoot,
+    pub new_root: StateRoot,
+    pub receipts: Vec<ActionReceiptV1>,
+    pub recovery_commitment: StateRoot,
+    pub recovery_payload: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeRefineTransitionHeaderV2 {
+    pub version: u8,
+    pub parent_root: StateRoot,
+    pub new_root: StateRoot,
+    pub recovery_commitment: StateRoot,
+}
+
+impl RuntimeRefineOutputV2 {
+    pub fn from_diff(
+        parent_root: StateRoot,
+        new_root: StateRoot,
+        receipts: Vec<ActionReceiptV1>,
+        diff: StateDiffV1,
+    ) -> Result<Self, WireError> {
+        let recovery = StateRecoveryV1::new(diff)?;
+        let recovery_payload = recovery.encode()?;
+        let recovery_commitment = blake2_256(&recovery_payload);
+        Ok(Self {
+            version: MANAGED_STATE_PROTOCOL_VERSION + 1,
+            parent_root,
+            new_root,
+            receipts,
+            recovery_commitment,
+            recovery_payload,
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        if self.version != MANAGED_STATE_PROTOCOL_VERSION + 1
+            || self.receipts.len() > MAX_RUNTIME_ACTIONS
+            || self.recovery_payload.len() > MAX_RECOVERY_BYTES
+        {
+            return Err(WireError::TooManyItems);
+        }
+        let mut writer = Writer::new();
+        writer.u8(self.version);
+        writer.raw(&self.parent_root);
+        writer.raw(&self.new_root);
+        writer.u32(self.receipts.len() as u32);
+        for receipt in &self.receipts {
+            writer.raw(&receipt.action_hash);
+            writer.u8(receipt.status as u8);
+            match receipt.error_code {
+                Some(error) => {
+                    writer.u8(1);
+                    writer.u32(error);
+                }
+                None => writer.u8(0),
+            }
+        }
+        writer.raw(&self.recovery_commitment);
+        writer.bytes_u32(&self.recovery_payload)?;
+        Ok(writer.finish())
+    }
+
+    pub fn decode_transition_header(
+        bytes: &[u8],
+    ) -> Result<RuntimeRefineTransitionHeaderV2, WireError> {
+        let mut reader = Reader::new(bytes);
+        let version = reader.u8()?;
+        if version != MANAGED_STATE_PROTOCOL_VERSION + 1 {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let parent_root = reader.array::<32>()?;
+        let new_root = reader.array::<32>()?;
+        let count = reader.u32()? as usize;
+        if count > MAX_RUNTIME_ACTIONS {
+            return Err(WireError::TooManyItems);
+        }
+        for _ in 0..count {
+            let _ = reader.array::<32>()?;
+            let status = reader.u8()?;
+            if status > ActionStatusV1::Rejected as u8 {
+                return Err(WireError::InvalidEncoding);
+            }
+            match reader.u8()? {
+                0 => {}
+                1 => {
+                    let _ = reader.u32()?;
+                }
+                _ => return Err(WireError::InvalidEncoding),
+            }
+        }
+        let recovery_commitment = reader.array::<32>()?;
+        Ok(RuntimeRefineTransitionHeaderV2 {
+            version,
+            parent_root,
+            new_root,
+            recovery_commitment,
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() > MAX_RECOVERY_BYTES + 128 * MAX_RUNTIME_ACTIONS {
+            return Err(WireError::TooManyItems);
+        }
+        let mut reader = Reader::new(bytes);
+        let version = reader.u8()?;
+        if version != MANAGED_STATE_PROTOCOL_VERSION + 1 {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let parent_root = reader.array::<32>()?;
+        let new_root = reader.array::<32>()?;
+        let count = reader.u32()? as usize;
+        if count > MAX_RUNTIME_ACTIONS {
+            return Err(WireError::TooManyItems);
+        }
+        let mut receipts = Vec::with_capacity(count);
+        for _ in 0..count {
+            let action_hash = reader.array::<32>()?;
+            let status = match reader.u8()? {
+                0 => ActionStatusV1::Applied,
+                1 => ActionStatusV1::Failed,
+                2 => ActionStatusV1::Rejected,
+                _ => return Err(WireError::InvalidEncoding),
+            };
+            let error_code = match reader.u8()? {
+                0 => None,
+                1 => Some(reader.u32()?),
+                _ => return Err(WireError::InvalidEncoding),
+            };
+            receipts.push(ActionReceiptV1 {
+                action_hash,
+                status,
+                error_code,
+            });
+        }
+        let recovery_commitment = reader.array::<32>()?;
+        let recovery_payload = reader.bytes_limited(MAX_RECOVERY_BYTES)?;
+        if reader.remaining() != 0 {
+            return Err(WireError::InvalidEncoding);
+        }
+        let output = Self {
+            version,
+            parent_root,
+            new_root,
+            receipts,
+            recovery_commitment,
+            recovery_payload,
+        };
+        if blake2_256(&output.recovery_payload) != output.recovery_commitment {
+            return Err(WireError::InvalidEncoding);
+        }
+        StateRecoveryV1::decode(&output.recovery_payload)?;
+        Ok(output)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryRecordV1 {
     pub version: u8,
-    pub service_id: u32,
+    pub service_key: ServiceKeyV1,
     pub parent_root: StateRoot,
     pub new_root: StateRoot,
     pub code_hash: StateRoot,
@@ -471,7 +827,7 @@ impl RecoveryRecordV1 {
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
         let mut writer = Writer::new();
         writer.u8(self.version);
-        writer.u32(self.service_id);
+        writer.raw(self.service_key.as_bytes());
         writer.raw(&self.parent_root);
         writer.raw(&self.new_root);
         writer.raw(&self.code_hash);
@@ -485,7 +841,7 @@ impl RecoveryRecordV1 {
         if version != RECOVERY_FORMAT_VERSION {
             return Err(WireError::UnsupportedVersion);
         }
-        let service_id = reader.u32()?;
+        let service_key = ServiceKeyV1::new(reader.array::<32>()?);
         let parent_root = reader.array::<32>()?;
         let new_root = reader.array::<32>()?;
         let code_hash = reader.array::<32>()?;
@@ -495,7 +851,7 @@ impl RecoveryRecordV1 {
         }
         Ok(Self {
             version,
-            service_id,
+            service_key,
             parent_root,
             new_root,
             code_hash,
@@ -506,14 +862,14 @@ impl RecoveryRecordV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalStateWitnessV1 {
-    pub service_id: u32,
+    pub service_key: ServiceKeyV1,
     pub state_root: StateRoot,
     pub proof: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateQueryResponseV1 {
-    pub service_id: u32,
+    pub service_key: ServiceKeyV1,
     pub state_root: StateRoot,
     pub key: Vec<u8>,
     pub value: Option<Vec<u8>>,
@@ -877,5 +1233,39 @@ mod tests {
             storage_proof: vec![vec![0; MAX_WITNESS_NODE_BYTES + 1]],
         };
         assert_eq!(oversized.encode(), Err(WireError::TooManyItems));
+    }
+
+    #[test]
+    fn recovery_and_access_plan_are_canonical_and_bounded() {
+        let diff = StateDiffV1 {
+            changes: vec![StateChangeV1 {
+                key: b"counter".to_vec(),
+                value: Some(vec![1]),
+            }],
+        };
+        let recovery = StateRecoveryV1::new(diff).unwrap();
+        let encoded = recovery.encode().unwrap();
+        assert_eq!(StateRecoveryV1::decode(&encoded).unwrap(), recovery);
+        assert_eq!(recovery.commitment().unwrap(), blake2_256(&encoded));
+
+        let plan = StateAccessPlanV1::from_keys([b"b".as_slice(), b"a", b"a"]).unwrap();
+        assert_eq!(plan.keys, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(
+            StateAccessPlanV1::decode(&plan.encode().unwrap()).unwrap(),
+            plan
+        );
+        let wallet_plan = StateAccessPlanV1::for_wallet(&[7; 32], [b"counter".as_slice()]).unwrap();
+        assert!(wallet_plan.keys.contains(&wallet_nonce_key_v1(&[7; 32])));
+
+        let oversized = StateDiffV1 {
+            changes: vec![StateChangeV1 {
+                key: vec![0; MAX_STATE_KEY_BYTES + 1],
+                value: None,
+            }],
+        };
+        assert_eq!(
+            StateRecoveryV1::new(oversized),
+            Err(WireError::TooManyItems)
+        );
     }
 }
