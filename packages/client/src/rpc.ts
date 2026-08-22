@@ -35,6 +35,14 @@ export type WorkStatusResult = {
   context: FinalizedContext;
 };
 
+export type ManagedStateResult = {
+  serviceId: number;
+  stateRoot: string;
+  keyBase64: string;
+  valueBase64: string | null;
+  proofBase64: string[];
+};
+
 export class RpcError extends Error {
   constructor(
     message: string,
@@ -54,14 +62,21 @@ const FORMAL_WORK_METHODS = new Set([
   "minijam_getWorkStatusV1",
 ]);
 
+const STATE_PROVIDER_METHODS = new Set(["minijam_getManagedStateV1"]);
+
 export class SplitRpcTransport implements RpcTransport {
   constructor(
     private readonly node: RpcTransport,
     private readonly work: RpcTransport,
+    private readonly state: RpcTransport = node,
   ) {}
 
   call<T>(method: string, params?: unknown): Promise<T> {
-    const transport = FORMAL_WORK_METHODS.has(method) ? this.work : this.node;
+    const transport = FORMAL_WORK_METHODS.has(method)
+      ? this.work
+      : STATE_PROVIDER_METHODS.has(method)
+        ? this.state
+        : this.node;
     return transport.call<T>(method, params);
   }
 }
@@ -92,6 +107,11 @@ export type WorkRpc = RpcTransport & {
   finalizedContext(): Promise<FinalizedContext>;
   genesisHash(): Promise<string>;
   serviceStorageAt(blockHash: string, serviceId: number, key: string): Promise<string | null>;
+  managedStateAt(
+    serviceId: number,
+    stateRoot: string,
+    keyBase64: string,
+  ): Promise<ManagedStateResult>;
   submitWork(request: SubmitWorkRequest): Promise<SubmitWorkResult>;
   workStatus(packageHash: string): Promise<WorkStatusResult>;
 };
@@ -103,6 +123,8 @@ export function asWorkRpc(transport: RpcTransport): WorkRpc {
     genesisHash: () => transport.call("chain_getBlockHash", [0]),
     serviceStorageAt: (blockHash, serviceId, key) =>
       transport.call("minijam_getServiceStorageAt", [blockHash, serviceId, key]),
+    managedStateAt: (serviceId, stateRoot, keyBase64) =>
+      transport.call("minijam_getManagedStateV1", { serviceId, stateRoot, keyBase64 }),
     submitWork: (request) => transport.call("minijam_submitWorkV1", request),
     workStatus: (packageHash) =>
       transport.call("minijam_getWorkStatusV1", { packageHash }),

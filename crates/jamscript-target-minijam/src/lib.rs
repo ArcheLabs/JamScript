@@ -2,6 +2,9 @@ use anyhow::{bail, Context, Result};
 use jamscript_codegen_rust::{generate_no_std_rust_with_context, MiniJamContext};
 use jamscript_ir::{abi_for, ServiceIr, NATIVE_ABI_VERSION};
 use serde::Serialize;
+use service_runtime_core::{
+    MANAGED_STATE_LAYOUT_VERSION, MANAGED_STATE_PROTOCOL_VERSION, RECOVERY_FORMAT_VERSION,
+};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -14,6 +17,14 @@ pub struct BuildMetadata {
     pub language_version: String,
     pub compiler_version: String,
     pub runtime_version: String,
+    #[serde(rename = "runtimePackageVersion")]
+    pub runtime_package_version: String,
+    #[serde(rename = "managedStateProtocolVersion")]
+    pub managed_state_protocol_version: u8,
+    #[serde(rename = "managedStateLayoutVersion")]
+    pub managed_state_layout_version: u8,
+    #[serde(rename = "recoveryFormatVersion")]
+    pub recovery_format_version: u8,
     pub abi_version: u32,
     pub target_adapter_version: String,
     pub pvm_toolchain: String,
@@ -105,11 +116,19 @@ impl MiniJamTarget {
         let runtime_core = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../jamscript-runtime-core")
             .canonicalize()?;
+        let service_runtime_core = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../service-runtime-core")
+            .canonicalize()?;
+        let service_runtime_guest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../service-runtime-guest")
+            .canonicalize()?;
         fs::write(
             guest_project.path().join("Cargo.toml"),
             format!(
-                "[package]\nname = \"jamscript_guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"staticlib\"]\n[dependencies]\njamscript-runtime-core = {{ path = \"{}\", default-features = false }}\n",
-                runtime_core.display()
+                "[package]\nname = \"jamscript_guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"staticlib\"]\n[dependencies]\njamscript-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-guest = {{ path = \"{}\", default-features = false }}\n",
+                runtime_core.display(),
+                service_runtime_core.display(),
+                service_runtime_guest.display()
             ),
         )?;
         fs::copy(&generated, guest_project.path().join("src/lib.rs"))?;
@@ -117,7 +136,7 @@ impl MiniJamTarget {
         rust_build.args([
             "+nightly-2026-05-02",
             "-Z",
-            "build-std=core",
+            "build-std=core,alloc",
             "-Z",
             "json-target-spec",
             "build",
@@ -305,6 +324,10 @@ impl MiniJamTarget {
             language_version: "0.1".into(),
             compiler_version: env!("CARGO_PKG_VERSION").into(),
             runtime_version: "0.1.0".into(),
+            runtime_package_version: "service-runtime-0.1.0".into(),
+            managed_state_protocol_version: MANAGED_STATE_PROTOCOL_VERSION,
+            managed_state_layout_version: MANAGED_STATE_LAYOUT_VERSION,
+            recovery_format_version: RECOVERY_FORMAT_VERSION,
             abi_version: 1,
             target_adapter_version: "minijam-0.1".into(),
             pvm_toolchain:

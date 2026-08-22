@@ -134,7 +134,7 @@ fn new_project(name: &str) -> Result<()> {
     }
     fs::create_dir_all(root.join("src"))?;
     fs::write(root.join("jamscript.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/service.ts\"\nlanguage = \"0.1\"\n"))?;
-    fs::write(root.join("src/service.ts"), "import { action, wallet, u64 } from \"jam\";\n\nexport const increment = action({\n  auth: wallet(),\n  input: { value: u64 },\n  compute(ctx, input) {\n    return input.value + 1;\n  },\n});\n")?;
+    fs::write(root.join("src/service.ts"), "import { action, wallet, u64 } from \"jam\";\n\nexport const increment = action({\n  auth: wallet(),\n  input: { value: u64 },\n  execute(ctx, input) {\n    return input.value + 1;\n  },\n});\n")?;
     println!("created {}", root.display());
     Ok(())
 }

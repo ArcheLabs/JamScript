@@ -1,23 +1,16 @@
 use jamscript_crypto::Address;
 use jamscript_protocol::{ProtocolError, VerifiedAction};
+use service_runtime_core::application_key_v1;
 use std::collections::BTreeMap;
 
 pub const STATE_KEY_DOMAIN_V1: &[u8] = b"jamscript/state/v1";
 pub const RUNTIME_NONCE_NAMESPACE_V1: &[u8] = b"__jamscript/runtime/auth/nonces/";
 
-pub type StateKey = [u8; 32];
+pub type StateKey = Vec<u8>;
 
-pub fn state_key(service_id: u32, schema_id: &[u8], canonical_user_key: &[u8]) -> StateKey {
-    let mut preimage = Vec::with_capacity(
-        STATE_KEY_DOMAIN_V1.len() + 4 + 4 + schema_id.len() + 4 + canonical_user_key.len(),
-    );
-    preimage.extend_from_slice(STATE_KEY_DOMAIN_V1);
-    preimage.extend_from_slice(&service_id.to_le_bytes());
-    preimage.extend_from_slice(&(schema_id.len() as u32).to_le_bytes());
-    preimage.extend_from_slice(schema_id);
-    preimage.extend_from_slice(&(canonical_user_key.len() as u32).to_le_bytes());
-    preimage.extend_from_slice(canonical_user_key);
-    jamscript_crypto::blake2_256(&preimage)
+pub fn state_key(_service_id: u32, schema_id: &[u8], canonical_user_key: &[u8]) -> StateKey {
+    application_key_v1(schema_id, canonical_user_key)
+        .expect("managed application key length must fit u16")
 }
 
 #[derive(Clone, Debug, Default)]
@@ -311,8 +304,8 @@ mod tests {
     }
 
     #[test]
-    fn state_keys_are_service_and_schema_scoped() {
-        assert_ne!(
+    fn state_keys_are_schema_scoped_inside_a_service_trie() {
+        assert_eq!(
             state_key(1, b"scores", b"alice"),
             state_key(2, b"scores", b"alice")
         );

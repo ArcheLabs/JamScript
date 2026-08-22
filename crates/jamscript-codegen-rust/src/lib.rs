@@ -1,4 +1,7 @@
-use jamscript_ir::{action_selector, ActionIr, AuthKind, CommitIr, ComputeIr, ServiceIr, TypeIr};
+use jamscript_ir::{
+    action_selector, ActionBodyIr, ActionIr, AuthKind, ExecutionOpIr, ServiceIr, StateEffectIr,
+    TypeIr,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MiniJamContext {
@@ -20,10 +23,11 @@ pub fn generate_no_std_rust_with_context(
         .ok_or_else(|| "IR contains no action".to_string())?;
     let selector = action_selector(&action.name);
     let decoder = payload_decoder(action)?;
-    let setup = compute_setup(action, "decoded", &ir.native_imports)?;
+    let ActionBodyIr::Execute(execute) = &action.body;
+    let setup = compute_setup(&execute.operation, action, "decoded", &ir.native_imports)?;
     let auth_setup = auth_setup(action, &setup);
     let native_declarations = native_declarations(ir);
-    let commit = accumulate_commit(action, ir)?;
+    let state_effect = accumulate_state_effect(execute.state_effect.as_ref(), ir)?;
     Ok(format!(
         r##"#![no_std]
 #![allow(static_mut_refs)]
@@ -42,6 +46,23 @@ extern "C" {{
 static mut INPUT: [u8; 1048576] = [0; 1048576];
 static mut RESULT: [u8; 1048704] = [0; 1048704];
 static mut OUTPUT: [u8; 1048704] = [0; 1048704];
+static mut RUNTIME_HEAP: [u8; 65536] = [0; 65536];
+static mut RUNTIME_HEAP_OFFSET: usize = 0;
+
+struct RuntimeAllocator;
+unsafe impl core::alloc::GlobalAlloc for RuntimeAllocator {{
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {{
+        let base = RUNTIME_HEAP.as_mut_ptr() as usize;
+        let offset = (RUNTIME_HEAP_OFFSET + layout.align() - 1) & !(layout.align() - 1);
+        let end = offset.saturating_add(layout.size());
+        if end > RUNTIME_HEAP.len() {{ return core::ptr::null_mut(); }}
+        RUNTIME_HEAP_OFFSET = end;
+        base.saturating_add(offset) as *mut u8
+    }}
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {{}}
+}}
+#[global_allocator]
+static RUNTIME_ALLOCATOR: RuntimeAllocator = RuntimeAllocator;
 
 const SERVICE_ID: u32 = {service_id};
 const GENESIS_HASH: [u8; 32] = {genesis_hash};
@@ -99,7 +120,7 @@ pub extern "C" fn minijam_accumulate(init_input: *const u8, init_size: usize) {{
         let refined = unsafe {{ core::slice::from_raw_parts(RESULT.as_ptr(), size) }};
         let Ok(action) = jamscript_runtime_core::decode_refined_action(refined) else {{ continue; }};
         if jamscript_runtime_core::check_expiry(action.valid_until, authoritative_tick).is_err() {{ continue; }}
-        let nonce_key = jamscript_runtime_core::state_key(SERVICE_ID, jamscript_runtime_core::NONCE_SCHEMA_V1, &action.sender);
+        let nonce_key = jamscript_runtime_core::nonce_key(&action.sender);
         let mut nonce_bytes = [0u8; 8];
         let mut nonce_size = 0usize;
         let read_status = unsafe {{ minijam_storage_read(nonce_key.as_ptr(), nonce_key.len(), nonce_bytes.as_mut_ptr(), nonce_bytes.len(), &mut nonce_size) }};
@@ -133,7 +154,7 @@ fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_sl
         native_declarations = native_declarations,
         decoder = decoder,
         auth_setup = auth_setup,
-        commit = commit,
+        commit = state_effect,
     ))
 }
 
@@ -181,6 +202,7 @@ fn payload_decoder(action: &ActionIr) -> Result<String, String> {
 }
 
 fn compute_setup(
+    operation: &ExecutionOpIr,
     action: &ActionIr,
     decoded: &str,
     native_imports: &[jamscript_ir::NativeImportIr],
@@ -192,16 +214,18 @@ fn compute_setup(
             .position(|field| field.name == name)
             .ok_or_else(|| format!("compute references unknown input field `{name}`"))
     };
-    match &action.compute {
-        ComputeIr::ReturnInputField { field } => {
+    match operation {
+        ExecutionOpIr::ReturnInputField { field } => {
             Ok(format!("let value = {decoded}.{};", field_index(field)?))
         }
-        ComputeIr::AddInputField { field, value } => Ok(format!(
+        ExecutionOpIr::AddInputField { field, value } => Ok(format!(
             "let value = {decoded}.{}.checked_add({value}u128 as u64).ok_or(1u32)?;",
             field_index(field)?
         )),
-        ComputeIr::ReturnInteger { value } => Ok(format!("let value: u64 = {value}u128 as u64;")),
-        ComputeIr::NativeBytesToU64 {
+        ExecutionOpIr::ReturnInteger { value } => {
+            Ok(format!("let value: u64 = {value}u128 as u64;"))
+        }
+        ExecutionOpIr::NativeBytesToU64 {
             module,
             function,
             field,
@@ -214,7 +238,6 @@ fn compute_setup(
             let symbol = native_symbol(&import.module, &import.function);
             Ok(format!("let mut value = 0u64; let native_status = unsafe {{ {symbol}({decoded}.{index}.as_ptr(), {decoded}.{index}.len() as u32, &mut value) }}; if native_status != 0 {{ if native_status >= NATIVE_ERROR_BASE {{ return Err(NATIVE_ERROR_BASE); }} return Err(NATIVE_ERROR_BASE | native_status); }}"))
         }
-        ComputeIr::Unsupported(message) => Err(message.clone()),
     }
 }
 
@@ -226,12 +249,15 @@ fn auth_setup(action: &ActionIr, setup: &str) -> String {
     }
 }
 
-fn accumulate_commit(action: &ActionIr, ir: &ServiceIr) -> Result<String, String> {
-    let Some(commit) = &action.commit else {
+fn accumulate_state_effect(
+    effect: Option<&StateEffectIr>,
+    ir: &ServiceIr,
+) -> Result<String, String> {
+    let Some(commit) = effect else {
         return Ok(String::new());
     };
     let state_name = match commit {
-        CommitIr::StateSet { state, .. } | CommitIr::StateMax { state, .. } => state,
+        StateEffectIr::Set { state } | StateEffectIr::Max { state } => state,
     };
     let state = ir
         .states
@@ -240,8 +266,8 @@ fn accumulate_commit(action: &ActionIr, ir: &ServiceIr) -> Result<String, String
         .ok_or_else(|| format!("commit references unknown state `{state_name}`"))?;
     let schema = byte_array_literal(state.schema.as_bytes());
     match commit {
-        CommitIr::StateSet { .. } => Ok(format!("let state_key = jamscript_runtime_core::state_key(SERVICE_ID, &{schema}, &action.sender); let value = score.to_le_bytes(); if unsafe {{ minijam_storage_write(state_key.as_ptr(), state_key.len(), value.as_ptr(), value.len()) }} != 0 {{ accumulate_failure(); }}")),
-        CommitIr::StateMax { .. } => Ok(format!("let state_key = jamscript_runtime_core::state_key(SERVICE_ID, &{schema}, &action.sender); let mut old_bytes = [0u8; 8]; let mut old_size = 0usize; let state_status = unsafe {{ minijam_storage_read(state_key.as_ptr(), state_key.len(), old_bytes.as_mut_ptr(), old_bytes.len(), &mut old_size) }}; let should_write = match state_status {{ 1 => true, 0 if old_size == 8 => score > u64::from_le_bytes(old_bytes), 0 => accumulate_failure(), _ => accumulate_failure() }}; if should_write {{ let value = score.to_le_bytes(); if unsafe {{ minijam_storage_write(state_key.as_ptr(), state_key.len(), value.as_ptr(), value.len()) }} != 0 {{ accumulate_failure(); }} }}")),
+        StateEffectIr::Set { .. } => Ok(format!("let state_key = jamscript_runtime_core::state_key(SERVICE_ID, &{schema}, &action.sender); let value = score.to_le_bytes(); if unsafe {{ minijam_storage_write(state_key.as_ptr(), state_key.len(), value.as_ptr(), value.len()) }} != 0 {{ accumulate_failure(); }}")),
+        StateEffectIr::Max { .. } => Ok(format!("let state_key = jamscript_runtime_core::state_key(SERVICE_ID, &{schema}, &action.sender); let mut old_bytes = [0u8; 8]; let mut old_size = 0usize; let state_status = unsafe {{ minijam_storage_read(state_key.as_ptr(), state_key.len(), old_bytes.as_mut_ptr(), old_bytes.len(), &mut old_size) }}; let should_write = match state_status {{ 1 => true, 0 if old_size == 8 => score > u64::from_le_bytes(old_bytes), 0 => accumulate_failure(), _ => accumulate_failure() }}; if should_write {{ let value = score.to_le_bytes(); if unsafe {{ minijam_storage_write(state_key.as_ptr(), state_key.len(), value.as_ptr(), value.len()) }} != 0 {{ accumulate_failure(); }} }}")),
     }
 }
 
@@ -292,12 +318,14 @@ mod tests {
                     name: "payload".into(),
                     ty: TypeIr::Bytes { max: 64 },
                 }],
-                compute: ComputeIr::NativeBytesToU64 {
-                    module: "game".into(),
-                    function: "replay".into(),
-                    field: "payload".into(),
-                },
-                commit: None,
+                body: ActionBodyIr::Execute(jamscript_ir::ExecuteIr {
+                    operation: ExecutionOpIr::NativeBytesToU64 {
+                        module: "game".into(),
+                        function: "replay".into(),
+                        field: "payload".into(),
+                    },
+                    state_effect: None,
+                }),
             }],
         })
         .unwrap();

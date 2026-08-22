@@ -5,6 +5,7 @@ import { SplitRpcTransport } from "../dist/index.js";
 test("SplitRpcTransport sends node queries to node and Work methods to formal RPC", async () => {
   const nodeCalls = [];
   const workCalls = [];
+  const stateCalls = [];
   const node = {
     async call(method, params) {
       nodeCalls.push({ method, params });
@@ -17,7 +18,13 @@ test("SplitRpcTransport sends node queries to node and Work methods to formal RP
       return "work:" + method;
     },
   };
-  const transport = new SplitRpcTransport(node, work);
+  const state = {
+    async call(method, params) {
+      stateCalls.push({ method, params });
+      return "state:" + method;
+    },
+  };
+  const transport = new SplitRpcTransport(node, work, state);
 
   assert.equal(await transport.call("chain_getBlockHash", [0]), "node:chain_getBlockHash");
   assert.equal(
@@ -33,6 +40,10 @@ test("SplitRpcTransport sends node queries to node and Work methods to formal RP
     await transport.call("minijam_getWorkStatusV1", { packageHash: "0x03" }),
     "work:minijam_getWorkStatusV1",
   );
+  assert.equal(
+    await transport.call("minijam_getManagedStateV1", { serviceId: 1000 }),
+    "state:minijam_getManagedStateV1",
+  );
 
   assert.deepEqual(
     nodeCalls.map(({ method }) => method),
@@ -46,4 +57,5 @@ test("SplitRpcTransport sends node queries to node and Work methods to formal RP
     workCalls.map(({ method }) => method),
     ["minijam_submitWorkV1", "minijam_getWorkStatusV1"],
   );
+  assert.deepEqual(stateCalls.map(({ method }) => method), ["minijam_getManagedStateV1"]);
 });

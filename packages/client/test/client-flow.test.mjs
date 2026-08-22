@@ -9,6 +9,7 @@ import {
 
 const genesisHash = "0x" + "11".repeat(32);
 const codeHash = "0x" + "22".repeat(32);
+const emptyManagedStateRoot = "0x03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314";
 const initialContext = {
   blockHash: "0x" + "33".repeat(32),
   blockNumber: 10,
@@ -36,7 +37,7 @@ const deployment = {
         selector: toHex(actionSelector("submit")),
         auth: "wallet",
         input: [{ name: "score", type: "u64" }],
-        computeOutput: "u64",
+        executeOutput: "u64",
       },
     ],
     queries: [
@@ -68,6 +69,12 @@ function stateU64(value) {
   return "0x" + Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function rawU64(value) {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
+  return Buffer.from(bytes).toString("base64");
+}
+
 function contextResult(context) {
   return { packageHash: "0x" + "77".repeat(32), submissionHash: "0x" + "88".repeat(32), context };
 }
@@ -84,7 +91,10 @@ test("submitAction reads finalized nonce and signs exactly once across stale ret
         contextReads += 1;
         return contextReads === 1 ? initialContext : refreshedContext;
       }
-      if (method === "minijam_getServiceStorageAt") return stateU64(7);
+      if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "minijam_getManagedStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: rawU64(7), proofBase64: [] };
+      }
       if (method === "minijam_submitWorkV1") {
         submissions += 1;
         if (submissions === 1) throw new RpcError("stale", -32010);
@@ -119,7 +129,10 @@ test("query reads and decodes state at the finalized block", async () => {
       if (method === "minijam_getFinalizedContext") return initialContext;
       if (method === "minijam_getServiceStorageAt") {
         assert.equal(params[0], initialContext.blockHash);
-        return stateU64(42);
+        return null;
+      }
+      if (method === "minijam_getManagedStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: rawU64(42), proofBase64: [] };
       }
       throw new Error("unexpected RPC method: " + method);
     },

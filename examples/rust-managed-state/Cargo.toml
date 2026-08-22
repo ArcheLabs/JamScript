@@ -1,0 +1,9 @@
+[package]
+name = "rust-managed-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+service-runtime-core = { path = "../../crates/service-runtime-core" }
+service-runtime-guest = { path = "../../crates/service-runtime-guest" }

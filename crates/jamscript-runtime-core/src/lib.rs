@@ -1,7 +1,9 @@
 #![no_std]
 
-use blake2b_simd::Params;
+extern crate alloc;
+
 use jamscript_crypto::{blake2_256, verify_sr25519, Address};
+use service_runtime_core::{application_key_v1, wallet_nonce_key_v1};
 
 pub const RUNTIME_VERSION: &str = "0.1.0";
 pub const MAX_ACTION_BYTES: usize = 1_048_576;
@@ -245,18 +247,12 @@ pub struct RefinedActionView<'a> {
     pub result: &'a [u8],
 }
 
-pub fn state_key(service_id: u32, schema: &[u8], key: &[u8]) -> [u8; 32] {
-    let mut state = Params::new().hash_length(32).to_state();
-    state.update(STATE_KEY_DOMAIN_V1);
-    state.update(&service_id.to_le_bytes());
-    state.update(&(schema.len() as u32).to_le_bytes());
-    state.update(schema);
-    state.update(&(key.len() as u32).to_le_bytes());
-    state.update(key);
-    let digest = state.finalize();
-    let mut output = [0u8; 32];
-    output.copy_from_slice(digest.as_bytes());
-    output
+pub fn state_key(_service_id: u32, schema: &[u8], key: &[u8]) -> alloc::vec::Vec<u8> {
+    application_key_v1(schema, key).expect("managed application key length must fit u16")
+}
+
+pub fn nonce_key(account: &Address) -> alloc::vec::Vec<u8> {
+    wallet_nonce_key_v1(account)
 }
 
 struct Reader<'a> {
@@ -325,6 +321,11 @@ mod tests {
     #[test]
     fn state_key_is_length_delimited() {
         assert_ne!(state_key(1, b"a", b"bc"), state_key(1, b"ab", b"c"));
+        assert_eq!(
+            state_key(1, b"scores", b"alice"),
+            state_key(2, b"scores", b"alice")
+        );
+        assert_eq!(nonce_key(&[7; 32])[..2], [0, 1]);
     }
 
     #[test]

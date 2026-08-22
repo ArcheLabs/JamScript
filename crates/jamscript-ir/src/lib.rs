@@ -22,8 +22,7 @@ pub struct ActionIr {
     pub name: String,
     pub auth: AuthKind,
     pub input: Vec<FieldIr>,
-    pub compute: ComputeIr,
-    pub commit: Option<CommitIr>,
+    pub body: ActionBodyIr,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -52,27 +51,39 @@ pub struct NativeImportIr {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum CommitIr {
-    StateSet {
-        state: String,
-        key: CommitKeyIr,
-        value: CommitValueIr,
+pub enum ActionBodyIr {
+    Execute(ExecuteIr),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExecuteIr {
+    pub operation: ExecutionOpIr,
+    pub state_effect: Option<StateEffectIr>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ExecutionOpIr {
+    ReturnInputField {
+        field: String,
     },
-    StateMax {
-        state: String,
-        key: CommitKeyIr,
-        value: CommitValueIr,
+    ReturnInteger {
+        value: u128,
+    },
+    AddInputField {
+        field: String,
+        value: u128,
+    },
+    NativeBytesToU64 {
+        module: String,
+        function: String,
+        field: String,
     },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum CommitKeyIr {
-    Sender,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum CommitValueIr {
-    Result,
+pub enum StateEffectIr {
+    Set { state: String },
+    Max { state: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -115,26 +126,6 @@ impl TypeIr {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum ComputeIr {
-    ReturnInputField {
-        field: String,
-    },
-    ReturnInteger {
-        value: u128,
-    },
-    AddInputField {
-        field: String,
-        value: u128,
-    },
-    NativeBytesToU64 {
-        module: String,
-        function: String,
-        field: String,
-    },
-    Unsupported(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Abi {
     pub abi_version: u32,
     pub language_version: String,
@@ -157,7 +148,8 @@ pub struct AbiAction {
     pub selector: String,
     pub auth: String,
     pub input: Vec<AbiField>,
-    pub compute_output: String,
+    #[serde(rename = "executeOutput")]
+    pub execute_output: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -252,24 +244,18 @@ pub fn abi_for(ir: &ServiceIr) -> Abi {
         kind: "address".into(),
         max: Some(32),
     });
-    Abi {
-        abi_version: ABI_VERSION,
-        language_version: LANGUAGE_VERSION.into(),
-        package: AbiPackage {
-            name: ir.package_name.clone(),
-            version: ir.package_version.clone(),
-        },
-        actions: ir
-            .actions
-            .iter()
-            .map(|action| AbiAction {
+    let actions = ir
+        .actions
+        .iter()
+        .map(|action| {
+            let auth = match action.auth {
+                AuthKind::Wallet => "wallet",
+                AuthKind::Public => "public",
+            };
+            AbiAction {
                 name: action.name.clone(),
                 selector: selector_hex(action_selector(&action.name)),
-                auth: match action.auth {
-                    AuthKind::Wallet => "wallet",
-                    AuthKind::Public => "public",
-                }
-                .into(),
+                auth: auth.into(),
                 input: action
                     .input
                     .iter()
@@ -278,20 +264,18 @@ pub fn abi_for(ir: &ServiceIr) -> Abi {
                         ty: f.ty.abi_name(),
                     })
                     .collect(),
-                compute_output: match &action.compute {
-                    ComputeIr::ReturnInputField { field }
-                    | ComputeIr::AddInputField { field, .. } => action
-                        .input
-                        .iter()
-                        .find(|f| f.name == *field)
-                        .map(|f| f.ty.abi_name())
-                        .unwrap_or_else(|| "unknown".into()),
-                    ComputeIr::ReturnInteger { .. } => "u64".into(),
-                    ComputeIr::NativeBytesToU64 { .. } => "u64".into(),
-                    ComputeIr::Unsupported(_) => "unknown".into(),
-                },
-            })
-            .collect(),
+                execute_output: abi_output(action),
+            }
+        })
+        .collect();
+    Abi {
+        abi_version: ABI_VERSION,
+        language_version: LANGUAGE_VERSION.into(),
+        package: AbiPackage {
+            name: ir.package_name.clone(),
+            version: ir.package_version.clone(),
+        },
+        actions,
         queries: ir
             .queries
             .iter()
@@ -324,6 +308,23 @@ pub fn abi_for(ir: &ServiceIr) -> Abi {
     }
 }
 
+fn abi_output(action: &ActionIr) -> String {
+    match &action.body {
+        ActionBodyIr::Execute(execute) => match &execute.operation {
+            ExecutionOpIr::ReturnInputField { field }
+            | ExecutionOpIr::AddInputField { field, .. } => action
+                .input
+                .iter()
+                .find(|f| f.name == *field)
+                .map(|f| f.ty.abi_name())
+                .unwrap_or_else(|| "unknown".into()),
+            ExecutionOpIr::ReturnInteger { .. } | ExecutionOpIr::NativeBytesToU64 { .. } => {
+                "u64".into()
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,8 +347,10 @@ mod tests {
                     name: "run".into(),
                     ty: TypeIr::Bytes { max: 64 },
                 }],
-                compute: ComputeIr::ReturnInteger { value: 1 },
-                commit: None,
+                body: ActionBodyIr::Execute(ExecuteIr {
+                    operation: ExecutionOpIr::ReturnInteger { value: 1 },
+                    state_effect: None,
+                }),
             }],
             queries: Vec::new(),
             native_imports: Vec::new(),

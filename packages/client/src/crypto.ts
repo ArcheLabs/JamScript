@@ -2,9 +2,11 @@ import { hexToU8a, u8aToHex } from "@polkadot/util";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 
 export const ACTION_DOMAIN_V1 = new TextEncoder().encode("JAMSCRIPT_ACTION_V1");
-export const STATE_KEY_DOMAIN_V1 = new TextEncoder().encode("jamscript/state/v1");
-export const NONCE_SCHEMA_V1 = new TextEncoder().encode(
-  "__jamscript/runtime/auth/nonces/",
+export const APPLICATION_KEY_CLASS_V1 = 0x01;
+export const RUNTIME_KEY_CLASS_V1 = 0x00;
+export const WALLET_AUTH_MODULE_V1 = 0x01;
+export const MANAGED_STATE_COMMITMENT_KEY_V1 = new TextEncoder().encode(
+  ":jam-service-runtime:managed-state:v1",
 );
 
 export type SignedAction = {
@@ -64,22 +66,23 @@ export function actionSelector(name: string): Uint8Array {
 }
 
 export function stateKey(
-  serviceId: number,
+  _serviceId: number,
   schema: Uint8Array | string,
   key: Uint8Array,
 ): Uint8Array {
   const schemaBytes = typeof schema === "string" ? new TextEncoder().encode(schema) : schema;
-  return blake2AsU8a(
-    concat(
-      STATE_KEY_DOMAIN_V1,
-      u32(serviceId),
-      u32(schemaBytes.length),
-      schemaBytes,
-      u32(key.length),
-      key,
-    ),
-    256,
+  if (schemaBytes.length > 0xffff) throw new Error("managed state namespace is too large");
+  return concat(
+    byte(APPLICATION_KEY_CLASS_V1),
+    Uint8Array.of(schemaBytes.length & 0xff, schemaBytes.length >>> 8),
+    schemaBytes,
+    key,
   );
+}
+
+export function nonceKey(publicKey: Uint8Array): Uint8Array {
+  if (publicKey.length !== 32) throw new Error("wallet account must be 32 bytes");
+  return concat(byte(RUNTIME_KEY_CLASS_V1), byte(WALLET_AUTH_MODULE_V1), publicKey);
 }
 
 export function signingDigest(action: Omit<SignedAction, "signature">): Uint8Array {

@@ -3,7 +3,8 @@ import { decodeStateValue, decodeValue, encodeActionPayload, type CodecValue } f
 import {
   actionSelector,
   encodeSignedAction,
-  NONCE_SCHEMA_V1,
+  MANAGED_STATE_COMMITMENT_KEY_V1,
+  nonceKey,
   parseHex,
   signingDigest,
   stateKey,
@@ -13,6 +14,8 @@ import {
 import { asWorkRpc, RpcError, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
+
+const EMPTY_STATE_ROOT_V1 = "0x03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314";
 
 export type QueryResult = {
   value: CodecValue | null;
@@ -42,14 +45,11 @@ export class JamScriptClient {
   async readNonce(publicKey: Uint8Array, context?: FinalizedContext): Promise<bigint> {
     if (publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
     const finalized = context ?? (await this.rpc.finalizedContext());
-    const key = stateKey(this.deployment.serviceId, NONCE_SCHEMA_V1, publicKey);
-    const encoded = await this.rpc.serviceStorageAt(
-      finalized.blockHash,
-      this.deployment.serviceId,
-      toHex(key),
-    );
-    if (encoded === null) return 0n;
-    const value = decodeValue("u64", decodeStateValue(parseHex(encoded)));
+    const root = await this.managedStateRoot(finalized);
+    const key = nonceKey(publicKey);
+    const valueBytes = await this.readManagedValue(finalized, root, key);
+    if (valueBytes === null) return 0n;
+    const value = decodeValue("u64", valueBytes);
     if (typeof value !== "bigint") throw new Error("nonce storage is not u64");
     return value;
   }
@@ -118,21 +118,65 @@ export class JamScriptClient {
     const query = queryByName(this.deployment.abi, queryName);
     const state = stateByName(this.deployment.abi, query.state);
     if (query.keyType !== "address" || state.keyType !== "address" || key.length !== 32) {
-      throw new Error("M4 declarative queries require a 32-byte address key");
+      throw new Error("managed-state queries require a 32-byte address key");
     }
     const context = await this.rpc.finalizedContext();
+    const root = await this.managedStateRoot(context);
+    const valueBytes = await this.readManagedValue(
+      context,
+      root,
+      stateKey(this.deployment.serviceId, state.schema, key),
+    );
+    return {
+      value: valueBytes === null
+        ? null
+        : decodeValue(query.output.type, valueBytes),
+      context,
+    };
+  }
+
+  private async managedStateRoot(context: FinalizedContext): Promise<Uint8Array> {
     const encoded = await this.rpc.serviceStorageAt(
       context.blockHash,
       this.deployment.serviceId,
-      toHex(stateKey(this.deployment.serviceId, state.schema, key)),
+      toHex(MANAGED_STATE_COMMITMENT_KEY_V1),
     );
-    return {
-      value:
-        encoded === null
-          ? null
-          : decodeValue(query.output.type, decodeStateValue(parseHex(encoded))),
-      context,
-    };
+    if (encoded === null) return parseHex(EMPTY_STATE_ROOT_V1);
+    const commitment = decodeStateValue(parseHex(encoded));
+    if (commitment.length !== 34 || commitment[0] !== 1 || commitment[1] !== 1) {
+      throw new Error("invalid ManagedStateCommitmentV1");
+    }
+    return commitment.slice(2);
+  }
+
+  private async readManagedValue(
+    context: FinalizedContext,
+    root: Uint8Array,
+    key: Uint8Array,
+  ): Promise<Uint8Array | null> {
+    try {
+      const response = await this.rpc.managedStateAt(
+        this.deployment.serviceId,
+        toHex(root),
+        toBase64(key),
+      );
+      if (
+        response.serviceId !== this.deployment.serviceId
+        || response.stateRoot.toLowerCase() !== toHex(root).toLowerCase()
+        || response.keyBase64 !== toBase64(key)
+      ) {
+        throw new Error("managed-state provider response does not match the requested query");
+      }
+      return response.valueBase64 === null ? null : fromBase64(response.valueBase64);
+    } catch (error) {
+      if (!isManagedStateUnavailable(error)) throw error;
+      const encoded = await this.rpc.serviceStorageAt(
+        context.blockHash,
+        this.deployment.serviceId,
+        toHex(key),
+      );
+      return encoded === null ? null : decodeStateValue(parseHex(encoded));
+    }
   }
 
   workStatus(packageHash: string): Promise<WorkStatusResult> {
@@ -168,10 +212,21 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function fromBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  const output = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) output[index] = binary.charCodeAt(index);
+  return output;
+}
+
 function sameHex(left: string, right: string): boolean {
   return left.toLowerCase().replace(/^0x/, "") === right.toLowerCase().replace(/^0x/, "");
 }
 
 function isStaleContext(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === -32010;
+}
+
+function isManagedStateUnavailable(error: unknown): boolean {
+  return error instanceof RpcError && (error.code === -32601 || error.code === -32030);
 }

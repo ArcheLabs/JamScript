@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/service-runtime-core",
+  "crates/service-runtime-state",
+  "crates/service-runtime-guest",
+  "crates/service-runtime-host",
   "crates/jamscript-crypto",
   "crates/jamscript-ir",
   "crates/jamscript-parser",
@@ -10,6 +14,7 @@ members = [
   "crates/jamscript-codegen-rust",
   "crates/jamscript-target-minijam",
   "crates/jamscript-cli",
+  "examples/rust-managed-state",
 ]
 
 [workspace.package]

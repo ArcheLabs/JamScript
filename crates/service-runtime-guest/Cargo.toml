@@ -1,0 +1,11 @@
+[package]
+name = "service-runtime-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+service-runtime-core = { path = "../service-runtime-core", default-features = false }

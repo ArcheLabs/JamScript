@@ -1,6 +1,6 @@
 use jamscript_ir::{
-    ActionIr, AuthKind, CommitIr, CommitKeyIr, CommitValueIr, ComputeIr, FieldIr, NativeImportIr,
-    QueryIr, ServiceIr, StateIr, StateKeyType, TypeIr, MAX_ACTION_PAYLOAD_BYTES,
+    ActionBodyIr, ActionIr, AuthKind, ExecuteIr, ExecutionOpIr, FieldIr, NativeImportIr, QueryIr,
+    ServiceIr, StateEffectIr, StateIr, StateKeyType, TypeIr, MAX_ACTION_PAYLOAD_BYTES,
 };
 use swc_common::{sync::Lrc, FileName, SourceMap};
 use swc_ecma_ast::*;
@@ -227,8 +227,7 @@ fn parse_action(
     let config = call_object(init, "action", "1011")?;
     let mut auth = None;
     let mut input = None;
-    let mut compute = None;
-    let mut commit = None;
+    let mut execute = None;
     for prop in &config.props {
         let PropOrSpread::Prop(prop) = prop else {
             return Err(diag("1013", "spread properties are not supported"));
@@ -240,23 +239,14 @@ fn parse_action(
             Prop::KeyValue(kv) if key_name(&kv.key).as_deref() == Some("input") => {
                 input = Some(parse_input(&kv.value)?)
             }
-            Prop::Method(method) if key_name(&method.key).as_deref() == Some("compute") => {
-                compute = Some(parse_compute(&method.function.body, native_imports)?)
+            Prop::Method(method) if key_name(&method.key).as_deref() == Some("execute") => {
+                execute = Some(parse_execute(&method.function.body, native_imports)?);
             }
-            Prop::KeyValue(kv) if key_name(&kv.key).as_deref() == Some("compute") => {
+            Prop::KeyValue(kv) if key_name(&kv.key).as_deref() == Some("execute") => {
                 let Expr::Fn(function) = &*kv.value else {
-                    return Err(diag("1014", "compute must be a function"));
+                    return Err(diag("1014", "execute must be a function"));
                 };
-                compute = Some(parse_compute(&function.function.body, native_imports)?);
-            }
-            Prop::Method(method) if key_name(&method.key).as_deref() == Some("commit") => {
-                commit = Some(parse_commit(&method.function.body)?)
-            }
-            Prop::KeyValue(kv) if key_name(&kv.key).as_deref() == Some("commit") => {
-                let Expr::Fn(function) = &*kv.value else {
-                    return Err(diag("1035", "commit must be a function"));
-                };
-                commit = Some(parse_commit(&function.function.body)?);
+                execute = Some(parse_execute(&function.function.body, native_imports)?);
             }
             Prop::KeyValue(kv) => {
                 return Err(diag(
@@ -281,6 +271,7 @@ fn parse_action(
     }
     let input = input.ok_or_else(|| diag("1017", "action must declare an input object"))?;
     validate_input(&input)?;
+    let body = execute.ok_or_else(|| diag("1018", "action must declare execute(ctx, input)"))?;
     Ok(ActionIr {
         name: name.into(),
         auth: auth.ok_or_else(|| {
@@ -290,8 +281,7 @@ fn parse_action(
             )
         })?,
         input,
-        compute: compute.ok_or_else(|| diag("1018", "action must declare compute(ctx, input)"))?,
-        commit,
+        body,
     })
 }
 
@@ -366,10 +356,101 @@ fn parse_type(expr: &Expr) -> Result<TypeIr, ParseError> {
     Ok(TypeIr::Bytes { max: max as u32 })
 }
 
-fn parse_compute(
+fn parse_execute(
     body: &Option<BlockStmt>,
     native_imports: &[NativeImportIr],
-) -> Result<ComputeIr, ParseError> {
+) -> Result<ActionBodyIr, ParseError> {
+    let Some(body) = body else {
+        return Err(diag("1024", "execute must have a function body"));
+    };
+    if body.stmts.len() == 1 {
+        return Ok(ActionBodyIr::Execute(ExecuteIr {
+            operation: parse_execution_operation(&Some(body.clone()), native_imports)?,
+            state_effect: None,
+        }));
+    }
+    if body.stmts.len() != 2 {
+        return Err(diag(
+            "1025",
+            "execute must contain a computation and at most one state operation",
+        ));
+    }
+    let Stmt::Decl(Decl::Var(declaration)) = &body.stmts[0] else {
+        return Err(diag(
+            "1025",
+            "execute must bind its result before state access",
+        ));
+    };
+    if declaration.decls.len() != 1 {
+        return Err(diag("1025", "execute must bind exactly one result"));
+    }
+    let Pat::Ident(binding) = &declaration.decls[0].name else {
+        return Err(diag("1025", "execute result binding must be an identifier"));
+    };
+    if binding.id.sym != *"score" {
+        return Err(diag("1025", "execute result must be named score"));
+    }
+    let Some(initializer) = &declaration.decls[0].init else {
+        return Err(diag("1025", "execute result must have an initializer"));
+    };
+    let operation = parse_native_expression(initializer, native_imports)?;
+    let Stmt::Expr(ExprStmt { expr, .. }) = &body.stmts[1] else {
+        return Err(diag(
+            "1038",
+            "execute state operation must be an expression",
+        ));
+    };
+    Ok(ActionBodyIr::Execute(ExecuteIr {
+        operation,
+        state_effect: Some(parse_commit_expression(expr)?),
+    }))
+}
+
+fn parse_native_expression(
+    expr: &Expr,
+    native_imports: &[NativeImportIr],
+) -> Result<ExecutionOpIr, ParseError> {
+    let Expr::Call(call) = expr else {
+        return Err(diag(
+            "1037",
+            "execute computation must call a native function",
+        ));
+    };
+    let Callee::Expr(callee) = &call.callee else {
+        return Err(diag("1028", "unsupported execute expression"));
+    };
+    let Expr::Ident(function) = &**callee else {
+        return Err(diag("1028", "unsupported execute expression"));
+    };
+    let Some(native) = native_imports
+        .iter()
+        .find(|item| function.sym == item.function)
+    else {
+        return Err(diag(
+            "1037",
+            "execute must call an imported native function",
+        ));
+    };
+    if call.args.len() != 1 {
+        return Err(diag(
+            "1037",
+            "native replay accepts exactly one input field",
+        ));
+    }
+    let Expr::Member(member) = &*call.args[0].expr else {
+        return Err(diag("1037", "native replay argument must be input.field"));
+    };
+    Ok(ExecutionOpIr::NativeBytesToU64 {
+        module: native.module.clone(),
+        function: native.function.clone(),
+        field: input_member(member)?,
+    })
+}
+
+fn parse_execution_operation(
+    body: &Option<BlockStmt>,
+    native_imports: &[NativeImportIr],
+) -> Result<ExecutionOpIr, ParseError> {
     let Some(body) = body else {
         return Err(diag("1024", "compute must have a function body"));
     };
@@ -389,52 +470,21 @@ fn parse_compute(
         ));
     };
     match &**expr {
-        Expr::Call(call) => {
-            let Callee::Expr(callee) = &call.callee else {
-                return Err(diag("1028", "unsupported compute expression"));
-            };
-            let Expr::Ident(function) = &**callee else {
-                return Err(diag("1028", "unsupported compute expression"));
-            };
-            let Some(native) = native_imports
-                .iter()
-                .find(|item| function.sym == item.function)
-            else {
-                return Err(diag(
-                    "1037",
-                    "native compute must call an imported native function",
-                ));
-            };
-            if call.args.len() != 1 {
-                return Err(diag(
-                    "1037",
-                    "native replay accepts exactly one input field",
-                ));
-            }
-            let Expr::Member(member) = &*call.args[0].expr else {
-                return Err(diag("1037", "native replay argument must be input.field"));
-            };
-            let field = input_member(member)?;
-            Ok(ComputeIr::NativeBytesToU64 {
-                module: native.module.clone(),
-                function: native.function.clone(),
-                field,
-            })
-        }
-        Expr::Member(member) => Ok(ComputeIr::ReturnInputField {
+        Expr::Call(call) => parse_native_expression(&Expr::Call(call.clone()), native_imports),
+        Expr::Member(member) => Ok(ExecutionOpIr::ReturnInputField {
             field: input_member(member)?,
         }),
         Expr::Bin(binary) if binary.op == BinaryOp::Add => {
             let Expr::Member(member) = &*binary.left else {
                 return Err(diag("1027", "arithmetic must be `input.field + integer`"));
             };
-            Ok(ComputeIr::AddInputField {
+            Ok(ExecutionOpIr::AddInputField {
                 field: input_member(member)?,
                 value: integer_literal(&binary.right)?
                     .ok_or_else(|| diag("1027", "arithmetic requires an integer literal"))?,
             })
         }
-        Expr::Lit(Lit::Num(_)) => Ok(ComputeIr::ReturnInteger {
+        Expr::Lit(Lit::Num(_)) => Ok(ExecutionOpIr::ReturnInteger {
             value: integer_literal(expr)?
                 .ok_or_else(|| diag("1028", "unsupported numeric literal"))?,
         }),
@@ -442,73 +492,51 @@ fn parse_compute(
     }
 }
 
-fn parse_commit(body: &Option<BlockStmt>) -> Result<CommitIr, ParseError> {
-    let Some(body) = body else {
-        return Err(diag("1038", "commit must have a function body"));
-    };
-    if body.stmts.len() != 1 {
-        return Err(diag(
-            "1038",
-            "commit must contain exactly one state operation",
-        ));
-    }
-    let Stmt::Expr(ExprStmt { expr, .. }) = &body.stmts[0] else {
-        return Err(diag(
-            "1038",
-            "commit must contain exactly one state operation",
-        ));
-    };
-    let Expr::Call(call) = &**expr else {
-        return Err(diag("1038", "commit must call state.set or state.max"));
+fn parse_commit_expression(expr: &Expr) -> Result<StateEffectIr, ParseError> {
+    let Expr::Call(call) = expr else {
+        return Err(diag("1038", "execute must call state.set or state.max"));
     };
     let Callee::Expr(callee) = &call.callee else {
-        return Err(diag("1038", "commit must call state.set or state.max"));
+        return Err(diag("1038", "execute must call state.set or state.max"));
     };
     let Expr::Member(member) = &**callee else {
-        return Err(diag("1038", "commit must call state.set or state.max"));
+        return Err(diag("1038", "execute must call state.set or state.max"));
     };
     let Expr::Ident(state) = &*member.obj else {
-        return Err(diag("1038", "commit must call state.set or state.max"));
+        return Err(diag("1038", "execute must call state.set or state.max"));
     };
     let MemberProp::Ident(operation) = &member.prop else {
         return Err(diag("1038", "commit operation must be set or max"));
     };
     if call.args.len() != 2 {
-        return Err(diag("1038", "commit state operation takes key and result"));
+        return Err(diag("1038", "execute state operation takes key and result"));
     }
     let Expr::Member(key) = &*call.args[0].expr else {
-        return Err(diag("1039", "commit key must be ctx.sender"));
+        return Err(diag("1039", "execute key must be ctx.sender"));
     };
     let Expr::Ident(ctx) = &*key.obj else {
-        return Err(diag("1039", "commit key must be ctx.sender"));
+        return Err(diag("1039", "execute key must be ctx.sender"));
     };
     let MemberProp::Ident(sender) = &key.prop else {
-        return Err(diag("1039", "commit key must be ctx.sender"));
+        return Err(diag("1039", "execute key must be ctx.sender"));
     };
     if ctx.sym != *"ctx" || sender.sym != *"sender" {
-        return Err(diag("1039", "commit key must be ctx.sender"));
+        return Err(diag("1039", "execute key must be ctx.sender"));
     }
     let Expr::Ident(value) = &*call.args[1].expr else {
-        return Err(diag("1040", "commit value must be the compute result"));
+        return Err(diag("1040", "execute value must be the score result"));
     };
     if value.sym != *"score" {
-        return Err(diag(
-            "1040",
-            "commit value must be the compute result named score",
-        ));
+        return Err(diag("1040", "execute value must be the result named score"));
     }
     match operation.sym.as_ref() {
-        "set" => Ok(CommitIr::StateSet {
+        "set" => Ok(StateEffectIr::Set {
             state: state.sym.to_string(),
-            key: CommitKeyIr::Sender,
-            value: CommitValueIr::Result,
         }),
-        "max" => Ok(CommitIr::StateMax {
+        "max" => Ok(StateEffectIr::Max {
             state: state.sym.to_string(),
-            key: CommitKeyIr::Sender,
-            value: CommitValueIr::Result,
         }),
-        _ => Err(diag("1038", "commit operation must be set or max")),
+        _ => Err(diag("1038", "execute operation must be set or max")),
     }
 }
 
@@ -597,14 +625,15 @@ fn validate_service(
         return Err(diag("1052", "state schemas must be unique"));
     }
     for action in actions {
-        if let Some(commit) = &action.commit {
-            let state = match commit {
-                CommitIr::StateSet { state, .. } | CommitIr::StateMax { state, .. } => state,
+        let ActionBodyIr::Execute(execute) = &action.body;
+        if let Some(effect) = &execute.state_effect {
+            let state = match effect {
+                StateEffectIr::Set { state } | StateEffectIr::Max { state } => state,
             };
             if !names.contains(state.as_str()) {
                 return Err(diag(
                     "1053",
-                    format!("commit references unknown state `{state}`"),
+                    format!("execute references unknown state `{state}`"),
                 ));
             }
         }
@@ -755,19 +784,36 @@ mod tests {
     use super::*;
     #[test]
     fn parses_game_vertical_slice() {
-        let source = r#"import { action, wallet, bytes, address, stateMap, query, u64 } from "jam"; import { replay } from "native:game"; const bestScore = stateMap({ schema: "best-score/v1", key: address, value: u64 }); export const submitRun = action({ auth: wallet(), input: { run: bytes(64) }, compute(ctx, input) { return replay(input.run); }, commit(ctx, score) { bestScore.max(ctx.sender, score); } }); export const getBestScore = query(bestScore);"#;
+        let source = r#"import { action, wallet, bytes, address, stateMap, query, u64 } from "jam"; import { replay } from "native:game"; const bestScore = stateMap({ schema: "best-score/v1", key: address, value: u64 }); export const submitRun = action({ auth: wallet(), input: { run: bytes(64) }, execute(ctx, input) { const score = replay(input.run); bestScore.max(ctx.sender, score); } }); export const getBestScore = query(bestScore);"#;
         let ir =
             parse_service_with_native_modules(source, "game", "0.1.0", &["game".into()]).unwrap();
         assert_eq!(ir.actions[0].input[0].ty, TypeIr::Bytes { max: 64 });
         assert_eq!(ir.queries[0].state, "bestScore");
         assert!(matches!(
-            ir.actions[0].compute,
-            ComputeIr::NativeBytesToU64 { .. }
+            ir.actions[0].body,
+            ActionBodyIr::Execute(ExecuteIr {
+                operation: ExecutionOpIr::NativeBytesToU64 { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_execute_as_one_application_body() {
+        let source = r#"import { action, wallet, bytes, address, stateMap, query, u64 } from "jam"; import { replay } from "native:game"; const bestScore = stateMap({ schema: "best-score/v1", key: address, value: u64 }); export const submitRun = action({ auth: wallet(), input: { run: bytes(64) }, execute(ctx, input) { const score = replay(input.run); bestScore.max(ctx.sender, score); } }); export const getBestScore = query(bestScore);"#;
+        let ir =
+            parse_service_with_native_modules(source, "game", "0.1.0", &["game".into()]).unwrap();
+        assert!(matches!(
+            ir.actions[0].body,
+            ActionBodyIr::Execute(ExecuteIr {
+                operation: ExecutionOpIr::NativeBytesToU64 { .. },
+                state_effect: Some(StateEffectIr::Max { .. }),
+            })
         ));
     }
     #[test]
     fn rejects_unbounded_bytes() {
-        let source = r#"import { action, wallet, bytes } from "jam"; export const add = action({ auth: wallet(), input: { value: bytes(0) }, compute(ctx, input) { return input.value; } });"#;
+        let source = r#"import { action, wallet, bytes } from "jam"; export const add = action({ auth: wallet(), input: { value: bytes(0) }, execute(ctx, input) { return input.value; } });"#;
         assert!(parse_service(source, "x", "0.1.0").is_err());
     }
 }

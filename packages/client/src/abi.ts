@@ -5,7 +5,7 @@ export type AbiAction = {
   selector: string;
   auth: string;
   input: AbiField[];
-  computeOutput: string;
+  executeOutput: string;
 };
 export type AbiState = {
   name: string;

@@ -179,7 +179,11 @@ function readAbi() {
         languageVersion: raw.languageVersion ?? raw.language_version,
         actions: raw.actions.map((action) => ({
           ...action,
-          computeOutput: action.computeOutput ?? action.compute_output,
+          executeOutput:
+            action.executeOutput ??
+            action.execute_output ??
+            action.computeOutput ??
+            action.compute_output,
         })),
       };
     });

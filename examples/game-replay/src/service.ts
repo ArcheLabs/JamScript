@@ -12,10 +12,8 @@ export const submitRun = action({
   input: {
     run: bytes(262144),
   },
-  compute(ctx, input) {
-    return replay(input.run);
-  },
-  commit(ctx, score) {
+  execute(ctx, input) {
+    const score = replay(input.run);
     bestScore.max(ctx.sender, score);
   },
 });
