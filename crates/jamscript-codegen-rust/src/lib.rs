@@ -131,6 +131,12 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
             service_runtime_guest::GuestError::Application => 3,
         }}),
     }};
+    if output.receipts.len() == 1 {{
+        if let Some(error_code) = output.receipts[0].error_code.filter(|code| code & 0x8000_0000 != 0) {{
+            service_runtime_guest::guest_support::diagnostic_stage(b"jamscript:native-error-output");
+            return error_output(error_code);
+        }}
+    }}
     {stage_refine_return}
     {stage_output_encode}
     let encoded = match output.encode() {{
@@ -296,7 +302,7 @@ fn application_setup(
                 .find(|item| item.module == *module && item.function == *function)
                 .ok_or_else(|| "native import is missing from IR".to_string())?;
             let symbol = native_symbol(&import.module, &import.function);
-            Ok(format!("let mut value = 0u64; let native_status = unsafe {{ {symbol}({decoded}.{index}.as_ptr(), {decoded}.{index}.len() as u32, &mut value) }}; if native_status != 0 {{ return Err(StateAccessError::Backend); }}"))
+            Ok(format!("let mut value = 0u64; let native_status = unsafe {{ {symbol}({decoded}.{index}.as_ptr(), {decoded}.{index}.len() as u32, &mut value) }}; if native_status != 0 {{ service_runtime_guest::guest_support::diagnostic_stage(b\"jamscript:application-native-error\"); return Err(StateAccessError::ApplicationFailed(0x8000_0000u32 | native_status)); }}"))
         }
     }
 }
@@ -334,7 +340,7 @@ fn application_body(action: &ActionIr, setup: &str, effect: &str, diagnostic: bo
         ].join(" ")
     };
     format!(
-        "{auth} {begin} context.begin_transaction()?; let business = (|| -> Result<(), StateAccessError> {{ let decoded = decode_input(input).map_err(|_| StateAccessError::Backend)?; let value: u64 = (|| -> Result<u64, StateAccessError> {{ {setup} Ok(value) }})()?; {effect} Ok(()) }})(); {business_done} match business {{ Ok(()) => {{ {commit} context.commit_transaction() }}, Err(StateAccessError::MissingWitness) => {{ context.rollback_transaction()?; Err(StateAccessError::MissingWitness) }}, Err(StateAccessError::InvalidProof) => {{ context.rollback_transaction()?; Err(StateAccessError::InvalidProof) }}, Err(_) => {{ context.rollback_transaction()?; Err(StateAccessError::ApplicationFailed(1)) }} }}",
+        "{auth} {begin} context.begin_transaction()?; let business = (|| -> Result<(), StateAccessError> {{ let decoded = decode_input(input).map_err(|_| StateAccessError::Backend)?; let value: u64 = (|| -> Result<u64, StateAccessError> {{ {setup} Ok(value) }})()?; {effect} Ok(()) }})(); {business_done} match business {{ Ok(()) => {{ {commit} context.commit_transaction() }}, Err(StateAccessError::MissingWitness) => {{ context.rollback_transaction()?; Err(StateAccessError::MissingWitness) }}, Err(StateAccessError::InvalidProof) => {{ context.rollback_transaction()?; Err(StateAccessError::InvalidProof) }}, Err(StateAccessError::ApplicationFailed(code)) => {{ let _ = context.rollback_transaction(); Err(StateAccessError::ApplicationFailed(code)) }}, Err(_) => {{ context.rollback_transaction()?; Err(StateAccessError::ApplicationFailed(1)) }} }}",
         begin = marker("application-business"),
         business_done = marker("application-business-done"),
         commit = marker("application-commit"),
@@ -428,6 +434,9 @@ mod tests {
         assert!(source.contains("bounded_bytes(64usize)"));
         assert!(source.contains("jamscript_native_game_replay_v1"));
         assert!(source.contains("reader.offset != input.len()"));
+        assert!(source.contains("0x8000_0000u32 | native_status"));
+        assert!(source.contains("output.receipts.len() == 1"));
+        assert!(source.contains("return error_output(error_code)"));
     }
 
     #[test]
@@ -469,6 +478,20 @@ mod tests {
         assert!(!source.contains("service_id"));
         assert!(!source.contains("minijam_storage_write(state_key"));
         assert!(!source.contains("decode_refined_action"));
+
+        let accumulate = source
+            .split("pub extern \"C\" fn minijam_accumulate")
+            .nth(1)
+            .and_then(|tail| tail.split("struct GeneratedApplication").next())
+            .expect("generated accumulate entrypoint");
+        assert_eq!(accumulate.matches("minijam_storage_write").count(), 1);
+        assert!(!accumulate.contains("nonce_key"));
+        assert!(!accumulate.contains("application_key_v1"));
+        assert!(!accumulate.contains("StateMax"));
+        assert!(!accumulate.contains("StateSet"));
+        assert!(accumulate.contains("authoritative_tick > valid_until"));
+        assert!(accumulate.contains("header.parent_root != current"));
+        assert!(accumulate.contains("MANAGED_STATE_COMMITMENT_KEY_V1"));
     }
 
     #[test]

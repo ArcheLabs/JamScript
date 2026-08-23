@@ -85,6 +85,63 @@ pub mod guest_support {
         unsafe {
             minijam_host_call(100, args.as_ptr());
         }
+
+        diagnostic_metrics(message);
+    }
+
+    #[cfg(feature = "diagnostic")]
+    #[inline(never)]
+    fn diagnostic_metrics(stage: &[u8]) {
+        let mut args = [0u64; 6];
+        let gas_remaining = unsafe { minijam_host_call(0, args.as_ptr()) };
+        let mut message = [0u8; 192];
+        let mut offset = 0usize;
+
+        append_bytes(&mut message, &mut offset, b"jamscript:metrics stage=");
+        append_bytes(&mut message, &mut offset, stage);
+        append_bytes(&mut message, &mut offset, b" gas_remaining=");
+        append_decimal(&mut message, &mut offset, gas_remaining as usize);
+        append_bytes(&mut message, &mut offset, b" allocation_count=");
+        append_decimal(&mut message, &mut offset, unsafe { ALLOCATION_COUNT });
+        append_bytes(&mut message, &mut offset, b" requested_bytes=");
+        append_decimal(&mut message, &mut offset, unsafe { REQUESTED_BYTES });
+        append_bytes(&mut message, &mut offset, b" high_water_mark=");
+        append_decimal(&mut message, &mut offset, unsafe { HIGH_WATER_MARK });
+
+        args[0] = 1;
+        args[3] = message.as_ptr() as usize as u64;
+        args[4] = offset as u64;
+        unsafe {
+            minijam_host_call(100, args.as_ptr());
+        }
+    }
+
+    #[cfg(feature = "diagnostic")]
+    fn append_bytes(buffer: &mut [u8], offset: &mut usize, value: &[u8]) {
+        for byte in value {
+            if *offset == buffer.len() {
+                diagnostic_trap(0xE003);
+            }
+            buffer[*offset] = *byte;
+            *offset += 1;
+        }
+    }
+
+    #[cfg(feature = "diagnostic")]
+    fn append_decimal(buffer: &mut [u8], offset: &mut usize, mut value: usize) {
+        let mut digits = [0u8; 20];
+        let mut count = 0usize;
+        loop {
+            digits[count] = b'0' + (value % 10) as u8;
+            count += 1;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        for digit in digits[..count].iter().rev() {
+            append_bytes(buffer, offset, core::slice::from_ref(digit));
+        }
     }
 
     #[cfg(not(feature = "diagnostic"))]
@@ -351,8 +408,16 @@ where
                 return Err(GuestError::State);
             }
             Err(StateAccessError::ApplicationFailed(error_code)) => {
-                state.commit_transaction().map_err(|_| GuestError::State)?;
-                merge_validity(&mut transition_valid_until, action_valid_until);
+                if error_code & 0x8000_0000 != 0 {
+                    guest_support::diagnostic_stage(b"jamscript:application-failed-native");
+                    state
+                        .rollback_transaction()
+                        .map_err(|_| GuestError::State)?;
+                } else {
+                    guest_support::diagnostic_stage(b"jamscript:application-failed-low");
+                    state.commit_transaction().map_err(|_| GuestError::State)?;
+                    merge_validity(&mut transition_valid_until, action_valid_until);
+                }
                 receipts.push(ActionReceiptV1 {
                     action_hash,
                     status: ActionStatusV1::Failed,
@@ -360,6 +425,7 @@ where
                 });
             }
             Err(_) => {
+                guest_support::diagnostic_stage(b"jamscript:application-generic-error");
                 state
                     .rollback_transaction()
                     .map_err(|_| GuestError::State)?;
@@ -449,8 +515,16 @@ where
                 return Err(GuestError::State);
             }
             Err(StateAccessError::ApplicationFailed(error_code)) => {
-                state.commit_transaction().map_err(|_| GuestError::State)?;
-                merge_validity(&mut transition_valid_until, action_valid_until);
+                if error_code & 0x8000_0000 != 0 {
+                    guest_support::diagnostic_stage(b"jamscript:application-failed-native");
+                    state
+                        .rollback_transaction()
+                        .map_err(|_| GuestError::State)?;
+                } else {
+                    guest_support::diagnostic_stage(b"jamscript:application-failed-low");
+                    state.commit_transaction().map_err(|_| GuestError::State)?;
+                    merge_validity(&mut transition_valid_until, action_valid_until);
+                }
                 receipts.push(ActionReceiptV1 {
                     action_hash,
                     status: ActionStatusV1::Failed,
@@ -458,6 +532,7 @@ where
                 });
             }
             Err(_) => {
+                guest_support::diagnostic_stage(b"jamscript:application-generic-error");
                 state
                     .rollback_transaction()
                     .map_err(|_| GuestError::State)?;
@@ -526,6 +601,24 @@ mod tests {
             context.state().set(b"b", b"2")?;
             context.rollback_transaction()?;
             Err(StateAccessError::ApplicationFailed(77))
+        }
+    }
+
+    struct NativeFailingApplication;
+
+    impl ServiceApplication for NativeFailingApplication {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            _input: &[u8],
+        ) -> Result<(), Self::Error> {
+            context.state().set(b"nonce", &1u64.to_le_bytes())?;
+            context.begin_transaction()?;
+            context.state().set(b"business", b"discard")?;
+            context.rollback_transaction()?;
+            Err(StateAccessError::ApplicationFailed(0x8000_0009))
         }
     }
 
@@ -645,6 +738,26 @@ mod tests {
         assert_eq!(output.new_root, expected.root());
         assert_eq!(base.get(b"a").unwrap(), None);
         assert_eq!(base.get(b"b").unwrap(), None);
+    }
+
+    #[test]
+    fn native_failure_rolls_back_authenticated_nonce() {
+        let base = FullState::empty();
+        let parent_root = base.root();
+        let proof = base.proof_for(&[b"nonce", b"business"]).unwrap();
+        let input = RuntimeRefineInputV1 {
+            version: 1,
+            managed_state: ManagedStateWitnessV1 {
+                version: 1,
+                parent_root,
+                storage_proof: proof.into_nodes().into_iter().collect(),
+            },
+            actions: vec![b"native-fail".to_vec()],
+        };
+
+        let output = refine(&NativeFailingApplication, &input).unwrap();
+        assert_eq!(output.new_root, parent_root);
+        assert_eq!(output.receipts[0].error_code, Some(0x8000_0009));
     }
 
     #[test]

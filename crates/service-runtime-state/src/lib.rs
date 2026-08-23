@@ -110,19 +110,19 @@ impl FullState {
         if diff.changes.is_empty() {
             return Ok(self.clone());
         }
+
         let mut next = self.clone();
         {
             let mut trie =
-                TrieDBMutBuilder::<TrieLayout>::new(&mut next.db, &mut next.root).build();
+                TrieDBMutBuilder::<TrieLayout>::from_existing(&mut next.db, &mut next.root).build();
             for change in &diff.changes {
                 match &change.value {
                     Some(value) => {
-                        let _ = trie
-                            .insert(&change.key, value)
+                        trie.insert(&change.key, value)
                             .map_err(|_| StateError::Backend)?;
                     }
                     None => {
-                        let _ = trie.remove(&change.key).map_err(|_| StateError::Backend)?;
+                        trie.remove(&change.key).map_err(|_| StateError::Backend)?;
                     }
                 }
             }
@@ -308,7 +308,8 @@ impl ProofState {
         let mut db = self.db;
         let mut root = self.root;
         {
-            let mut trie = TrieDBMutBuilder::<TrieLayout>::new(&mut db, &mut root).build();
+            let mut trie =
+                TrieDBMutBuilder::<TrieLayout>::from_existing(&mut db, &mut root).build();
             for change in &diff.changes {
                 match &change.value {
                     Some(value) => {
@@ -507,7 +508,7 @@ mod tests {
         );
         assert_eq!(
             hex::encode(host.root()),
-            "38650a1401ad328caca70e927e88807a101efed1a8c0239d4b0988491e84dcfe"
+            "67f9cfed534d2e630ad1a24453fc1099722dde34418f700889c27fbd44dd2060"
         );
         assert_eq!(root, host.root());
     }
@@ -520,6 +521,25 @@ mod tests {
         let (root, diff) = verifier.finish().unwrap();
         assert_eq!(root, base.root());
         assert!(diff.changes.is_empty());
+    }
+
+    #[test]
+    fn full_state_apply_diff_preserves_unmodified_keys() {
+        let base = FullState::from_pairs([
+            (b"nonce".as_slice(), b"1".as_slice()),
+            (b"score".as_slice(), b"100".as_slice()),
+        ])
+        .unwrap();
+        let next = base
+            .apply_diff(&StateDiffV1 {
+                changes: vec![StateChangeV1 {
+                    key: b"nonce".to_vec(),
+                    value: Some(b"2".to_vec()),
+                }],
+            })
+            .unwrap();
+        assert_eq!(next.get(b"nonce").unwrap(), Some(b"2".to_vec()));
+        assert_eq!(next.get(b"score").unwrap(), Some(b"100".to_vec()));
     }
 
     #[test]
