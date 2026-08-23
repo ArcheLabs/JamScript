@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(unexpected_cfgs)]
 
 extern crate alloc;
 
@@ -9,6 +10,184 @@ use service_runtime_core::{
     RuntimeRefineOutputV1, RuntimeRefineOutputV2, ServiceApplication, StateAccessError,
 };
 use service_runtime_state::ProofState;
+
+#[cfg(target_env = "polkavm")]
+pub mod guest_support {
+    use super::{
+        RefineObserver, STAGE_APPLICATION, STAGE_APPLICATION_COMMIT, STAGE_APPLICATION_COMMITTED,
+        STAGE_APPLICATION_DONE, STAGE_FINISH, STAGE_FINISH_DONE, STAGE_FIRST_TRIE_GET,
+        STAGE_PROOF_READY, STAGE_PROOF_STATE, STAGE_STATE_ERROR,
+    };
+    use core::alloc::{GlobalAlloc, Layout};
+
+    polkavm_derive::min_stack_size!(2 * 1024 * 1024);
+
+    const HEAP_SIZE: usize = if cfg!(feature = "diagnostic") {
+        16 * 1024 * 1024
+    } else {
+        64 * 1024
+    };
+    static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+    static mut HEAP_OFFSET: usize = 0;
+
+    #[cfg(feature = "diagnostic")]
+    static mut ALLOCATION_COUNT: usize = 0;
+    #[cfg(feature = "diagnostic")]
+    static mut REQUESTED_BYTES: usize = 0;
+    #[cfg(feature = "diagnostic")]
+    static mut HIGH_WATER_MARK: usize = 0;
+
+    struct RuntimeAllocator;
+
+    unsafe impl GlobalAlloc for RuntimeAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let base = HEAP.as_mut_ptr() as usize;
+            let offset = (HEAP_OFFSET + layout.align() - 1) & !(layout.align() - 1);
+            let end = offset.saturating_add(layout.size());
+            if end > HEAP_SIZE {
+                #[cfg(feature = "diagnostic")]
+                diagnostic_trap(0xE001);
+                #[cfg(not(feature = "diagnostic"))]
+                return core::ptr::null_mut();
+            }
+            #[cfg(feature = "diagnostic")]
+            {
+                ALLOCATION_COUNT = ALLOCATION_COUNT.saturating_add(1);
+                REQUESTED_BYTES = REQUESTED_BYTES.saturating_add(layout.size());
+                HIGH_WATER_MARK = HIGH_WATER_MARK.max(end);
+            }
+            HEAP_OFFSET = end;
+            base.saturating_add(offset) as *mut u8
+        }
+
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: RuntimeAllocator = RuntimeAllocator;
+
+    #[cfg(feature = "diagnostic")]
+    extern "C" {
+        fn minijam_host_call(call: u32, args: *const u64) -> u64;
+    }
+
+    #[cfg(feature = "diagnostic")]
+    #[inline(never)]
+    pub fn diagnostic_stage(message: &'static [u8]) {
+        let args = [
+            1u64,
+            0,
+            0,
+            message.as_ptr() as usize as u64,
+            message.len() as u64,
+            0,
+        ];
+        unsafe {
+            minijam_host_call(100, args.as_ptr());
+        }
+    }
+
+    #[cfg(not(feature = "diagnostic"))]
+    pub fn diagnostic_stage(_message: &'static [u8]) {}
+
+    #[cfg(feature = "diagnostic")]
+    #[inline(never)]
+    pub fn diagnostic_trap(code: u32) -> ! {
+        let message: &'static [u8] = match code {
+            0xE001 => b"jamscript:trap=allocator",
+            0xE002 => b"jamscript:trap=panic",
+            0xE003 => b"jamscript:trap=observer",
+            _ => b"jamscript:trap=unknown",
+        };
+        diagnostic_stage(message);
+        unsafe {
+            core::arch::asm!(".4byte 0xc0001073", options(noreturn));
+        }
+    }
+
+    #[cfg(feature = "diagnostic")]
+    #[panic_handler]
+    fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
+        diagnostic_trap(0xE002)
+    }
+
+    #[cfg(not(feature = "diagnostic"))]
+    #[panic_handler]
+    fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
+        loop {}
+    }
+
+    pub struct DiagnosticObserver;
+
+    impl RefineObserver for DiagnosticObserver {
+        fn stage(&mut self, stage: u8) {
+            let message = match stage {
+                STAGE_PROOF_STATE => b"jamscript:proof-state" as &'static [u8],
+                STAGE_FIRST_TRIE_GET => b"jamscript:first-trie-get",
+                STAGE_PROOF_READY => b"jamscript:proof-ready",
+                STAGE_APPLICATION => b"jamscript:application",
+                STAGE_APPLICATION_DONE => b"jamscript:application-done",
+                STAGE_APPLICATION_COMMIT => b"jamscript:application-commit",
+                STAGE_APPLICATION_COMMITTED => b"jamscript:application-committed",
+                STAGE_STATE_ERROR => b"jamscript:state-error",
+                STAGE_FINISH => b"jamscript:finish",
+                STAGE_FINISH_DONE => b"jamscript:finish-done",
+                _ => {
+                    #[cfg(feature = "diagnostic")]
+                    diagnostic_trap(0xE003);
+                    return;
+                }
+            };
+            diagnostic_stage(message);
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn memcpy(
+        destination: *mut u8,
+        source: *const u8,
+        length: usize,
+    ) -> *mut u8 {
+        let mut index = 0;
+        while index < length {
+            destination
+                .add(index)
+                .write(core::ptr::read_volatile(source.add(index)));
+            index += 1;
+        }
+        destination
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn memset(destination: *mut u8, value: i32, length: usize) -> *mut u8 {
+        let mut index = 0;
+        while index < length {
+            destination.add(index).write_volatile(value as u8);
+            index += 1;
+        }
+        destination
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn memcmp(left: *const u8, right: *const u8, length: usize) -> i32 {
+        let mut index = 0;
+        while index < length {
+            let a = core::ptr::read_volatile(left.add(index));
+            let b = core::ptr::read_volatile(right.add(index));
+            if a != b {
+                return if a < b { -1 } else { 1 };
+            }
+            index += 1;
+        }
+        0
+    }
+}
+
+#[cfg(not(target_env = "polkavm"))]
+pub mod guest_support {
+    pub struct DiagnosticObserver;
+    pub fn diagnostic_stage(_message: &'static [u8]) {}
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuestError {
@@ -34,6 +213,9 @@ pub const STAGE_APPLICATION: u8 = 4;
 pub const STAGE_FINISH: u8 = 5;
 pub const STAGE_FINISH_DONE: u8 = 6;
 pub const STAGE_APPLICATION_DONE: u8 = 7;
+pub const STAGE_APPLICATION_COMMIT: u8 = 8;
+pub const STAGE_APPLICATION_COMMITTED: u8 = 9;
+pub const STAGE_STATE_ERROR: u8 = 10;
 
 type RefineTransition = (
     service_runtime_core::StateRoot,
@@ -247,7 +429,12 @@ where
         observer.stage(STAGE_APPLICATION_DONE);
         match result {
             Ok(()) => {
-                state.commit_transaction().map_err(|_| GuestError::State)?;
+                observer.stage(STAGE_APPLICATION_COMMIT);
+                if state.commit_transaction().is_err() {
+                    observer.stage(STAGE_STATE_ERROR);
+                    return Err(GuestError::State);
+                }
+                observer.stage(STAGE_APPLICATION_COMMITTED);
                 merge_validity(&mut transition_valid_until, action_valid_until);
                 receipts.push(ActionReceiptV1 {
                     action_hash,

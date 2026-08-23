@@ -13,6 +13,7 @@ members = [
   "crates/jamscript-runtime-core",
   "crates/jamscript-codegen-rust",
   "crates/jamscript-target-minijam",
+  "crates/service-build-polkavm",
   "crates/jamscript-cli",
   "examples/rust-managed-state",
 ]
@@ -26,6 +27,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 anyhow = "1.0.100"
 blake2b_simd = { version = "1.0.4", default-features = false }
+polkavm-linker = "=0.30.0"
 clap = { version = "4.5.45", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

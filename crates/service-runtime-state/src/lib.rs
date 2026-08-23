@@ -107,6 +107,9 @@ impl FullState {
     }
 
     pub fn apply_diff(&self, diff: &StateDiffV1) -> Result<Self, StateError> {
+        if diff.changes.is_empty() {
+            return Ok(self.clone());
+        }
         let mut next = self.clone();
         {
             let mut trie =
@@ -114,8 +117,7 @@ impl FullState {
             for change in &diff.changes {
                 match &change.value {
                     Some(value) => {
-                        let _ = trie
-                            .insert(&change.key, value)
+                        let _ = trie.insert(&change.key, value)
                             .map_err(|_| StateError::Backend)?;
                     }
                     None => {
@@ -299,6 +301,9 @@ impl ProofState {
                 .map(|(key, value)| StateChangeV1 { key, value })
                 .collect(),
         };
+        if diff.changes.is_empty() {
+            return Ok((root_bytes(self.root), diff));
+        }
         let mut db = self.db;
         let mut root = self.root;
         {
@@ -504,6 +509,16 @@ mod tests {
             "38650a1401ad328caca70e927e88807a101efed1a8c0239d4b0988491e84dcfe"
         );
         assert_eq!(root, host.root());
+    }
+
+    #[test]
+    fn proof_finish_preserves_root_for_a_noop_transition() {
+        let base = FullState::from_pairs([(b"alice".as_slice(), b"100".as_slice())]).unwrap();
+        let proof = base.proof_for(&[b"alice"]).unwrap();
+        let verifier = ProofState::from_proof(base.root(), proof).unwrap();
+        let (root, diff) = verifier.finish().unwrap();
+        assert_eq!(root, base.root());
+        assert!(diff.changes.is_empty());
     }
 
     #[test]
