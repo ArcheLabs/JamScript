@@ -1,0 +1,13 @@
+[package]
+name = "pvm-managed-state-probe"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+polkavm-derive = "=0.30.0"
+service-runtime-state = { path = "../../crates/service-runtime-state", default-features = false }
+
+[workspace]

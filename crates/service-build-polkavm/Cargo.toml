@@ -9,4 +9,4 @@ anyhow.workspace = true
 blake2b_simd.workspace = true
 polkavm-linker.workspace = true
 serde.workspace = true
-
+toml.workspace = true

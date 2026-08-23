@@ -117,7 +117,8 @@ impl FullState {
             for change in &diff.changes {
                 match &change.value {
                     Some(value) => {
-                        let _ = trie.insert(&change.key, value)
+                        let _ = trie
+                            .insert(&change.key, value)
                             .map_err(|_| StateError::Backend)?;
                     }
                     None => {

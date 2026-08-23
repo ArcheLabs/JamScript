@@ -1,28 +1,29 @@
 use anyhow::{bail, Context, Result};
 use polkavm_linker::{target_json_path, TargetJsonArgs};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
-const POLKAVM_LINKER_VERSION: &str = "0.30.0";
-const DEFAULT_RUST_TOOLCHAIN: &str = "nightly-2026-05-02";
-
 #[derive(Clone, Debug)]
 pub struct PolkaVmBuildConfig {
     pub rust_toolchain: String,
     pub is_64_bit: bool,
     pub diagnostic: bool,
+    pub lock_path: PathBuf,
+    pub rustflags: Option<String>,
 }
 
 impl Default for PolkaVmBuildConfig {
     fn default() -> Self {
         Self {
-            rust_toolchain: DEFAULT_RUST_TOOLCHAIN.into(),
+            rust_toolchain: default_toolchain(),
             is_64_bit: true,
             diagnostic: false,
+            lock_path: repo_root().join("toolchains/polkavm.lock"),
+            rustflags: None,
         }
     }
 }
@@ -38,6 +39,8 @@ pub struct PolkaVmBuildRequest {
     pub manifest_path: PathBuf,
     pub output_dir: PathBuf,
     pub native_archives: Vec<NativeArchive>,
+    pub required_exports: Vec<String>,
+    pub require_relocations: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -83,6 +86,15 @@ impl PolkaVmBuilder {
     }
 
     pub fn build(&self, request: &PolkaVmBuildRequest) -> Result<GuestBuildArtifacts> {
+        let lock = ToolchainLock::load(&self.config.lock_path)?;
+        if self.config.rust_toolchain != lock.rust {
+            bail!(
+                "configured Rust toolchain {} disagrees with {}: {}",
+                self.config.rust_toolchain,
+                self.config.lock_path.display(),
+                lock.rust
+            );
+        }
         if !request.manifest_path.is_file() {
             bail!(
                 "guest manifest does not exist: {}",
@@ -143,12 +155,10 @@ impl PolkaVmBuilder {
             .env(
                 "SERVICE_BUILD_POLKAVM_NATIVE_ARCHIVES",
                 encode_archives(&request.native_archives),
-            )
-            // The MiniJAM metadata sections contain linker-resolved function
-            // pointers. `notext` lets rust-lld retain those relocations for
-            // the PolkaVM converter while the official target still performs
-            // the final ELF link.
-            .env("RUSTFLAGS", rustflags_with_metadata_relocations());
+            );
+        if let Some(rustflags) = &self.config.rustflags {
+            cargo.env("RUSTFLAGS", rustflags);
+        }
         if self.config.diagnostic {
             cargo.env("JAMSCRIPT_DIAGNOSTIC_GUEST", "1");
         }
@@ -159,7 +169,11 @@ impl PolkaVmBuilder {
         let output_elf = request.output_dir.join("service.elf");
         fs::copy(&elf, &output_elf)
             .with_context(|| format!("copying canonical guest ELF from {}", elf.display()))?;
-        let diagnostics = validate_elf(&output_elf)?;
+        let diagnostics = validate_elf(
+            &output_elf,
+            &request.required_exports,
+            request.require_relocations,
+        )?;
         if self.config.diagnostic {
             fs::write(request.output_dir.join("readelf.txt"), &diagnostics.header)?;
             fs::write(
@@ -170,13 +184,14 @@ impl PolkaVmBuilder {
         }
 
         let rustc_version = rustc_version(&self.config.rust_toolchain)?;
+        validate_resolved_guest_versions(&request.manifest_path, &lock)?;
         Ok(GuestBuildArtifacts {
             elf: output_elf,
             target_json,
             metadata: GuestToolchainMetadata {
                 rust_toolchain: self.config.rust_toolchain.clone(),
                 rustc_version,
-                polkavm_linker_version: POLKAVM_LINKER_VERSION.into(),
+                polkavm_linker_version: lock.polkavm_linker,
                 polkavm_target_variant: target_variant,
                 polkavm_target_hash: target_hash,
                 guest_architecture: if self.config.is_64_bit {
@@ -200,7 +215,11 @@ struct ElfDiagnostics {
     symbols: String,
 }
 
-fn validate_elf(path: &Path) -> Result<ElfDiagnostics> {
+fn validate_elf(
+    path: &Path,
+    required_exports: &[String],
+    require_relocations: bool,
+) -> Result<ElfDiagnostics> {
     let readelf = env::var_os("JAMSCRIPT_READELF")
         .map(PathBuf::from)
         .or_else(|| find_on_path("readelf"))
@@ -224,8 +243,10 @@ fn validate_elf(path: &Path) -> Result<ElfDiagnostics> {
             path.display()
         );
     }
-    if !symbols.contains("minijam_refine") || !symbols.contains("minijam_accumulate") {
-        bail!("canonical guest ELF is missing MiniJAM entry exports");
+    for export in required_exports {
+        if !symbols.contains(export) {
+            bail!("canonical guest ELF is missing required export {export}");
+        }
     }
     let forbidden_undefined = ["libc", "malloc", "calloc", "realloc", "free", "pthread"];
     if symbols.lines().any(|line| {
@@ -233,7 +254,7 @@ fn validate_elf(path: &Path) -> Result<ElfDiagnostics> {
     }) {
         bail!("canonical guest ELF contains an undefined system/libc symbol");
     }
-    if relocations.contains("There are no relocations") {
+    if require_relocations && relocations.contains("There are no relocations") {
         bail!("canonical guest ELF has no PolkaVM relocations");
     }
     Ok(ElfDiagnostics {
@@ -302,17 +323,6 @@ fn rustc_version(toolchain: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn rustflags_with_metadata_relocations() -> String {
-    let existing = env::var("RUSTFLAGS").unwrap_or_default();
-    if existing.contains("-z notext") || existing.contains("link-arg=-z") {
-        existing
-    } else if existing.is_empty() {
-        "-C link-arg=-z -C link-arg=notext".into()
-    } else {
-        format!("{existing} -C link-arg=-z -C link-arg=notext")
-    }
-}
-
 fn run(command: &mut Command, description: &str) -> Result<()> {
     let output = command
         .stdout(Stdio::piped())
@@ -350,6 +360,105 @@ fn hash_file(path: &Path) -> Result<String> {
     ))
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct ToolchainLock {
+    version: u32,
+    rust: String,
+    polkavm_linker: String,
+    polkavm_derive: String,
+    architecture: String,
+    abi: String,
+    target_source: String,
+    target_selection: String,
+    clang_major: u32,
+}
+
+impl ToolchainLock {
+    fn load(path: &Path) -> Result<Self> {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("reading PolkaVM toolchain lock {}", path.display()))?;
+        let lock: Self = toml::from_str(&contents)
+            .with_context(|| format!("parsing PolkaVM toolchain lock {}", path.display()))?;
+        if lock.version != 1
+            || lock.architecture != "riscv64"
+            || lock.abi != "lp64e"
+            || lock.target_source != "polkavm-linker"
+            || lock.target_selection != "autodetect"
+            || lock.clang_major != 20
+        {
+            bail!("unsupported PolkaVM toolchain lock {}", path.display());
+        }
+        let cargo_lock = path
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.join("Cargo.lock"))
+            .ok_or_else(|| anyhow::anyhow!("cannot locate Cargo.lock beside {}", path.display()))?;
+        validate_lock_package_versions(
+            &cargo_lock,
+            &[
+                ("polkavm-linker", &lock.polkavm_linker),
+                ("polkavm-derive", &lock.polkavm_derive),
+            ],
+        )?;
+        Ok(lock)
+    }
+}
+
+fn validate_resolved_guest_versions(manifest: &Path, lock: &ToolchainLock) -> Result<()> {
+    let cargo_lock = manifest
+        .parent()
+        .map(|dir| dir.join("Cargo.lock"))
+        .ok_or_else(|| anyhow::anyhow!("guest manifest has no parent directory"))?;
+    if cargo_lock.is_file() {
+        validate_lock_package_versions(&cargo_lock, &[("polkavm-derive", &lock.polkavm_derive)])?;
+    }
+    Ok(())
+}
+
+fn validate_lock_package_versions(path: &Path, expected: &[(&str, &str)]) -> Result<()> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("reading Cargo lock {}", path.display()))?;
+    let value: toml::Value = toml::from_str(&contents)
+        .with_context(|| format!("parsing Cargo lock {}", path.display()))?;
+    let packages = value
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("Cargo lock {} has no package table", path.display()))?;
+    for (name, expected_version) in expected {
+        let versions = packages
+            .iter()
+            .filter(|package| package.get("name").and_then(toml::Value::as_str) == Some(*name))
+            .filter_map(|package| package.get("version").and_then(toml::Value::as_str))
+            .collect::<Vec<_>>();
+        if !versions.contains(expected_version) {
+            bail!(
+                "Cargo lock {} resolves {} as {:?}, expected {}",
+                path.display(),
+                name,
+                versions,
+                expected_version
+            );
+        }
+    }
+    Ok(())
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
+fn default_toolchain() -> String {
+    let path = repo_root().join("toolchains/polkavm.lock");
+    let contents = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    toml::from_str::<ToolchainLock>(&contents)
+        .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
+        .rust
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +478,13 @@ mod tests {
             ]),
             "minijam_guest=/tmp/libminijam_guest.a\nnative_game=/tmp/libnative_game.a"
         );
+    }
+
+    #[test]
+    fn toolchain_lock_is_the_build_source_of_truth() {
+        let lock = ToolchainLock::load(&repo_root().join("toolchains/polkavm.lock")).unwrap();
+        assert_eq!(lock.rust, PolkaVmBuildConfig::default().rust_toolchain);
+        assert_eq!(lock.polkavm_linker, "0.30.0");
+        assert_eq!(lock.polkavm_derive, "0.30.0");
     }
 }

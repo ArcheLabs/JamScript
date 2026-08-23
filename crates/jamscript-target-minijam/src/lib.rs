@@ -51,6 +51,8 @@ pub struct BuildMetadata {
     pub c_compiler: String,
     #[serde(rename = "finalElfLinker")]
     pub final_elf_linker: String,
+    #[serde(rename = "finalElfLinkerOverrides")]
+    pub final_elf_linker_overrides: Vec<String>,
     #[serde(rename = "targetEnvironment")]
     pub target_environment: String,
     #[serde(rename = "minimumStackBytes")]
@@ -161,12 +163,15 @@ impl MiniJamTarget {
         let backend_output = work.path().join("polkavm");
         let artifacts = PolkaVmBuilder::new(PolkaVmBuildConfig {
             diagnostic: context.diagnostic,
+            rustflags: Some(jam_rustflags()),
             ..Default::default()
         })
         .build(&PolkaVmBuildRequest {
             manifest_path: guest_project.path().join("Cargo.toml"),
             output_dir: backend_output,
             native_archives: archives,
+            required_exports: vec!["minijam_refine".into(), "minijam_accumulate".into()],
+            require_relocations: true,
         })?;
         fs::copy(&artifacts.elf, output_dir.join("service.elf"))?;
 
@@ -252,7 +257,10 @@ fn build_metadata(
         recovery_format_version: RECOVERY_FORMAT_VERSION,
         abi_version: 1,
         target_adapter_version: "minijam-0.2".into(),
-        pvm_toolchain: "official polkavm-linker 0.30.0 target + rust-lld".into(),
+        pvm_toolchain: format!(
+            "official polkavm-linker {} target + rust-lld",
+            toolchain.polkavm_linker_version
+        ),
         rust_toolchain: toolchain.rust_toolchain,
         rustc_version: toolchain.rustc_version,
         polkavm_linker_version: toolchain.polkavm_linker_version,
@@ -262,6 +270,7 @@ fn build_metadata(
         guest_abi: toolchain.guest_abi,
         c_compiler: clang_version.clone(),
         final_elf_linker: toolchain.final_elf_linker,
+        final_elf_linker_overrides: vec!["-z".into(), "notext".into()],
         target_environment: toolchain.target_environment,
         minimum_stack_bytes: toolchain.minimum_stack_bytes,
         clang_version,
@@ -272,6 +281,32 @@ fn build_metadata(
         code_hash: Some(code_hash),
         native_abi_version: NATIVE_ABI_VERSION,
         native_modules,
+    }
+}
+
+fn jam_rustflags() -> String {
+    jam_rustflags_from(&std::env::var("RUSTFLAGS").unwrap_or_default())
+}
+
+fn jam_rustflags_from(existing: &str) -> String {
+    if existing.is_empty() {
+        "-C link-arg=-z -C link-arg=notext".into()
+    } else {
+        format!("{existing} -C link-arg=-z -C link-arg=notext")
+    }
+}
+
+#[cfg(test)]
+mod linker_override_tests {
+    use super::jam_rustflags_from;
+
+    #[test]
+    fn jam_metadata_relocation_override_is_explicit() {
+        assert_eq!(jam_rustflags_from(""), "-C link-arg=-z -C link-arg=notext");
+        assert_eq!(
+            jam_rustflags_from("-C opt-level=2"),
+            "-C opt-level=2 -C link-arg=-z -C link-arg=notext"
+        );
     }
 }
 
