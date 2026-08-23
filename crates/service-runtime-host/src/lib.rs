@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderError {
     State(StateError),
-    UnknownService,
-    RootMismatch,
+    UnavailableRoot,
     InvalidRecovery,
 }
 
@@ -79,7 +78,9 @@ pub fn commitment_for(root: StateRoot) -> ManagedStateCommitmentV1 {
 pub trait ServiceStateProvider {
     type Error;
 
-    fn current_root(&self, service: ServiceKeyV1) -> Result<StateRoot, Self::Error>;
+    /// Returns the last locally materialized root. This is an execution cursor,
+    /// not a canonicality claim; callers must obtain canonical roots from JAM.
+    fn materialized_root(&self, service: ServiceKeyV1) -> Result<StateRoot, Self::Error>;
     fn build_witness(
         &self,
         service: ServiceKeyV1,
@@ -103,14 +104,16 @@ pub trait ServiceStateProvider {
 #[derive(Clone, Default)]
 pub struct FullStateProvider {
     states: BTreeMap<ServiceKeyV1, BTreeMap<StateRoot, FullState>>,
-    current: BTreeMap<ServiceKeyV1, StateRoot>,
+    materialized: BTreeMap<ServiceKeyV1, StateRoot>,
 }
 
 impl FullStateProvider {
+    /// Materializes a snapshot identified only by `(service, state root)`.
+    /// Insertion does not make the snapshot canonical.
     pub fn insert(&mut self, service: ServiceKeyV1, state: FullState) -> StateRoot {
         let root = state.root();
         self.states.entry(service).or_default().insert(root, state);
-        self.current.insert(service, root);
+        self.materialized.insert(service, root);
         root
     }
 
@@ -122,7 +125,7 @@ impl FullStateProvider {
             .get(&service)
             .and_then(|states| states.get(&root))
             .cloned()
-            .ok_or(ProviderError::UnknownService)
+            .ok_or(ProviderError::UnavailableRoot)
     }
 }
 
@@ -131,9 +134,9 @@ pub type MemoryStateProvider = FullStateProvider;
 impl ServiceStateProvider for FullStateProvider {
     type Error = ProviderError;
 
-    fn current_root(&self, service: ServiceKeyV1) -> Result<StateRoot, Self::Error> {
+    fn materialized_root(&self, service: ServiceKeyV1) -> Result<StateRoot, Self::Error> {
         Ok(self
-            .current
+            .materialized
             .get(&service)
             .copied()
             .unwrap_or(EMPTY_STATE_ROOT_V1))
@@ -145,9 +148,6 @@ impl ServiceStateProvider for FullStateProvider {
         parent_root: StateRoot,
         plan: &StateAccessPlanV1,
     ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error> {
-        if self.current_root(service)? != parent_root {
-            return Err(ProviderError::RootMismatch);
-        }
         let state = self.state_at(service, parent_root)?;
         let keys = plan.keys.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let proof = state.proof_for(&keys)?;
@@ -163,10 +163,6 @@ impl ServiceStateProvider for FullStateProvider {
         service: ServiceKeyV1,
         output: &RuntimeRefineOutputV2,
     ) -> Result<(), Self::Error> {
-        let current = self.current_root(service)?;
-        if current != output.parent_root {
-            return Err(ProviderError::RootMismatch);
-        }
         let recovery = StateRecoveryV1::decode(&output.recovery_payload)
             .map_err(|_| ProviderError::InvalidRecovery)?;
         if recovery
@@ -176,7 +172,7 @@ impl ServiceStateProvider for FullStateProvider {
         {
             return Err(ProviderError::InvalidRecovery);
         }
-        let state = self.state_at(service, current)?;
+        let state = self.state_at(service, output.parent_root)?;
         let next = state.apply_diff(&recovery.diff)?;
         if next.root() != output.new_root {
             return Err(ProviderError::InvalidRecovery);
@@ -185,7 +181,7 @@ impl ServiceStateProvider for FullStateProvider {
             .entry(service)
             .or_default()
             .insert(output.new_root, next);
-        self.current.insert(service, output.new_root);
+        self.materialized.insert(service, output.new_root);
         Ok(())
     }
 
@@ -219,7 +215,7 @@ mod tests {
         ExecutionContext, RuntimeRefineInputV1, ServiceApplication, StateAccessError,
     };
     use service_runtime_guest::refine_v2;
-    use service_runtime_state::ManagedState;
+    use service_runtime_state::{ManagedState, ProofState};
 
     const SERVICE: ServiceKeyV1 = ServiceKeyV1::new([7; 32]);
 
@@ -251,7 +247,7 @@ mod tests {
     }
 
     fn run(provider: &FullStateProvider, actions: Vec<&[u8]>) -> RuntimeRefineOutputV2 {
-        let parent_root = provider.current_root(SERVICE).unwrap();
+        let parent_root = provider.materialized_root(SERVICE).unwrap();
         let plan =
             StateAccessPlanV1::from_keys([b"nonce".as_slice(), b"counter", b"a", b"b"]).unwrap();
         let witness = provider.build_witness(SERVICE, parent_root, &plan).unwrap();
@@ -267,7 +263,10 @@ mod tests {
     fn every_service_starts_at_the_canonical_empty_root() {
         let provider = MemoryStateProvider::default();
         let service = ServiceKeyV1::new([42; 32]);
-        assert_eq!(provider.current_root(service).unwrap(), EMPTY_STATE_ROOT_V1);
+        assert_eq!(
+            provider.materialized_root(service).unwrap(),
+            EMPTY_STATE_ROOT_V1
+        );
         let response = provider
             .get(service, EMPTY_STATE_ROOT_V1, b"missing")
             .unwrap();
@@ -275,6 +274,52 @@ mod tests {
         assert_eq!(response.state_root, EMPTY_STATE_ROOT_V1);
         assert_eq!(response.value, None);
         assert!(!response.proof.is_empty());
+    }
+
+    fn verify_query(response: &StateQueryResponseV1) -> Result<Option<Vec<u8>>, StateError> {
+        let mut state = ProofState::from_witness(response.state_root, &response.proof)?;
+        state.get(&response.key)
+    }
+
+    #[test]
+    fn provider_queries_explicit_historical_roots_with_layout_v1_proofs() {
+        let mut provider = FullStateProvider::default();
+        let first = FullState::from_pairs([(b"score".as_slice(), b"10".as_slice())]).unwrap();
+        let first_root = provider.insert(SERVICE, first.clone());
+        let second = FullState::from_pairs([
+            (b"score".as_slice(), b"20".as_slice()),
+            (b"other".as_slice(), b"1".as_slice()),
+        ])
+        .unwrap();
+        let second_root = provider.insert(SERVICE, second);
+
+        let historical = provider.get(SERVICE, first_root, b"score").unwrap();
+        assert_eq!(historical.value, Some(b"10".to_vec()));
+        assert_eq!(verify_query(&historical).unwrap(), historical.value);
+
+        let latest_materialized = provider.get(SERVICE, second_root, b"score").unwrap();
+        assert_eq!(latest_materialized.value, Some(b"20".to_vec()));
+        assert_eq!(
+            verify_query(&latest_materialized).unwrap(),
+            latest_materialized.value
+        );
+
+        let absent = provider.get(SERVICE, first_root, b"missing").unwrap();
+        assert_eq!(absent.value, None);
+        assert_eq!(verify_query(&absent).unwrap(), None);
+
+        assert_eq!(
+            provider.get(SERVICE, [99; 32], b"score"),
+            Err(ProviderError::UnavailableRoot)
+        );
+        assert_eq!(
+            provider.get(ServiceKeyV1::new([8; 32]), first_root, b"score"),
+            Err(ProviderError::UnavailableRoot)
+        );
+
+        let mut tampered = historical;
+        tampered.proof[0][0] ^= 1;
+        assert!(verify_query(&tampered).is_err());
     }
 
     #[test]
@@ -307,7 +352,10 @@ mod tests {
             service_runtime_core::ActionStatusV1::Failed
         );
         provider.apply_recovery(SERVICE, &output).unwrap();
-        assert_eq!(provider.current_root(SERVICE).unwrap(), output.new_root);
+        assert_eq!(
+            provider.materialized_root(SERVICE).unwrap(),
+            output.new_root
+        );
         let next = provider.open(SERVICE, output.new_root).unwrap();
         assert_eq!(next.get(b"nonce").unwrap(), Some(vec![3]));
         assert_eq!(next.get(b"counter").unwrap(), Some(vec![2]));
@@ -336,7 +384,7 @@ mod tests {
             SERVICE,
             FullState::from_pairs([(b"seed".as_slice(), b"1".as_slice())]).unwrap(),
         );
-        let parent_root = provider.current_root(SERVICE).unwrap();
+        let parent_root = provider.materialized_root(SERVICE).unwrap();
         let plan = StateAccessPlanV1::from_keys([
             b"nonce".as_slice(),
             b"counter".as_slice(),
@@ -358,9 +406,9 @@ mod tests {
         stale.parent_root = [8; 32];
         assert_eq!(
             provider.apply_recovery(SERVICE, &stale),
-            Err(ProviderError::RootMismatch)
+            Err(ProviderError::UnavailableRoot)
         );
-        assert_eq!(provider.current_root(SERVICE).unwrap(), parent_root);
+        assert_eq!(provider.materialized_root(SERVICE).unwrap(), parent_root);
 
         let mut tampered = output.clone();
         tampered.recovery_payload[0] ^= 1;
@@ -368,7 +416,7 @@ mod tests {
             provider.apply_recovery(SERVICE, &tampered),
             Err(ProviderError::InvalidRecovery)
         );
-        assert_eq!(provider.current_root(SERVICE).unwrap(), parent_root);
+        assert_eq!(provider.materialized_root(SERVICE).unwrap(), parent_root);
 
         let mut wrong_commitment = output.clone();
         wrong_commitment.recovery_commitment[0] ^= 1;
@@ -382,6 +430,6 @@ mod tests {
             provider.apply_recovery(SERVICE, &wrong_new_root),
             Err(ProviderError::InvalidRecovery)
         );
-        assert_eq!(provider.current_root(SERVICE).unwrap(), parent_root);
+        assert_eq!(provider.materialized_root(SERVICE).unwrap(), parent_root);
     }
 }

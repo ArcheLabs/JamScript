@@ -16,20 +16,22 @@ SignedActionV1 signing digest. The digest contains the
 JAMSCRIPT_ACTION_V1 domain, while sr25519 verification uses the standard
 Substrate context.
 
-For production, compose the two endpoints explicitly. Node-backed reads stay
-on the MiniJAM node, while Work submission and status tracking use the
-standalone formal RPC:
+For production, compose the endpoints explicitly. Finalized chain reads stay
+on the MiniJAM node, Work submission and status tracking use the standalone
+formal RPC, and managed-state snapshots may be served by an independent state
+provider:
 
     const transport = new SplitRpcTransport(
       new FetchRpcTransport("https://node.example"),
       new FetchRpcTransport("https://formal.example"),
+      new FetchRpcTransport("https://state.example"),
     );
     const client = new JamScriptClient(deployment, transport);
 
 SplitRpcTransport routes chain_getBlockHash,
 minijam_getFinalizedContext, and minijam_getServiceStorageAt to the node,
 and routes only minijam_submitWorkV1 and minijam_getWorkStatusV1 to the
-formal RPC.
+formal RPC. It routes minijam_getManagedStateV1 to the state provider.
 
 ## Formal Work RPC
 
@@ -53,9 +55,11 @@ The endpoint also exposes GET /health/ready after the chain client connects
 and the bundle directory is initialized. It applies an 8 MiB request-body
 limit and a bounded 32-request admission semaphore.
 
-The client reads finalized service storage through the existing
-minijam_getServiceStorageAt method. Queries decode the ABI state value
-locally and return the finalized context used for the read.
+`queryLatest` first reads the managed-state commitment from finalized Service
+storage, then requests that explicit root from the provider. It checks the
+response identity and verifies the Polkadot LayoutV1 storage proof locally
+before decoding the ABI value. Provider availability never selects the root,
+and implicit fallback to legacy Service KV is disabled by default.
 
 ## Network E2E
 

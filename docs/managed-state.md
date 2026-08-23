@@ -67,6 +67,13 @@ get(service_id, state_root, key) → value + StorageProof
 
 The client first resolves the finalized JAM commitment, then asks the provider
 for that explicit root and key. It validates the returned service/root/key
-tuple before decoding the application value. The current TypeScript package
-does not yet ship a Substrate `StorageProof` verifier; the proof remains part
-of the response contract and is verified by the Rust host/guest implementation.
+tuple and verifies the returned `StorageProof` against that root with the same
+`LayoutV1<Blake2Hasher>` before decoding the application value. Provider
+availability is not canonicality: only the finalized JAM commitment selects
+the canonical root, while a provider may retain and serve any number of
+historical `(ServiceKey, StateRoot)` snapshots.
+
+Managed-state reads never implicitly fall back to JAM Service KV. The client
+retains an explicit `legacyServiceKvFallback` compatibility option, defaulting
+to `false`; applications should leave it disabled for authenticated managed
+state.

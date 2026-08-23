@@ -14,12 +14,18 @@ import {
 import { asWorkRpc, RpcError, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
+import { verifyManagedStateProof } from "./proof.js";
 
 const EMPTY_STATE_ROOT_V1 = "0x03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314";
 
 export type QueryResult = {
   value: CodecValue | null;
   context: FinalizedContext;
+  stateRoot: string;
+};
+
+export type JamScriptClientOptions = {
+  legacyServiceKvFallback?: boolean;
 };
 
 export class JamScriptClient {
@@ -28,6 +34,7 @@ export class JamScriptClient {
   constructor(
     private readonly deployment: DeploymentDescriptor,
     transport: RpcTransport,
+    private readonly options: JamScriptClientOptions = {},
   ) {
     if (deployment.abiVersion !== 1 || deployment.abi.abiVersion !== 1) {
       throw new Error("unsupported JamScript ABI version");
@@ -114,7 +121,7 @@ export class JamScriptClient {
     }
   }
 
-  async query(queryName: string, key: Uint8Array): Promise<QueryResult> {
+  async queryLatest(queryName: string, key: Uint8Array): Promise<QueryResult> {
     const query = queryByName(this.deployment.abi, queryName);
     const state = stateByName(this.deployment.abi, query.state);
     if (query.keyType !== "address" || state.keyType !== "address" || key.length !== 32) {
@@ -132,7 +139,12 @@ export class JamScriptClient {
         ? null
         : decodeValue(query.output.type, valueBytes),
       context,
+      stateRoot: toHex(root),
     };
+  }
+
+  async query(queryName: string, key: Uint8Array): Promise<QueryResult> {
+    return this.queryLatest(queryName, key);
   }
 
   private async managedStateRoot(context: FinalizedContext): Promise<Uint8Array> {
@@ -167,9 +179,15 @@ export class JamScriptClient {
       ) {
         throw new Error("managed-state provider response does not match the requested query");
       }
-      return response.valueBase64 === null ? null : fromBase64(response.valueBase64);
+      const claimedValue = response.valueBase64 === null ? null : fromBase64(response.valueBase64);
+      return verifyManagedStateProof(
+        root,
+        key,
+        claimedValue,
+        response.proofBase64.map(fromBase64),
+      );
     } catch (error) {
-      if (!isManagedStateUnavailable(error)) throw error;
+      if (!this.options.legacyServiceKvFallback || !isManagedStateUnavailable(error)) throw error;
       const encoded = await this.rpc.serviceStorageAt(
         context.blockHash,
         this.deployment.serviceId,

@@ -314,7 +314,9 @@ fn runtime_input_batch(
         }
     }
     let plan = StateAccessPlanV1::from_keys(keys).expect("state access plan");
-    let parent_root = provider.current_root(service_key).expect("provider root");
+    let parent_root = provider
+        .materialized_root(service_key)
+        .expect("provider root");
     let witness = provider
         .build_witness(service_key, parent_root, &plan)
         .expect("provider witness");
@@ -444,7 +446,7 @@ fn execute_batch(
     });
     state.apply(&output);
     let canonical_root = canonical_root(state);
-    let mut accepted_root = provider.current_root(service_key).unwrap();
+    let mut accepted_root = provider.materialized_root(service_key).unwrap();
     let mut accepted = Vec::new();
     for refined in recovered.into_iter().flatten() {
         if refined.parent_root != accepted_root
@@ -466,7 +468,10 @@ fn execute_batch(
             .apply_recovery(service_key, &refined)
             .expect("provider recovery");
     }
-    assert_eq!(provider.current_root(service_key).unwrap(), canonical_root);
+    assert_eq!(
+        provider.materialized_root(service_key).unwrap(),
+        canonical_root
+    );
 }
 
 fn canonical_root(state: &TestState) -> [u8; 32] {
@@ -583,7 +588,7 @@ fn execute_work_item(
     state.apply(&output);
     let canonical = canonical_root(state);
     if let Some(output) = recovered {
-        let current = provider.current_root(service_key).unwrap();
+        let current = provider.materialized_root(service_key).unwrap();
         let accepted = output.parent_root == current
             && !output
                 .transition_valid_until
@@ -593,7 +598,7 @@ fn execute_work_item(
             provider.apply_recovery(service_key, &output).unwrap();
         }
     }
-    assert_eq!(provider.current_root(service_key).unwrap(), canonical);
+    assert_eq!(provider.materialized_root(service_key).unwrap(), canonical);
 }
 
 fn run_batch_benchmark(blob: &[u8], item_gas: u64) {
@@ -752,7 +757,7 @@ fn provider_value(
     key: &[u8],
 ) -> Option<Vec<u8>> {
     provider
-        .open(service_key, provider.current_root(service_key).unwrap())
+        .open(service_key, provider.materialized_root(service_key).unwrap())
         .unwrap()
         .get(key)
         .unwrap()

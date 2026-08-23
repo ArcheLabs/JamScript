@@ -53,7 +53,10 @@ fn main() {
     provider
         .apply_recovery(service, &output)
         .expect("provider recovery");
-    assert_eq!(provider.current_root(service).unwrap(), output.new_root);
+    assert_eq!(
+        provider.materialized_root(service).unwrap(),
+        output.new_root
+    );
     assert_eq!(
         provider
             .open(service, output.new_root)

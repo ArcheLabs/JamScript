@@ -12,6 +12,7 @@
     "test:network": "node tests/minijam-network.e2e.mjs"
   },
   "dependencies": {
+    "@polkadot-api/substrate-bindings": "^0.21.0",
     "@polkadot/util": "^14.0.1",
     "@polkadot/util-crypto": "^14.0.1"
   },
