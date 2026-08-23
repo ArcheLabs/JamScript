@@ -29,8 +29,8 @@ use minijam_jamcore_api::{
 use minijam_protocol::{StateOperation, PROTOCOL_VERSION_V1};
 use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
 use service_runtime_core::{
-    application_key_v1, RuntimeRefineInputV1, RuntimeRefineOutputV2, ServiceKeyV1,
-    StateAccessPlanV1,
+    application_key_v1, ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV2,
+    ServiceKeyV1, StateAccessPlanV1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
 use service_runtime_host::{FullStateProvider, ServiceStateProvider};
 
@@ -161,11 +161,11 @@ impl CoreDataBase for MiniJamDb<'_> {
     }
 }
 
-fn install_service(state: &mut TestState, blob: &[u8]) -> OpaqueHash {
+fn install_service(state: &mut TestState, blob: &[u8], item_gas: u64) -> OpaqueHash {
     let code_hash = OpaqueHash(blake2b(blob));
     let mut info = ServiceInfo::new(
         code_hash,
-        ITEM_GAS,
+        item_gas,
         0,
         0,
         TimeSlot(0),
@@ -220,7 +220,13 @@ fn action(
     (action, keypair.public.to_bytes())
 }
 
-fn work_input(code_hash: OpaqueHash, payloads: Vec<Vec<u8>>, sequence: u8) -> WorkReportInput {
+fn work_input(
+    code_hash: OpaqueHash,
+    payloads: Vec<Vec<u8>>,
+    sequence: u8,
+    refine_gas: u64,
+    accumulate_gas: u64,
+) -> WorkReportInput {
     let item_count = payloads.len();
     let package = WorkPackage {
         auth_code_host: SYSTEM_SERVICE_ID,
@@ -240,8 +246,8 @@ fn work_input(code_hash: OpaqueHash, payloads: Vec<Vec<u8>>, sequence: u8) -> Wo
             .map(|payload| WorkItem {
                 service: SERVICE_ID,
                 code_hash,
-                refine_gas_limit: ITEM_GAS,
-                accumulate_gas_limit: ITEM_GAS,
+                refine_gas_limit: refine_gas,
+                accumulate_gas_limit: accumulate_gas,
                 export_count: 0,
                 payload: ByteSequence::from(payload),
                 import_segments: Vec::new(),
@@ -280,16 +286,34 @@ fn runtime_input(
     action: &[u8],
     application_schema: Option<&[u8]>,
 ) -> Vec<u8> {
-    let signed = SignedActionV2::decode(action).expect("V2 action envelope");
-    let sender: [u8; 32] = signed
-        .public_key
-        .as_slice()
-        .try_into()
-        .expect("sr25519 key");
-    let application_keys = application_schema
-        .map(|schema| vec![application_key_v1(schema, &sender).unwrap()])
-        .unwrap_or_default();
-    let plan = StateAccessPlanV1::for_wallet(&sender, application_keys).expect("state access plan");
+    runtime_input_batch(
+        provider,
+        service_key,
+        std::slice::from_ref(&action.to_vec()),
+        application_schema,
+    )
+}
+
+fn runtime_input_batch(
+    provider: &FullStateProvider,
+    service_key: ServiceKeyV1,
+    actions: &[Vec<u8>],
+    application_schema: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut keys = Vec::new();
+    for action in actions {
+        let signed = SignedActionV2::decode(action).expect("V2 action envelope");
+        let sender: [u8; 32] = signed
+            .public_key
+            .as_slice()
+            .try_into()
+            .expect("sr25519 key");
+        keys.push(service_runtime_core::wallet_nonce_key_v1(&sender));
+        if let Some(schema) = application_schema {
+            keys.push(application_key_v1(schema, &sender).unwrap());
+        }
+    }
+    let plan = StateAccessPlanV1::from_keys(keys).expect("state access plan");
     let parent_root = provider.current_root(service_key).expect("provider root");
     let witness = provider
         .build_witness(service_key, parent_root, &plan)
@@ -297,12 +321,13 @@ fn runtime_input(
     RuntimeRefineInputV1 {
         version: 1,
         managed_state: witness,
-        actions: vec![action.to_vec()],
+        actions: actions.to_vec(),
     }
     .encode()
     .expect("runtime input encoding")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_batch(
     state: &mut TestState,
     provider: &mut FullStateProvider,
@@ -311,6 +336,7 @@ fn execute_batch(
     code_hash: OpaqueHash,
     actions: Vec<Vec<u8>>,
     slot: u32,
+    item_gas: u64,
 ) {
     let action_count = actions.len();
     let summary = state_summary(state, &actions);
@@ -333,7 +359,13 @@ fn execute_batch(
                 InnerEngine<InterpBackend>,
             >(
                 &backend,
-                work_input(code_hash, vec![runtime_payload], slot as u8),
+                work_input(
+                    code_hash,
+                    vec![runtime_payload],
+                    slot as u8,
+                    item_gas,
+                    ITEM_GAS,
+                ),
                 InterpBackend,
             )
             .unwrap_or_else(|error| {
@@ -357,19 +389,21 @@ fn execute_batch(
                                     .expect("planning provider recovery");
                                 recovered.push(Some(refined));
                                 format!(
-                                    "item={index},parent_root={parent:?},new_root={next:?},receipts={:?}",
+                                    "item={index},result=Ok,gas_limit={item_gas},gas_used={},gas_remaining={},parent_root={parent:?},new_root={next:?},receipts={:?}",
+                                    result.refine_load.gas_used,
+                                    item_gas.saturating_sub(result.refine_load.gas_used),
                                     recovered.last().and_then(|item| item.as_ref()).map(|item| &item.receipts)
                                 )
                             }
                             Err(error) => {
                                 recovered.push(None);
-                                format!("item={index},error_payload={error:?}")
+                                format!("item={index},result=Ok,error_payload={error:?},gas_limit={item_gas},gas_used={},gas_remaining={}", result.refine_load.gas_used, item_gas.saturating_sub(result.refine_load.gas_used))
                             }
                         }
                     }
-                    result => {
+                    exec_result => {
                         recovered.push(None);
-                        format!("item={index},result={result:?}")
+                        format!("item={index},result={exec_result:?},gas_limit={item_gas},gas_used={},gas_remaining={}", result.refine_load.gas_used, item_gas.saturating_sub(result.refine_load.gas_used))
                     }
                 })
                 .collect::<Vec<_>>()
@@ -409,13 +443,195 @@ fn execute_batch(
             )
     });
     state.apply(&output);
+    let canonical_root = canonical_root(state);
+    let mut accepted_root = provider.current_root(service_key).unwrap();
+    let mut accepted = Vec::new();
     for refined in recovered.into_iter().flatten() {
+        if refined.parent_root != accepted_root
+            || refined
+                .transition_valid_until
+                .is_some_and(|valid_until| u64::from(slot) > valid_until)
+        {
+            continue;
+        }
+        accepted_root = refined.new_root;
+        accepted.push(refined);
+    }
+    assert_eq!(
+        accepted_root, canonical_root,
+        "provider candidate diverged from canonical commitment"
+    );
+    for refined in accepted {
         provider
             .apply_recovery(service_key, &refined)
             .expect("provider recovery");
     }
+    assert_eq!(provider.current_root(service_key).unwrap(), canonical_root);
 }
 
+fn canonical_root(state: &TestState) -> [u8; 32] {
+    let key = StoreKey::new_service_storage_key(
+        &SERVICE_ID,
+        &ByteSequence::from(MANAGED_STATE_COMMITMENT_KEY_V1.to_vec()),
+    )
+    .to_state_key()
+    .0;
+    state
+        .0
+        .get(&key)
+        .and_then(|value| ManagedStateCommitmentV1::decode(value).ok())
+        .map(|commitment| commitment.root)
+        .unwrap_or(service_runtime_core::EMPTY_STATE_ROOT_V1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_work_item(
+    state: &mut TestState,
+    provider: &mut FullStateProvider,
+    service_key: ServiceKeyV1,
+    application_schema: Option<&[u8]>,
+    code_hash: OpaqueHash,
+    actions: Vec<Vec<u8>>,
+    slot: u32,
+    item_gas: u64,
+) {
+    let runtime_payload = runtime_input_batch(provider, service_key, &actions, application_schema);
+    let decoded_input = RuntimeRefineInputV1::decode(&runtime_payload).expect("runtime input");
+    let witness_bytes = decoded_input
+        .managed_state
+        .encode()
+        .expect("managed state witness")
+        .len();
+    let witness_nodes = decoded_input.managed_state.storage_proof.len();
+    let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
+    backend.load_tiny_from_db().unwrap();
+    let report = compute_work_report::<
+        TinySpec,
+        MiniJamDb<'_>,
+        StateBackend<TinySpec, MiniJamDb<'_>>,
+        InterpBackend,
+        InnerEngine<InterpBackend>,
+    >(
+        &backend,
+        work_input(
+            code_hash,
+            vec![runtime_payload],
+            slot as u8,
+            item_gas,
+            ITEM_GAS,
+        ),
+        InterpBackend,
+    )
+    .unwrap_or_else(|error| {
+        panic!("MiniJAM refine failed for one WorkItem: slot={slot}, error={error:?}")
+    });
+    let result = &report.report.results[0];
+    let recovered = match &result.result {
+        WorkExecResult::Ok(payload) => match RuntimeRefineOutputV2::decode(payload.as_ref()) {
+            Ok(output) => {
+                eprintln!(
+                    "slot={slot},work_item_actions={},result=Ok,gas_limit={item_gas},gas_used={},gas_remaining={},valid_until={:?},receipts={:?},witness_bytes={witness_bytes},witness_nodes={witness_nodes},output_bytes={},recovery_bytes={}",
+                    actions.len(),
+                    result.refine_load.gas_used,
+                    item_gas.saturating_sub(result.refine_load.gas_used),
+                    output.transition_valid_until,
+                    output.receipts,
+                    output.encode().map(|bytes| bytes.len()).unwrap_or_default(),
+                    output.recovery_payload.len(),
+                );
+                Some(output)
+            }
+            Err(error) => {
+                eprintln!(
+                    "slot={slot},work_item_actions={},result=Ok,error_payload={error:?},gas_limit={item_gas},gas_used={},gas_remaining={},witness_bytes={witness_bytes},witness_nodes={witness_nodes}",
+                    actions.len(),
+                    result.refine_load.gas_used,
+                    item_gas.saturating_sub(result.refine_load.gas_used),
+                );
+                None
+            }
+        },
+        error => {
+            eprintln!(
+                "slot={slot},work_item_actions={},result={error:?},gas_limit={item_gas},gas_used={},gas_remaining={},witness_bytes={witness_bytes},witness_nodes={witness_nodes}",
+                actions.len(),
+                result.refine_load.gas_used,
+                item_gas.saturating_sub(result.refine_load.gas_used),
+            );
+            None
+        }
+    };
+    let reports = vec![report.report.encode().try_into().unwrap()]
+        .try_into()
+        .unwrap();
+    let output = MiniJamExecutive
+        .execute(
+            MiniJamExecutionInput {
+                protocol_version: PROTOCOL_VERSION_V1,
+                slot,
+                parent_hash: [0; 32],
+                parent_state_root: [0; 32],
+                entropy: [0; 32],
+                reports,
+                preimages: Default::default(),
+                system_ops: Default::default(),
+                max_gas: MAX_BLOCK_GAS,
+            },
+            state,
+        )
+        .expect("MiniJAM accumulation for one WorkItem");
+    state.apply(&output);
+    let canonical = canonical_root(state);
+    if let Some(output) = recovered {
+        let current = provider.current_root(service_key).unwrap();
+        let accepted = output.parent_root == current
+            && !output
+                .transition_valid_until
+                .is_some_and(|valid_until| u64::from(slot) > valid_until);
+        if accepted {
+            assert_eq!(output.new_root, canonical);
+            provider.apply_recovery(service_key, &output).unwrap();
+        }
+    }
+    assert_eq!(provider.current_root(service_key).unwrap(), canonical);
+}
+
+fn run_batch_benchmark(blob: &[u8], item_gas: u64) {
+    let service_key = ServiceKeyV1::new([0x22; 32]);
+    for action_count in [1usize, 2, 4, 8, 16, 32, 64] {
+        let mut state = new_state();
+        let mut provider = FullStateProvider::default();
+        let code_hash = install_service(&mut state, blob, item_gas);
+        let actions = (0..action_count)
+            .map(|nonce| {
+                action(
+                    service_key,
+                    7,
+                    nonce as u64,
+                    10,
+                    jamscript_ir::action_selector("increment"),
+                    7u64.to_le_bytes().to_vec(),
+                )
+                .0
+                .encode()
+                .expect("benchmark action")
+            })
+            .collect();
+        eprintln!("benchmark actions={action_count}");
+        execute_work_item(
+            &mut state,
+            &mut provider,
+            service_key,
+            None,
+            code_hash,
+            actions,
+            1,
+            item_gas,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn refine_native_failure(
     state: &TestState,
     provider: &FullStateProvider,
@@ -424,6 +640,7 @@ fn refine_native_failure(
     action: Vec<u8>,
     slot: u32,
     expected_native_status: u32,
+    item_gas: u64,
 ) {
     let summary = state_summary(state, std::slice::from_ref(&action));
     let runtime_payload = runtime_input(provider, service_key, &action, Some(b"best-score/v1"));
@@ -437,7 +654,13 @@ fn refine_native_failure(
         InnerEngine<InterpBackend>,
     >(
         &backend,
-        work_input(code_hash, vec![runtime_payload], slot as u8),
+        work_input(
+            code_hash,
+            vec![runtime_payload],
+            slot as u8,
+            item_gas,
+            ITEM_GAS,
+        ),
         InterpBackend,
     )
     .unwrap_or_else(|error| {
@@ -561,11 +784,11 @@ fn provider_score(
     .map(|value| u64::from_le_bytes(value.try_into().unwrap()))
 }
 
-fn run_counter(blob: &[u8]) {
+fn run_counter(blob: &[u8], item_gas: u64) {
     let service_key = ServiceKeyV1::new([0x22; 32]);
     let mut state = new_state();
     let mut provider = FullStateProvider::default();
-    let code_hash = install_service(&mut state, blob);
+    let code_hash = install_service(&mut state, blob, item_gas);
     let selector = jamscript_ir::action_selector("increment");
     let (_, sender) = action(service_key, 7, 0, 10, selector, 7u64.to_le_bytes().to_vec());
     for (slot, nonce, valid_until, expected) in [
@@ -591,6 +814,7 @@ fn run_counter(blob: &[u8]) {
             code_hash,
             vec![signed.encode().unwrap()],
             slot,
+            item_gas,
         );
         assert_eq!(
             provider_nonce(&provider, service_key, &sender),
@@ -599,7 +823,39 @@ fn run_counter(blob: &[u8]) {
     }
 }
 
-fn run_game(blob: &[u8]) {
+fn run_first_counter_diagnostic(blob: &[u8]) {
+    let service_key = ServiceKeyV1::new([0x22; 32]);
+    let mut state = new_state();
+    let mut provider = FullStateProvider::default();
+    let code_hash = install_service(&mut state, blob, ITEM_GAS);
+    let selector = jamscript_ir::action_selector("increment");
+    let (signed, sender) = action(
+        service_key,
+        7,
+        0,
+        10,
+        selector,
+        7u64.to_le_bytes().to_vec(),
+    );
+
+    eprintln!("diagnostic guest: one item, refine gas limit={ITEM_GAS}");
+    execute_batch(
+        &mut state,
+        &mut provider,
+        service_key,
+        None,
+        code_hash,
+        vec![signed.encode().expect("diagnostic action")],
+        1,
+        ITEM_GAS,
+    );
+    eprintln!(
+        "diagnostic guest completed: sender_nonce={:?}",
+        provider_nonce(&provider, service_key, &sender)
+    );
+}
+
+fn run_game(blob: &[u8], item_gas: u64) {
     let service_key = ServiceKeyV1::new([0x11; 32]);
     let selector = jamscript_ir::action_selector("submitRun");
     let valid_100 = game_run(80, &[(1, 20)]);
@@ -607,7 +863,7 @@ fn run_game(blob: &[u8]) {
     let valid_150 = game_run(100, &[(1, 50)]);
     let mut state = new_state();
     let mut provider = FullStateProvider::default();
-    let code_hash = install_service(&mut state, blob);
+    let code_hash = install_service(&mut state, blob, item_gas);
     let (signed, alice) = signed_game(service_key, 7, 0, 10, valid_100.clone());
     execute_batch(
         &mut state,
@@ -617,6 +873,7 @@ fn run_game(blob: &[u8]) {
         code_hash,
         vec![signed.encode().unwrap()],
         1,
+        item_gas,
     );
     assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
     assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
@@ -631,6 +888,7 @@ fn run_game(blob: &[u8]) {
         code_hash,
         vec![tampered.encode().unwrap()],
         2,
+        item_gas,
     );
     assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
     assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
@@ -644,6 +902,7 @@ fn run_game(blob: &[u8]) {
         invalid.encode().unwrap(),
         2,
         9,
+        item_gas,
     );
     assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
     assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
@@ -659,6 +918,7 @@ fn run_game(blob: &[u8]) {
         trailing.encode().unwrap(),
         2,
         5,
+        item_gas,
     );
     assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
     assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
@@ -672,6 +932,7 @@ fn run_game(blob: &[u8]) {
         code_hash,
         vec![replay.encode().unwrap()],
         3,
+        item_gas,
     );
     assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
     assert_eq!(provider_nonce(&provider, service_key, &alice), Some(1));
@@ -685,6 +946,7 @@ fn run_game(blob: &[u8]) {
         code_hash,
         vec![lower.encode().unwrap()],
         4,
+        item_gas,
     );
     assert_eq!(provider_score(&provider, service_key, &alice), Some(100));
     assert_eq!(provider_nonce(&provider, service_key, &alice), Some(2));
@@ -698,6 +960,7 @@ fn run_game(blob: &[u8]) {
         code_hash,
         vec![higher.encode().unwrap()],
         5,
+        item_gas,
     );
     assert_eq!(provider_score(&provider, service_key, &alice), Some(150));
     assert_eq!(provider_nonce(&provider, service_key, &alice), Some(3));
@@ -711,13 +974,14 @@ fn run_game(blob: &[u8]) {
         code_hash,
         vec![expired.encode().unwrap()],
         11,
+        item_gas,
     );
     assert_eq!(provider_score(&provider, service_key, &alice), Some(150));
     assert_eq!(provider_nonce(&provider, service_key, &alice), Some(3));
 
     let mut batch_state = new_state();
     let mut batch_provider = FullStateProvider::default();
-    let batch_hash = install_service(&mut batch_state, blob);
+    let batch_hash = install_service(&mut batch_state, blob, item_gas);
     let mut batch = Vec::new();
     let mut senders = Vec::new();
     for (seed, score) in [(1u8, 40u8), (2, 50), (3, 60)] {
@@ -725,7 +989,7 @@ fn run_game(blob: &[u8]) {
         batch.push(item.encode().unwrap());
         senders.push(sender);
     }
-    execute_batch(
+    execute_work_item(
         &mut batch_state,
         &mut batch_provider,
         service_key,
@@ -733,6 +997,7 @@ fn run_game(blob: &[u8]) {
         batch_hash,
         batch,
         1,
+        item_gas,
     );
     for sender in senders {
         assert_eq!(
@@ -743,11 +1008,11 @@ fn run_game(blob: &[u8]) {
 
     let mut isolation_state = new_state();
     let mut isolation_provider = FullStateProvider::default();
-    let isolation_hash = install_service(&mut isolation_state, blob);
+    let isolation_hash = install_service(&mut isolation_state, blob, item_gas);
     let (good_a, sender_a) = signed_game(service_key, 4, 0, 10, game_run(40, &[(1, 20)]));
     let (bad_b, sender_b) = signed_game(service_key, 5, 0, 10, game_run(40, &[(8, 20)]));
     let (good_c, sender_c) = signed_game(service_key, 6, 0, 10, game_run(40, &[(1, 30)]));
-    execute_batch(
+    execute_work_item(
         &mut isolation_state,
         &mut isolation_provider,
         service_key,
@@ -759,6 +1024,7 @@ fn run_game(blob: &[u8]) {
             good_c.encode().unwrap(),
         ],
         1,
+        item_gas,
     );
     assert_eq!(
         provider_nonce(&isolation_provider, service_key, &sender_a),
@@ -775,10 +1041,10 @@ fn run_game(blob: &[u8]) {
 
     let mut sequential_state = new_state();
     let mut sequential_provider = FullStateProvider::default();
-    let sequential_hash = install_service(&mut sequential_state, blob);
+    let sequential_hash = install_service(&mut sequential_state, blob, item_gas);
     let (first, sequential_sender) = signed_game(service_key, 8, 0, 10, game_run(80, &[(1, 20)]));
     let (second, _) = signed_game(service_key, 8, 1, 10, game_run(100, &[(1, 50)]));
-    execute_batch(
+    execute_work_item(
         &mut sequential_state,
         &mut sequential_provider,
         service_key,
@@ -786,6 +1052,7 @@ fn run_game(blob: &[u8]) {
         sequential_hash,
         vec![first.encode().unwrap(), second.encode().unwrap()],
         1,
+        item_gas,
     );
     assert_eq!(
         provider_nonce(&sequential_provider, service_key, &sequential_sender),
@@ -799,19 +1066,55 @@ fn run_game(blob: &[u8]) {
 }
 
 fn main() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
     let mut args = env::args().skip(1);
-    let counter_path = args
-        .next()
-        .expect("usage: jamscript-minijam-e2e <counter.blob> <game.blob>");
-    let game_path = args
-        .next()
-        .expect("usage: jamscript-minijam-e2e <counter.blob> <game.blob>");
+    let mut item_gas = ITEM_GAS;
+    let mut benchmark_batch = false;
+    let mut diagnostic_only = false;
+    let mut paths = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "--diagnostic-item-gas" {
+            item_gas = args
+                .next()
+                .expect("--diagnostic-item-gas requires a value")
+                .parse()
+                .expect("diagnostic gas must be an integer");
+        } else if arg == "--benchmark-batch" {
+            benchmark_batch = true;
+        } else if arg == "--diagnostic-only" {
+            diagnostic_only = true;
+        } else {
+            paths.push(arg);
+        }
+    }
+    let counter_path = paths.first().expect(
+        "usage: jamscript-minijam-e2e [--diagnostic-only] [--diagnostic-item-gas GAS] <counter.blob> <game.blob>",
+    );
+    let game_path = paths.get(1).expect(
+        "usage: jamscript-minijam-e2e [--diagnostic-only] [--diagnostic-item-gas GAS] <counter.blob> <game.blob>",
+    );
     let counter = fs::read(counter_path).expect("read counter service blob");
     let game = fs::read(game_path).expect("read game service blob");
-    run_counter(&counter);
+    if item_gas != ITEM_GAS {
+        eprintln!("diagnostic gas mode: item_gas={item_gas}; acceptance gas remains {ITEM_GAS}");
+    }
+    if benchmark_batch {
+        run_batch_benchmark(&counter, item_gas);
+        return;
+    }
+    if diagnostic_only {
+        run_first_counter_diagnostic(&counter);
+        return;
+    }
+    run_counter(&counter, item_gas);
     println!(
         "MiniJAM wallet E2E passed: valid nonce, replay rejection, next nonce, expiry rejection."
     );
-    run_game(&game);
+    run_game(&game, item_gas);
     println!("MiniJAM M4 game E2E passed: canonical bytes, native replay, tamper/native failure isolation, max state, query ABI path, batch nonce semantics.");
 }

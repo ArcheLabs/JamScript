@@ -212,6 +212,7 @@ impl ManagedStateAccess for StateTransaction {
 pub struct ProofState {
     db: MemoryDB<Blake2Hasher>,
     root: H256,
+    base_cache: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     transactions: Vec<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
 }
@@ -221,14 +222,44 @@ impl ProofState {
         Self::from_proof(root, StorageProof::new(proof.to_vec()))
     }
 
+    pub fn from_witness_owned(root: StateRoot, proof: Vec<Vec<u8>>) -> Result<Self, StateError> {
+        Self::from_witness_owned_with_observer(root, proof, |_| {})
+    }
+
+    pub fn from_witness_owned_with_observer<F>(
+        root: StateRoot,
+        proof: Vec<Vec<u8>>,
+        mut observer: F,
+    ) -> Result<Self, StateError>
+    where
+        F: FnMut(u8),
+    {
+        Self::from_proof_with_observer(root, StorageProof::new(proof), &mut observer)
+    }
+
     pub fn from_proof(root: StateRoot, proof: StorageProof) -> Result<Self, StateError> {
+        Self::from_proof_with_observer(root, proof, &mut |_| {})
+    }
+
+    fn from_proof_with_observer<F>(
+        root: StateRoot,
+        proof: StorageProof,
+        observer: &mut F,
+    ) -> Result<Self, StateError>
+    where
+        F: FnMut(u8),
+    {
         let db = proof.into_memory_db::<Blake2Hasher>();
         let root = root_hash(root);
+        observer(1);
         let trie = TrieDBBuilder::<TrieLayout>::new(&db, &root).build();
+        observer(2);
         let _ = trie.get(&[]).map_err(|_| StateError::MissingWitness)?;
+        observer(3);
         Ok(Self {
             db,
             root,
+            base_cache: BTreeMap::new(),
             writes: BTreeMap::new(),
             transactions: Vec::new(),
         })
@@ -296,11 +327,17 @@ impl ProofState {
         self.writes.get(key).cloned()
     }
 
-    fn ensure_witness(&self, key: &[u8]) -> Result<(), StateError> {
+    fn base_value(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
+        if let Some(value) = self.base_cache.get(key) {
+            return Ok(value.clone());
+        }
         let trie = TrieDBBuilder::<TrieLayout>::new(&self.db, &self.root).build();
-        trie.get(key)
-            .map(|_| ())
-            .map_err(|_| StateError::MissingWitness)
+        let value = trie
+            .get(key)
+            .map(|value| value.map(|value| value.to_vec()))
+            .map_err(|_| StateError::MissingWitness)?;
+        self.base_cache.insert(key.to_vec(), value.clone());
+        Ok(value)
     }
 }
 
@@ -311,15 +348,12 @@ impl ManagedState for ProofState {
         if let Some(value) = self.overlay_value(key) {
             return Ok(value);
         }
-        let trie = TrieDBBuilder::<TrieLayout>::new(&self.db, &self.root).build();
-        trie.get(key)
-            .map(|value| value.map(|value| value.to_vec()))
-            .map_err(|_| StateError::MissingWitness)
+        self.base_value(key)
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
-        if self.overlay_value(key).is_none() {
-            self.ensure_witness(key)?;
+        if self.overlay_value(key).is_none() && !self.base_cache.contains_key(key) {
+            self.base_value(key)?;
         }
         let target = self.transactions.last_mut().unwrap_or(&mut self.writes);
         target.insert(key.to_vec(), Some(value.to_vec()));
@@ -327,8 +361,8 @@ impl ManagedState for ProofState {
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error> {
-        if self.overlay_value(key).is_none() {
-            self.ensure_witness(key)?;
+        if self.overlay_value(key).is_none() && !self.base_cache.contains_key(key) {
+            self.base_value(key)?;
         }
         let target = self.transactions.last_mut().unwrap_or(&mut self.writes);
         target.insert(key.to_vec(), None);

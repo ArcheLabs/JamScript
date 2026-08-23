@@ -1851,6 +1851,7 @@ dependencies = [
  "service-runtime-core",
  "service-runtime-host",
  "service-runtime-state",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -188,6 +188,7 @@ fn build(path: &Path, output: &Path) -> Result<()> {
             .map(parse_hash)
             .transpose()?
             .unwrap_or([0; 32]),
+        diagnostic: std::env::var_os("JAMSCRIPT_DIAGNOSTIC_GUEST").is_some(),
     };
     fs::create_dir_all(output)?;
     let abi = abi_for(&ir);

@@ -175,34 +175,46 @@ impl StateDiffV1 {
 
     pub fn canonicalize(&mut self) -> Result<(), WireError> {
         self.changes.sort_by(|left, right| left.key.cmp(&right.key));
+        self.validate_canonical()
+    }
+
+    fn validate_canonical(&self) -> Result<(), WireError> {
+        self.validate_limits()?;
         for pair in self.changes.windows(2) {
             if pair[0].key == pair[1].key {
                 return Err(WireError::DuplicateKey);
             }
+            if pair[0].key > pair[1].key {
+                return Err(WireError::UnsortedKeys);
+            }
         }
         Ok(())
+    }
+
+    fn encode_canonical_checked(&self) -> Result<Vec<u8>, WireError> {
+        self.validate_canonical()?;
+        let count = u32::try_from(self.changes.len()).map_err(|_| WireError::LengthOverflow)?;
+        let mut writer = Writer::new();
+        writer.u8(MANAGED_STATE_PROTOCOL_VERSION);
+        writer.u32(count);
+        for change in &self.changes {
+            writer.bytes_u32(&change.key)?;
+            match &change.value {
+                Some(value) => {
+                    writer.u8(1);
+                    writer.bytes_u32(value)?;
+                }
+                None => writer.u8(0),
+            }
+        }
+        Ok(writer.finish())
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
         self.validate_limits()?;
         let mut canonical = self.clone();
         canonical.canonicalize()?;
-        let count =
-            u32::try_from(canonical.changes.len()).map_err(|_| WireError::LengthOverflow)?;
-        let mut writer = Writer::new();
-        writer.u8(MANAGED_STATE_PROTOCOL_VERSION);
-        writer.u32(count);
-        for change in canonical.changes {
-            writer.bytes_u32(&change.key)?;
-            match change.value {
-                Some(value) => {
-                    writer.u8(1);
-                    writer.bytes_u32(&value)?;
-                }
-                None => writer.u8(0),
-            }
-        }
-        Ok(writer.finish())
+        canonical.encode_canonical_checked()
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
@@ -263,7 +275,7 @@ impl StateRecoveryV1 {
         if self.version != RECOVERY_FORMAT_VERSION {
             return Err(WireError::UnsupportedVersion);
         }
-        let diff = self.diff.encode()?;
+        let diff = self.diff.encode_canonical_checked()?;
         let mut writer = Writer::new();
         writer.u8(self.version);
         writer.bytes_u32(&diff)?;
@@ -659,6 +671,7 @@ pub struct RuntimeRefineOutputV2 {
     pub version: u8,
     pub parent_root: StateRoot,
     pub new_root: StateRoot,
+    pub transition_valid_until: Option<u64>,
     pub receipts: Vec<ActionReceiptV1>,
     pub recovery_commitment: StateRoot,
     pub recovery_payload: Vec<u8>,
@@ -669,6 +682,7 @@ pub struct RuntimeRefineTransitionHeaderV2 {
     pub version: u8,
     pub parent_root: StateRoot,
     pub new_root: StateRoot,
+    pub transition_valid_until: Option<u64>,
     pub recovery_commitment: StateRoot,
 }
 
@@ -679,6 +693,16 @@ impl RuntimeRefineOutputV2 {
         receipts: Vec<ActionReceiptV1>,
         diff: StateDiffV1,
     ) -> Result<Self, WireError> {
+        Self::from_diff_with_validity(parent_root, new_root, receipts, diff, None)
+    }
+
+    pub fn from_diff_with_validity(
+        parent_root: StateRoot,
+        new_root: StateRoot,
+        receipts: Vec<ActionReceiptV1>,
+        diff: StateDiffV1,
+        transition_valid_until: Option<u64>,
+    ) -> Result<Self, WireError> {
         let recovery = StateRecoveryV1::new(diff)?;
         let recovery_payload = recovery.encode()?;
         let recovery_commitment = blake2_256(&recovery_payload);
@@ -686,6 +710,7 @@ impl RuntimeRefineOutputV2 {
             version: MANAGED_STATE_PROTOCOL_VERSION + 1,
             parent_root,
             new_root,
+            transition_valid_until,
             receipts,
             recovery_commitment,
             recovery_payload,
@@ -703,6 +728,14 @@ impl RuntimeRefineOutputV2 {
         writer.u8(self.version);
         writer.raw(&self.parent_root);
         writer.raw(&self.new_root);
+        match self.transition_valid_until {
+            Some(valid_until) => {
+                writer.u8(1);
+                writer.raw(&valid_until.to_le_bytes());
+            }
+            None => writer.u8(0),
+        }
+        writer.raw(&self.recovery_commitment);
         writer.u32(self.receipts.len() as u32);
         for receipt in &self.receipts {
             writer.raw(&receipt.action_hash);
@@ -715,7 +748,6 @@ impl RuntimeRefineOutputV2 {
                 None => writer.u8(0),
             }
         }
-        writer.raw(&self.recovery_commitment);
         writer.bytes_u32(&self.recovery_payload)?;
         Ok(writer.finish())
     }
@@ -730,6 +762,12 @@ impl RuntimeRefineOutputV2 {
         }
         let parent_root = reader.array::<32>()?;
         let new_root = reader.array::<32>()?;
+        let transition_valid_until = match reader.u8()? {
+            0 => None,
+            1 => Some(reader.u64()?),
+            _ => return Err(WireError::InvalidEncoding),
+        };
+        let recovery_commitment = reader.array::<32>()?;
         let count = reader.u32()? as usize;
         if count > MAX_RUNTIME_ACTIONS {
             return Err(WireError::TooManyItems);
@@ -748,11 +786,11 @@ impl RuntimeRefineOutputV2 {
                 _ => return Err(WireError::InvalidEncoding),
             }
         }
-        let recovery_commitment = reader.array::<32>()?;
         Ok(RuntimeRefineTransitionHeaderV2 {
             version,
             parent_root,
             new_root,
+            transition_valid_until,
             recovery_commitment,
         })
     }
@@ -768,6 +806,12 @@ impl RuntimeRefineOutputV2 {
         }
         let parent_root = reader.array::<32>()?;
         let new_root = reader.array::<32>()?;
+        let transition_valid_until = match reader.u8()? {
+            0 => None,
+            1 => Some(reader.u64()?),
+            _ => return Err(WireError::InvalidEncoding),
+        };
+        let recovery_commitment = reader.array::<32>()?;
         let count = reader.u32()? as usize;
         if count > MAX_RUNTIME_ACTIONS {
             return Err(WireError::TooManyItems);
@@ -792,7 +836,6 @@ impl RuntimeRefineOutputV2 {
                 error_code,
             });
         }
-        let recovery_commitment = reader.array::<32>()?;
         let recovery_payload = reader.bytes_limited(MAX_RECOVERY_BYTES)?;
         if reader.remaining() != 0 {
             return Err(WireError::InvalidEncoding);
@@ -801,6 +844,7 @@ impl RuntimeRefineOutputV2 {
             version,
             parent_root,
             new_root,
+            transition_valid_until,
             receipts,
             recovery_commitment,
             recovery_payload,
@@ -889,11 +933,16 @@ pub trait ServiceApplication {
 pub struct ExecutionContext<'a> {
     state: &'a mut dyn ManagedStateAccess,
     sender: Option<[u8; 32]>,
+    transition_valid_until: Option<u64>,
 }
 
 impl<'a> ExecutionContext<'a> {
     pub fn new(state: &'a mut dyn ManagedStateAccess, sender: Option<[u8; 32]>) -> Self {
-        Self { state, sender }
+        Self {
+            state,
+            sender,
+            transition_valid_until: None,
+        }
     }
 
     pub fn state(&mut self) -> &mut dyn ManagedStateAccess {
@@ -902,6 +951,17 @@ impl<'a> ExecutionContext<'a> {
 
     pub fn sender(&self) -> Option<[u8; 32]> {
         self.sender
+    }
+
+    pub fn constrain_valid_until(&mut self, valid_until: u64) {
+        self.transition_valid_until = Some(
+            self.transition_valid_until
+                .map_or(valid_until, |current| current.min(valid_until)),
+        );
+    }
+
+    pub fn transition_valid_until(&self) -> Option<u64> {
+        self.transition_valid_until
     }
 
     pub fn begin_transaction(&mut self) -> Result<(), StateAccessError> {
@@ -1072,6 +1132,10 @@ impl<'a> Reader<'a> {
 
     fn u32(&mut self) -> Result<u32, WireError> {
         Ok(u32::from_le_bytes(self.array::<4>()?))
+    }
+
+    fn u64(&mut self) -> Result<u64, WireError> {
+        Ok(u64::from_le_bytes(self.array::<8>()?))
     }
 
     fn array<const N: usize>(&mut self) -> Result<[u8; N], WireError> {
@@ -1267,5 +1331,37 @@ mod tests {
             StateRecoveryV1::new(oversized),
             Err(WireError::TooManyItems)
         );
+    }
+
+    #[test]
+    fn runtime_refine_output_v2_matches_golden_vector() {
+        let diff = StateDiffV1 {
+            changes: vec![StateChangeV1 {
+                key: vec![1],
+                value: Some(vec![2]),
+            }],
+        };
+        let output = RuntimeRefineOutputV2::from_diff_with_validity(
+            [1; 32],
+            [2; 32],
+            vec![ActionReceiptV1 {
+                action_hash: [3; 32],
+                status: ActionStatusV1::Applied,
+                error_code: None,
+            }],
+            diff,
+            Some(42),
+        )
+        .unwrap();
+        let encoded = output.encode().unwrap();
+        assert_eq!(
+            hex::encode(&encoded),
+            "0201010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202012a000000000000002c60e8b423b234cec3a82162cb14e733d3f4302f84dbdb69b4253052abe42c06010000000303030303030303030303030303030303030303030303030303030303030303000015000000011000000001010000000100000001010100000002"
+        );
+        let decoded = RuntimeRefineOutputV2::decode(&encoded).unwrap();
+        assert_eq!(decoded, output);
+        let header = RuntimeRefineOutputV2::decode_transition_header(&encoded).unwrap();
+        assert_eq!(header.transition_valid_until, Some(42));
+        assert_eq!(header.recovery_commitment, output.recovery_commitment);
     }
 }

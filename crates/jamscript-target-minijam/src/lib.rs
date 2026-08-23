@@ -254,6 +254,10 @@ impl MiniJamTarget {
         link.arg(&object).arg("-o").arg(&elf);
         run(&mut link, "linking Rust guest with the MiniJAM SDK")?;
 
+        if std::env::var_os("JAMSCRIPT_KEEP_GUEST_ELF").is_some() {
+            fs::copy(&elf, output_dir.join("service.elf"))?;
+        }
+
         let blob = output_dir.join("service.blob");
         let polkavm = output_dir.join("service.polkavm");
         let converter = self.sdk_root.join(
