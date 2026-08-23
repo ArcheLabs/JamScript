@@ -2355,6 +2355,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "picosimd"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7823ffd00d2b55ebe51750a19f47f2a33cb1f1d135f5cba893379b81c4d44856"
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2368,6 +2374,46 @@ checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
  "der",
  "spki",
+]
+
+[[package]]
+name = "polkavm-common"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed1b408db93d4f49f5c651a7844682b9d7a561827b4dc6202c10356076c055c9"
+dependencies = [
+ "picosimd",
+]
+
+[[package]]
+name = "polkavm-derive"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acb4463fb0b9dbfafdc1d1a1183df4bf7afa3350d124f29d5700c6bee54556b5"
+dependencies = [
+ "polkavm-derive-impl-macro",
+]
+
+[[package]]
+name = "polkavm-derive-impl"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993ff45b972e09babe68adce7062c3c38a84b9f50f07b7caf393a023eaa6c74a"
+dependencies = [
+ "polkavm-common",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "polkavm-derive-impl-macro"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a4f5352e13c1ca5f0e4d7b4a804fbb85b0e02c45cae435d101fe71081bc8ed8"
+dependencies = [
+ "polkavm-derive-impl",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2830,10 +2876,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "service-runtime-guest"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "service-runtime-core",
+ "service-runtime-state",
+]
+
+[[package]]
 name = "service-runtime-host"
 version = "0.1.0"
 dependencies = [
  "service-runtime-core",
+ "service-runtime-guest",
  "service-runtime-state",
  "sp-trie",
 ]

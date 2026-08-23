@@ -2768,7 +2768,6 @@ name = "rust-managed-state"
 version = "0.1.0"
 dependencies = [
  "service-runtime-core",
- "service-runtime-guest",
  "service-runtime-host",
  "service-runtime-state",
 ]
@@ -3095,6 +3094,10 @@ dependencies = [
 name = "service-runtime-host"
 version = "0.1.0"
 dependencies = [
+ "jamscript-crypto",
+ "jamscript-protocol",
+ "jamscript-runtime-core",
+ "schnorrkel",
  "service-runtime-core",
  "service-runtime-guest",
  "service-runtime-state",

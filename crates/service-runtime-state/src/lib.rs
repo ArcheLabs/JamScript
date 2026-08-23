@@ -135,6 +135,7 @@ impl FullState {
 pub struct StateTransaction {
     base: FullState,
     writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    transactions: Vec<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
     touched: BTreeSet<Vec<u8>>,
 }
 
@@ -144,8 +145,28 @@ impl StateTransaction {
         Self {
             base,
             writes: BTreeMap::new(),
+            transactions: Vec::new(),
             touched: BTreeSet::new(),
         }
+    }
+
+    pub fn begin_transaction(&mut self) {
+        self.transactions.push(BTreeMap::new());
+    }
+
+    pub fn commit_transaction(&mut self) -> Result<(), StateError> {
+        let changes = self.transactions.pop().ok_or(StateError::Backend)?;
+        if let Some(parent) = self.transactions.last_mut() {
+            parent.extend(changes);
+        } else {
+            self.writes.extend(changes);
+        }
+        Ok(())
+    }
+
+    pub fn rollback_transaction(&mut self) -> Result<(), StateError> {
+        self.transactions.pop().ok_or(StateError::Backend)?;
+        Ok(())
     }
 
     pub fn finish(self) -> Result<(FullState, StateDiffV1), StateError> {
@@ -154,6 +175,9 @@ impl StateTransaction {
     }
 
     pub fn finish_with_proof(self) -> Result<(FullState, StateDiffV1, StorageProof), StateError> {
+        if !self.transactions.is_empty() {
+            return Err(StateError::Backend);
+        }
         let proof = self
             .base
             .proof_for(&self.touched.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
@@ -168,6 +192,15 @@ impl StateTransaction {
     }
 
     pub fn discard(self) {}
+
+    fn overlay_value(&self, key: &[u8]) -> Option<Option<Vec<u8>>> {
+        for transaction in self.transactions.iter().rev() {
+            if let Some(value) = transaction.get(key) {
+                return Some(value.clone());
+            }
+        }
+        self.writes.get(key).cloned()
+    }
 }
 
 #[cfg(feature = "std")]
@@ -175,24 +208,24 @@ impl ManagedState for StateTransaction {
     type Error = StateError;
 
     fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
-        match self.writes.get(key) {
-            Some(value) => Ok(value.clone()),
-            None => {
-                self.touched.insert(key.to_vec());
-                self.base.get(key)
-            }
+        if let Some(value) = self.overlay_value(key) {
+            return Ok(value);
         }
+        self.touched.insert(key.to_vec());
+        self.base.get(key)
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
         self.touched.insert(key.to_vec());
-        self.writes.insert(key.to_vec(), Some(value.to_vec()));
+        let target = self.transactions.last_mut().unwrap_or(&mut self.writes);
+        target.insert(key.to_vec(), Some(value.to_vec()));
         Ok(())
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error> {
         self.touched.insert(key.to_vec());
-        self.writes.insert(key.to_vec(), None);
+        let target = self.transactions.last_mut().unwrap_or(&mut self.writes);
+        target.insert(key.to_vec(), None);
         Ok(())
     }
 }
@@ -209,6 +242,19 @@ impl ManagedStateAccess for StateTransaction {
 
     fn delete(&mut self, key: &[u8]) -> Result<(), StateAccessError> {
         ManagedState::delete(self, key).map_err(|_| StateAccessError::Backend)
+    }
+
+    fn begin_transaction(&mut self) -> Result<(), StateAccessError> {
+        StateTransaction::begin_transaction(self);
+        Ok(())
+    }
+
+    fn commit_transaction(&mut self) -> Result<(), StateAccessError> {
+        StateTransaction::commit_transaction(self).map_err(|_| StateAccessError::Backend)
+    }
+
+    fn rollback_transaction(&mut self) -> Result<(), StateAccessError> {
+        StateTransaction::rollback_transaction(self).map_err(|_| StateAccessError::Backend)
     }
 }
 
@@ -432,6 +478,29 @@ mod tests {
         assert_ne!(next.root(), root);
         assert_eq!(diff.changes.len(), 2);
         assert_eq!(next.get(b"alice").unwrap(), Some(b"90".to_vec()));
+    }
+
+    #[test]
+    fn full_state_transaction_nested_rollback_preserves_outer_changes_and_proof_accesses() {
+        let base = FullState::from_pairs([(b"existing".as_slice(), b"old".as_slice())]).unwrap();
+        let mut transaction = StateTransaction::new(base.clone());
+        transaction.begin_transaction();
+        ManagedState::set(&mut transaction, b"outer", b"kept").unwrap();
+        transaction.begin_transaction();
+        ManagedState::set(&mut transaction, b"a", b"discarded").unwrap();
+        ManagedState::set(&mut transaction, b"b", b"discarded").unwrap();
+        transaction.rollback_transaction().unwrap();
+        transaction.commit_transaction().unwrap();
+
+        let (next, diff, proof) = transaction.finish_with_proof().unwrap();
+        assert_eq!(next.get(b"outer").unwrap(), Some(b"kept".to_vec()));
+        assert_eq!(next.get(b"a").unwrap(), None);
+        assert_eq!(next.get(b"b").unwrap(), None);
+        assert_eq!(diff.changes.len(), 1);
+
+        let mut verifier = ProofState::from_proof(base.root(), proof).unwrap();
+        assert_eq!(ManagedState::get(&mut verifier, b"a").unwrap(), None);
+        assert_eq!(ManagedState::get(&mut verifier, b"b").unwrap(), None);
     }
 
     #[test]

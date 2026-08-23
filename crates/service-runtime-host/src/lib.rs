@@ -1,7 +1,10 @@
 use service_runtime_core::{
-    ManagedStateCommitmentV1, RuntimeRefineOutputV2, ServiceKeyV1, StateAccessPlanV1, StateDiffV1,
-    StateQueryResponseV1, StateRecoveryV1, StateRoot, EMPTY_STATE_ROOT_V1,
+    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ManagedStateCommitmentV1,
+    RuntimeRefineInputV1, RuntimeRefineOutputV2, ServiceApplication, ServiceKeyV1,
+    StateAccessError, StateAccessPlanV1, StateDiffV1, StateQueryResponseV1, StateRecoveryV1,
+    StateRoot, EMPTY_STATE_ROOT_V1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
+use service_runtime_guest::refine_v2;
 use service_runtime_state::{FullState, StateError, StateTransaction};
 use sp_trie::StorageProof;
 use std::collections::BTreeMap;
@@ -73,6 +76,219 @@ impl HostStateSession {
 
 pub fn commitment_for(root: StateRoot) -> ManagedStateCommitmentV1 {
     ManagedStateCommitmentV1::new(root)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FinalizedContextV1 {
+    pub block_hash: [u8; 32],
+    pub state_root: [u8; 32],
+    pub slot: u64,
+}
+
+pub trait FinalizedManagedStateSource {
+    type Error;
+
+    fn finalized_context(&mut self) -> Result<FinalizedContextV1, Self::Error>;
+    fn service_storage_at(
+        &mut self,
+        context: &FinalizedContextV1,
+        service: ServiceKeyV1,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Self::Error>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuiltManagedWorkV1 {
+    pub context: FinalizedContextV1,
+    pub service: ServiceKeyV1,
+    pub parent_root: StateRoot,
+    pub refine_input: RuntimeRefineInputV1,
+    pub predicted_output: RuntimeRefineOutputV2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkBuilderError<SourceError, ProviderError> {
+    Source(SourceError),
+    Provider(ProviderError),
+    InvalidCommitment,
+    State(StateError),
+    Application(StateAccessError),
+    Verification,
+    ProducerVerifierMismatch,
+}
+
+pub struct ManagedStateWorkBuilder<'a, Source, Provider> {
+    source: &'a mut Source,
+    provider: &'a Provider,
+}
+
+impl<'a, Source, Provider> ManagedStateWorkBuilder<'a, Source, Provider>
+where
+    Source: FinalizedManagedStateSource,
+    Provider: ServiceStateProvider,
+{
+    pub fn new(source: &'a mut Source, provider: &'a Provider) -> Self {
+        Self { source, provider }
+    }
+
+    pub fn build_one<Application>(
+        &mut self,
+        service: ServiceKeyV1,
+        application: &Application,
+        action: Vec<u8>,
+    ) -> Result<BuiltManagedWorkV1, WorkBuilderError<Source::Error, Provider::Error>>
+    where
+        Application: ServiceApplication,
+        Application::Error: Into<StateAccessError>,
+    {
+        self.build_actions(service, application, vec![action])
+    }
+
+    pub fn build_actions<Application>(
+        &mut self,
+        service: ServiceKeyV1,
+        application: &Application,
+        actions: Vec<Vec<u8>>,
+    ) -> Result<BuiltManagedWorkV1, WorkBuilderError<Source::Error, Provider::Error>>
+    where
+        Application: ServiceApplication,
+        Application::Error: Into<StateAccessError>,
+    {
+        let context = self
+            .source
+            .finalized_context()
+            .map_err(WorkBuilderError::Source)?;
+        let commitment = self
+            .source
+            .service_storage_at(&context, service, MANAGED_STATE_COMMITMENT_KEY_V1)
+            .map_err(WorkBuilderError::Source)?;
+        let parent_root = match commitment {
+            Some(bytes) => {
+                ManagedStateCommitmentV1::decode(&bytes)
+                    .map_err(|_| WorkBuilderError::InvalidCommitment)?
+                    .root
+            }
+            None => EMPTY_STATE_ROOT_V1,
+        };
+        let state = self
+            .provider
+            .open(service, parent_root)
+            .map_err(WorkBuilderError::Provider)?;
+        if state.root() != parent_root {
+            return Err(WorkBuilderError::State(StateError::InvalidRoot));
+        }
+
+        let (predicted_output, proof) = producer_execute(application, state, &actions)?;
+        let refine_input = RuntimeRefineInputV1 {
+            version: 1,
+            managed_state: service_runtime_core::ManagedStateWitnessV1 {
+                version: 1,
+                parent_root,
+                storage_proof: proof.into_nodes().into_iter().collect(),
+            },
+            actions,
+        };
+        let verified_output =
+            refine_v2(application, &refine_input).map_err(|_| WorkBuilderError::Verification)?;
+        if verified_output != predicted_output {
+            return Err(WorkBuilderError::ProducerVerifierMismatch);
+        }
+        Ok(BuiltManagedWorkV1 {
+            context,
+            service,
+            parent_root,
+            refine_input,
+            predicted_output,
+        })
+    }
+}
+
+fn producer_execute<Application, SourceError, ProviderError>(
+    application: &Application,
+    state: FullState,
+    actions: &[Vec<u8>],
+) -> Result<(RuntimeRefineOutputV2, StorageProof), WorkBuilderError<SourceError, ProviderError>>
+where
+    Application: ServiceApplication,
+    Application::Error: Into<StateAccessError>,
+{
+    let parent_root = state.root();
+    let mut state = StateTransaction::new(state);
+    let mut receipts = Vec::with_capacity(actions.len());
+    let mut transition_valid_until = None;
+    for action in actions {
+        let action_hash = blake2_256(action);
+        state.begin_transaction();
+        let (result, action_valid_until) = {
+            let mut context = ExecutionContext::new(&mut state, None);
+            let result = application
+                .execute(&mut context, action)
+                .map_err(Into::into);
+            (result, context.transition_valid_until())
+        };
+        match result {
+            Ok(()) => {
+                state
+                    .commit_transaction()
+                    .map_err(WorkBuilderError::State)?;
+                merge_validity(&mut transition_valid_until, action_valid_until);
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Applied,
+                    error_code: None,
+                });
+            }
+            Err(StateAccessError::ApplicationFailed(error_code)) => {
+                if error_code & 0x8000_0000 != 0 {
+                    state
+                        .rollback_transaction()
+                        .map_err(WorkBuilderError::State)?;
+                } else {
+                    state
+                        .commit_transaction()
+                        .map_err(WorkBuilderError::State)?;
+                    merge_validity(&mut transition_valid_until, action_valid_until);
+                }
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Failed,
+                    error_code: Some(error_code),
+                });
+            }
+            Err(error @ (StateAccessError::MissingWitness | StateAccessError::InvalidProof)) => {
+                state
+                    .rollback_transaction()
+                    .map_err(WorkBuilderError::State)?;
+                return Err(WorkBuilderError::Application(error));
+            }
+            Err(_) => {
+                state
+                    .rollback_transaction()
+                    .map_err(WorkBuilderError::State)?;
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Failed,
+                    error_code: Some(1),
+                });
+            }
+        }
+    }
+    let (next, diff, proof) = state.finish_with_proof().map_err(WorkBuilderError::State)?;
+    let output = RuntimeRefineOutputV2::from_diff_with_validity(
+        parent_root,
+        next.root(),
+        receipts,
+        diff,
+        transition_valid_until,
+    )
+    .map_err(|_| WorkBuilderError::Verification)?;
+    Ok((output, proof))
+}
+
+fn merge_validity(current: &mut Option<u64>, action: Option<u64>) {
+    if let Some(action) = action {
+        *current = Some(current.map_or(action, |existing| existing.min(action)));
+    }
 }
 
 pub trait ServiceStateProvider {
@@ -211,11 +427,13 @@ impl ServiceStateProvider for FullStateProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use service_runtime_core::{
-        ExecutionContext, RuntimeRefineInputV1, ServiceApplication, StateAccessError,
-    };
+    use jamscript_crypto::SR25519_CONTEXT;
+    use jamscript_protocol::SignedActionV2;
+    use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
     use service_runtime_guest::refine_v2;
     use service_runtime_state::{ManagedState, ProofState};
+    use std::cell::Cell;
+    use std::collections::VecDeque;
 
     const SERVICE: ServiceKeyV1 = ServiceKeyV1::new([7; 32]);
 
@@ -244,6 +462,375 @@ mod tests {
             context.state().set(b"counter", &[next_counter])?;
             context.commit_transaction()
         }
+    }
+
+    #[derive(Default)]
+    struct TestFinalizedSource {
+        contexts: VecDeque<FinalizedContextV1>,
+        commitments: BTreeMap<[u8; 32], Option<Vec<u8>>>,
+    }
+
+    impl TestFinalizedSource {
+        fn push(&mut self, context: FinalizedContextV1, root: Option<StateRoot>) {
+            self.commitments.insert(
+                context.block_hash,
+                root.map(|root| ManagedStateCommitmentV1::new(root).encode().to_vec()),
+            );
+            self.contexts.push_back(context);
+        }
+    }
+
+    impl FinalizedManagedStateSource for TestFinalizedSource {
+        type Error = ();
+
+        fn finalized_context(&mut self) -> Result<FinalizedContextV1, Self::Error> {
+            self.contexts.pop_front().ok_or(())
+        }
+
+        fn service_storage_at(
+            &mut self,
+            context: &FinalizedContextV1,
+            _service: ServiceKeyV1,
+            key: &[u8],
+        ) -> Result<Option<Vec<u8>>, Self::Error> {
+            if key != MANAGED_STATE_COMMITMENT_KEY_V1 {
+                return Err(());
+            }
+            self.commitments.get(&context.block_hash).cloned().ok_or(())
+        }
+    }
+
+    fn finalized(index: u8) -> FinalizedContextV1 {
+        FinalizedContextV1 {
+            block_hash: [index; 32],
+            state_root: [index.wrapping_add(1); 32],
+            slot: u64::from(index),
+        }
+    }
+
+    struct DynamicApplication;
+
+    impl ServiceApplication for DynamicApplication {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            input: &[u8],
+        ) -> Result<(), Self::Error> {
+            let mut secondary = b"secondary/".to_vec();
+            secondary.extend_from_slice(input);
+            let current = context.state().get(input)?.unwrap_or_default();
+            let _non_inclusion = context.state().get(&secondary)?;
+            context.begin_transaction()?;
+            context.state().set(
+                input,
+                &[current.first().copied().unwrap_or(0).saturating_add(1)],
+            )?;
+            context.state().set(&secondary, b"seen")?;
+            context.commit_transaction()
+        }
+    }
+
+    #[test]
+    fn builder_discovers_dynamic_keys_and_verifies_empty_existing_and_historical_roots() {
+        let mut provider = FullStateProvider::default();
+        let historical = FullState::from_pairs([(b"alice".as_slice(), [4])]).unwrap();
+        let historical_root = provider.insert(SERVICE, historical);
+        let materialized = FullState::from_pairs([(b"alice".as_slice(), [99])]).unwrap();
+        let materialized_root = provider.insert(SERVICE, materialized);
+        assert_ne!(historical_root, materialized_root);
+
+        let mut source = TestFinalizedSource::default();
+        source.push(finalized(1), Some(historical_root));
+        let built = ManagedStateWorkBuilder::new(&mut source, &provider)
+            .build_actions(
+                SERVICE,
+                &DynamicApplication,
+                vec![b"alice".to_vec(), b"bob".to_vec()],
+            )
+            .unwrap();
+
+        assert_eq!(built.parent_root, historical_root);
+        assert_eq!(
+            built.refine_input.managed_state.parent_root,
+            historical_root
+        );
+        assert!(!built.refine_input.managed_state.storage_proof.is_empty());
+        assert_eq!(built.predicted_output.parent_root, historical_root);
+        assert_ne!(built.predicted_output.new_root, historical_root);
+        assert_eq!(built.predicted_output.receipts.len(), 2);
+        assert_eq!(
+            provider.materialized_root(SERVICE).unwrap(),
+            materialized_root
+        );
+
+        let recovery = StateRecoveryV1::decode(&built.predicted_output.recovery_payload).unwrap();
+        let keys = recovery
+            .diff
+            .changes
+            .iter()
+            .map(|change| change.key.as_slice())
+            .collect::<Vec<_>>();
+        assert!(keys.contains(&b"alice".as_slice()));
+        assert!(keys.contains(&b"bob".as_slice()));
+        assert!(keys.contains(&b"secondary/alice".as_slice()));
+        assert!(keys.contains(&b"secondary/bob".as_slice()));
+
+        let mut tampered_input = built.refine_input.clone();
+        tampered_input.managed_state.storage_proof[0][0] ^= 1;
+        assert!(refine_v2(&DynamicApplication, &tampered_input).is_err());
+
+        let mut empty_source = TestFinalizedSource::default();
+        empty_source.push(finalized(2), None);
+        let empty = ManagedStateWorkBuilder::new(&mut empty_source, &provider)
+            .build_one(SERVICE, &DynamicApplication, b"new".to_vec())
+            .unwrap();
+        assert_eq!(empty.parent_root, EMPTY_STATE_ROOT_V1);
+    }
+
+    #[test]
+    fn builder_rejects_unavailable_or_tampered_canonical_roots() {
+        let provider = FullStateProvider::default();
+        let mut unavailable = TestFinalizedSource::default();
+        unavailable.push(finalized(3), Some([9; 32]));
+        assert_eq!(
+            ManagedStateWorkBuilder::new(&mut unavailable, &provider).build_one(
+                SERVICE,
+                &DynamicApplication,
+                b"key".to_vec()
+            ),
+            Err(WorkBuilderError::Provider(ProviderError::UnavailableRoot))
+        );
+
+        let mut invalid = TestFinalizedSource::default();
+        let context = finalized(4);
+        invalid.contexts.push_back(context);
+        invalid
+            .commitments
+            .insert(context.block_hash, Some(vec![1, 1]));
+        assert_eq!(
+            ManagedStateWorkBuilder::new(&mut invalid, &provider).build_one(
+                SERVICE,
+                &DynamicApplication,
+                b"key".to_vec()
+            ),
+            Err(WorkBuilderError::InvalidCommitment)
+        );
+
+        struct MismatchedProvider;
+        impl ServiceStateProvider for MismatchedProvider {
+            type Error = ProviderError;
+
+            fn materialized_root(&self, _service: ServiceKeyV1) -> Result<StateRoot, Self::Error> {
+                Ok(EMPTY_STATE_ROOT_V1)
+            }
+
+            fn build_witness(
+                &self,
+                _service: ServiceKeyV1,
+                _parent_root: StateRoot,
+                _plan: &StateAccessPlanV1,
+            ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error> {
+                unreachable!()
+            }
+
+            fn apply_recovery(
+                &mut self,
+                _service: ServiceKeyV1,
+                _output: &RuntimeRefineOutputV2,
+            ) -> Result<(), Self::Error> {
+                unreachable!()
+            }
+
+            fn open(
+                &self,
+                _service: ServiceKeyV1,
+                _root: StateRoot,
+            ) -> Result<FullState, Self::Error> {
+                Ok(FullState::empty())
+            }
+
+            fn get(
+                &self,
+                _service: ServiceKeyV1,
+                _root: StateRoot,
+                _key: &[u8],
+            ) -> Result<StateQueryResponseV1, Self::Error> {
+                unreachable!()
+            }
+        }
+
+        let mut tampered = TestFinalizedSource::default();
+        tampered.push(finalized(10), Some([10; 32]));
+        assert_eq!(
+            ManagedStateWorkBuilder::new(&mut tampered, &MismatchedProvider).build_one(
+                SERVICE,
+                &DynamicApplication,
+                b"key".to_vec(),
+            ),
+            Err(WorkBuilderError::State(StateError::InvalidRoot))
+        );
+    }
+
+    struct DivergingApplication(Cell<u8>);
+
+    impl ServiceApplication for DivergingApplication {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            _input: &[u8],
+        ) -> Result<(), Self::Error> {
+            let next = self.0.get().saturating_add(1);
+            self.0.set(next);
+            context.state().set(b"value", &[next])
+        }
+    }
+
+    #[test]
+    fn builder_rejects_producer_verifier_divergence() {
+        let provider = FullStateProvider::default();
+        let mut source = TestFinalizedSource::default();
+        source.push(finalized(5), None);
+        assert_eq!(
+            ManagedStateWorkBuilder::new(&mut source, &provider).build_one(
+                SERVICE,
+                &DivergingApplication(Cell::new(0)),
+                Vec::new(),
+            ),
+            Err(WorkBuilderError::ProducerVerifierMismatch)
+        );
+    }
+
+    const NETWORK: [u8; 32] = [11; 32];
+    const SELECTOR: [u8; 8] = [12; 8];
+
+    struct SignedCounter;
+
+    impl ServiceApplication for SignedCounter {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            raw_action: &[u8],
+        ) -> Result<(), Self::Error> {
+            let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action)
+                .map_err(|_| StateAccessError::Backend)?;
+            let verified =
+                jamscript_runtime_core::verify_signed_action_v2(signed, NETWORK, SERVICE, SELECTOR)
+                    .map_err(|_| StateAccessError::Backend)?;
+            let nonce_key = service_runtime_core::wallet_nonce_key_v1(&verified.sender);
+            let nonce = context.state().get(&nonce_key)?.unwrap_or_default();
+            let expected = match nonce.as_slice() {
+                [] => 0,
+                bytes if bytes.len() == 8 => {
+                    u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?)
+                }
+                _ => return Err(StateAccessError::Backend),
+            };
+            if verified.nonce != expected || verified.payload.len() != 8 {
+                return Err(StateAccessError::Backend);
+            }
+            context.constrain_valid_until(verified.valid_until);
+            context
+                .state()
+                .set(&nonce_key, &expected.saturating_add(1).to_le_bytes())?;
+            context.begin_transaction()?;
+            let key = service_runtime_core::application_key_v1(b"counter/v1", &verified.sender)
+                .map_err(|_| StateAccessError::Backend)?;
+            let increment = u64::from_le_bytes(
+                verified
+                    .payload
+                    .try_into()
+                    .map_err(|_| StateAccessError::Backend)?,
+            );
+            let current = context.state().get(&key)?.unwrap_or_default();
+            let current = match current.as_slice() {
+                [] => 0,
+                bytes if bytes.len() == 8 => {
+                    u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?)
+                }
+                _ => return Err(StateAccessError::Backend),
+            };
+            context
+                .state()
+                .set(&key, &current.saturating_add(increment).to_le_bytes())?;
+            context.commit_transaction()
+        }
+    }
+
+    fn signed_counter_action(seed: u8, nonce: u64, increment: u64) -> Vec<u8> {
+        let keypair = MiniSecretKey::from_bytes(&[seed; 32])
+            .unwrap()
+            .expand_to_keypair(ExpansionMode::Ed25519);
+        let mut action = SignedActionV2::unsigned(
+            NETWORK,
+            SERVICE,
+            SELECTOR,
+            keypair.public.to_bytes(),
+            nonce,
+            100,
+            increment.to_le_bytes().to_vec(),
+        )
+        .unwrap();
+        action.signature = keypair
+            .sign(signing_context(SR25519_CONTEXT).bytes(&action.signing_digest()))
+            .to_bytes()
+            .to_vec();
+        action.encode().unwrap()
+    }
+
+    #[test]
+    fn builder_runs_real_signed_action_v2_nonce_and_business_state_across_roots() {
+        let mut provider = FullStateProvider::default();
+        let mut source = TestFinalizedSource::default();
+        source.push(finalized(6), None);
+        let first = ManagedStateWorkBuilder::new(&mut source, &provider)
+            .build_one(SERVICE, &SignedCounter, signed_counter_action(7, 0, 3))
+            .unwrap();
+        assert_eq!(
+            first.predicted_output.receipts[0].status,
+            ActionStatusV1::Applied
+        );
+        provider
+            .apply_recovery(SERVICE, &first.predicted_output)
+            .unwrap();
+
+        source.push(finalized(7), Some(first.predicted_output.new_root));
+        let second = ManagedStateWorkBuilder::new(&mut source, &provider)
+            .build_one(SERVICE, &SignedCounter, signed_counter_action(7, 1, 4))
+            .unwrap();
+        assert_eq!(second.parent_root, first.predicted_output.new_root);
+        assert_ne!(second.predicted_output.new_root, second.parent_root);
+        assert!(second.refine_input.managed_state.storage_proof.len() >= 2);
+    }
+
+    #[test]
+    fn refreshed_context_rebuilds_root_and_witness() {
+        let mut provider = FullStateProvider::default();
+        let first_state = FullState::from_pairs([(b"key".as_slice(), [1])]).unwrap();
+        let first_root = provider.insert(SERVICE, first_state);
+        let second_state = FullState::from_pairs([(b"key".as_slice(), [2])]).unwrap();
+        let second_root = provider.insert(SERVICE, second_state);
+        let mut source = TestFinalizedSource::default();
+        source.push(finalized(8), Some(first_root));
+        source.push(finalized(9), Some(second_root));
+
+        let first = ManagedStateWorkBuilder::new(&mut source, &provider)
+            .build_one(SERVICE, &DynamicApplication, b"key".to_vec())
+            .unwrap();
+        let refreshed = ManagedStateWorkBuilder::new(&mut source, &provider)
+            .build_one(SERVICE, &DynamicApplication, b"key".to_vec())
+            .unwrap();
+        assert_eq!(first.parent_root, first_root);
+        assert_eq!(refreshed.parent_root, second_root);
+        assert_ne!(
+            first.refine_input.managed_state.storage_proof,
+            refreshed.refine_input.managed_state.storage_proof
+        );
     }
 
     fn run(provider: &FullStateProvider, actions: Vec<&[u8]>) -> RuntimeRefineOutputV2 {

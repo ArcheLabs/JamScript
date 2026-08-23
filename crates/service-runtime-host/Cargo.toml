@@ -6,8 +6,12 @@ license.workspace = true
 
 [dependencies]
 service-runtime-core = { path = "../service-runtime-core" }
+service-runtime-guest = { path = "../service-runtime-guest" }
 service-runtime-state = { path = "../service-runtime-state" }
 sp-trie = { version = "=46.0.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-service-runtime-guest = { path = "../service-runtime-guest" }
+jamscript-crypto = { path = "../jamscript-crypto" }
+jamscript-protocol = { path = "../jamscript-protocol" }
+jamscript-runtime-core = { path = "../jamscript-runtime-core" }
+schnorrkel = { workspace = true, features = ["std"] }

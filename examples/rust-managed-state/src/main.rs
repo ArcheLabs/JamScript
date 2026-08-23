@@ -1,12 +1,39 @@
 use service_runtime_core::{
-    ExecutionContext, RuntimeRefineInputV1, ServiceApplication, ServiceKeyV1, StateAccessError,
-    StateAccessPlanV1, StateChangeV1, StateDiffV1,
+    ExecutionContext, ManagedStateCommitmentV1, ServiceApplication, ServiceKeyV1, StateAccessError,
+    StateChangeV1, StateDiffV1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
-use service_runtime_guest::refine_v2;
-use service_runtime_host::{FullStateProvider, ServiceStateProvider};
+use service_runtime_host::{
+    FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider, ManagedStateWorkBuilder,
+    ServiceStateProvider,
+};
 use service_runtime_state::FullState;
 
 struct Counter;
+
+struct FinalizedSource {
+    context: FinalizedContextV1,
+    commitment: Vec<u8>,
+}
+
+impl FinalizedManagedStateSource for FinalizedSource {
+    type Error = ();
+
+    fn finalized_context(&mut self) -> Result<FinalizedContextV1, Self::Error> {
+        Ok(self.context)
+    }
+
+    fn service_storage_at(
+        &mut self,
+        context: &FinalizedContextV1,
+        _service: ServiceKeyV1,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        if *context != self.context || key != MANAGED_STATE_COMMITMENT_KEY_V1 {
+            return Err(());
+        }
+        Ok(Some(self.commitment.clone()))
+    }
+}
 
 impl ServiceApplication for Counter {
     type Error = StateAccessError;
@@ -27,14 +54,18 @@ fn main() {
     let state = FullState::empty();
     let mut provider = FullStateProvider::default();
     let parent_root = provider.insert(service, state.clone());
-    let plan = StateAccessPlanV1::for_public([b"counter".as_slice()]).unwrap();
-    let witness = provider.build_witness(service, parent_root, &plan).unwrap();
-    let input = RuntimeRefineInputV1 {
-        version: 1,
-        managed_state: witness,
-        actions: vec![b"increment".to_vec()],
+    let mut source = FinalizedSource {
+        context: FinalizedContextV1 {
+            block_hash: [1; 32],
+            state_root: [2; 32],
+            slot: 3,
+        },
+        commitment: ManagedStateCommitmentV1::new(parent_root).encode().to_vec(),
     };
-    let output = refine_v2(&Counter, &input).expect("counter transition");
+    let built = ManagedStateWorkBuilder::new(&mut source, &provider)
+        .build_one(service, &Counter, b"increment".to_vec())
+        .expect("counter Work build");
+    let output = built.predicted_output;
     let expected = state
         .apply_diff(&StateDiffV1 {
             changes: vec![StateChangeV1 {
@@ -66,7 +97,7 @@ fn main() {
         Some(vec![1])
     );
     println!(
-        "authenticated Rust runtime transition and provider recovery: {:?}",
+        "finalized-root Work build and provider recovery: {:?}",
         output.new_root
     );
 }
