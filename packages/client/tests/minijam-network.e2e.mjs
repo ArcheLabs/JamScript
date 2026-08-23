@@ -10,14 +10,22 @@ import {
   sr25519Sign,
 } from "@polkadot/util-crypto";
 import {
+  actionSelector,
   decodeStateValue,
+  encodeActionPayload,
+  encodeSignedActionV2,
   FetchRpcTransport,
   JamScriptClient,
+  signingDigestV2,
   SplitRpcTransport,
+  stateKey,
+  toHex,
+  verifyManagedStateProof,
 } from "../dist/index.js";
 
 const nodeEndpoint = process.env.MINIJAM_NODE_RPC ?? "http://127.0.0.1:9944";
 const workEndpoint = process.env.MINIJAM_WORK_RPC ?? "http://127.0.0.1:8090";
+const stateEndpoint = process.env.MINIJAM_STATE_RPC ?? workEndpoint;
 const artifacts = process.env.JAMSCRIPT_E2E_ARTIFACTS;
 const serviceId = Number(process.env.JAMSCRIPT_E2E_SERVICE_ID);
 const serviceKey = process.env.JAMSCRIPT_E2E_SERVICE_KEY;
@@ -61,6 +69,24 @@ class CaptureAndAbortTransport extends RecordingTransport {
   }
 }
 
+class StaleOnceTransport extends RecordingTransport {
+  constructor(inner, staleContext) {
+    super(inner);
+    this.staleContext = staleContext;
+    this.submittedPayloads = [];
+  }
+
+  async call(method, params) {
+    if (method === "minijam_submitWorkV1") {
+      this.submittedPayloads.push(params.payloadBase64);
+      if (this.submittedPayloads.length === 1) {
+        return super.call(method, { ...params, context: this.staleContext });
+      }
+    }
+    return super.call(method, params);
+  }
+}
+
 class TestSr25519Signer {
   constructor(pair) {
     this.pair = pair;
@@ -98,13 +124,17 @@ function makeRun(steps) {
 
 function tamperSignature(payloadBase64) {
   const bytes = Buffer.from(payloadBase64, "base64");
-  let offset = 1 + 32 + 4 + 8 + 1;
+  let offset = 1 + 32 + 32 + 8 + 1;
   const publicKeyLength = bytes[offset];
   offset += 1 + publicKeyLength + 8 + 8 + 32;
   const signatureLength = bytes[offset];
-  assert.equal(signatureLength, 64, "SignedActionV1 signature must be 64 bytes");
+  assert.equal(signatureLength, 64, "SignedActionV2 signature must be 64 bytes");
   bytes[offset + 1] ^= 1;
   return bytes.toString("base64");
+}
+
+function fromBase64(value) {
+  return Uint8Array.from(Buffer.from(value, "base64"));
 }
 
 async function readMetrics() {
@@ -207,10 +237,54 @@ async function main() {
 
   const node = new RecordingTransport(new FetchRpcTransport(nodeEndpoint));
   const work = new RecordingTransport(new FetchRpcTransport(workEndpoint));
-  const transport = new SplitRpcTransport(node, work);
+  const state = new RecordingTransport(new FetchRpcTransport(stateEndpoint));
+  const transport = new SplitRpcTransport(node, work, state);
   const client = new JamScriptClient(deployment, transport);
   const pair = sr25519PairFromSeed(hexToU8a("0x" + "09".repeat(32)));
   const signer = new TestSr25519Signer(pair);
+
+  function signedRawAction(nonce, validUntil, payload) {
+    const unsigned = {
+      version: 2,
+      networkDomain: hexToU8a(genesisHash),
+      serviceKey: hexToU8a(resolvedServiceKey),
+      actionSelector: actionSelector("submitRun"),
+      signerScheme: 0,
+      publicKey: pair.publicKey,
+      nonce: BigInt(nonce),
+      validUntil: BigInt(validUntil),
+      payloadHash: hexToU8a(blake2AsHex(payload, 256)),
+      payload,
+    };
+    return encodeSignedActionV2({
+      ...unsigned,
+      signature: sr25519Sign(signingDigestV2(unsigned), pair),
+    });
+  }
+
+  function workRequest(action, context) {
+    return {
+      context: contextParams(context),
+      serviceId,
+      serviceCodeHash: codeHash,
+      payloadBase64: Buffer.from(action).toString("base64"),
+      extrinsicsBase64: [],
+    };
+  }
+
+  async function submitRaw(action, method = "minijam_submitWorkV1") {
+    const context = await node.call("minijam_getFinalizedContext");
+    const submitted = await work.call(method, workRequest(action, context));
+    const status = await client.waitForWork(submitted.packageHash, {
+      intervalMs: 500,
+      timeoutMs: 120_000,
+    });
+    return { submitted, status };
+  }
+
+  async function prediction(packageHash) {
+    return work.call("jamscript_testGetPredictionV1", { packageHash });
+  }
 
   await client.validateDeployment();
   console.log("[network] genesis hash: " + genesisHash);
@@ -265,6 +339,7 @@ async function main() {
   console.log("[action] Work ID: " + imported.workId);
   console.log("[action] nonce: " + nonceAfter);
   console.log("[action] best score: " + scoreAfter.value);
+  const historicalRoot = scoreAfter.stateRoot;
 
   assert.equal(node.calls.includes("minijam_submitWorkV1"), false);
   assert.equal(node.calls.includes("minijam_getWorkStatusV1"), false);
@@ -277,31 +352,21 @@ async function main() {
   const original = work.lastSubmitWork;
   assert.ok(original, "the signed Work request was not recorded");
   const replayContext = await node.call("minijam_getFinalizedContext");
-  const replay = await work.call("minijam_submitWorkV1", {
-    ...original,
-    context: contextParams(replayContext),
-  });
-  const replayResult = await client.waitForWork(replay.packageHash, {
-    intervalMs: 500,
-    timeoutMs: 120_000,
-  });
-  assert.notEqual(replayResult.workId, null);
+  await assert.rejects(
+    work.call("minijam_submitWorkV1", {
+      ...original,
+      context: contextParams(replayContext),
+    }),
+    (error) => error?.code === -32031,
+  );
   assert.equal(await client.readNonce(pair.publicKey), 1n);
   assert.equal((await client.query("getBestScore", pair.publicKey)).value, 131n);
-  console.log(
-    "[security] replay package: " +
-      replay.packageHash +
-      " Work ID: " +
-      replayResult.workId +
-      " status: " +
-      replayResult.status,
-  );
-  console.log("[security] replay state unchanged");
+  console.log("[security] replay rejected by managed-state preflight; state unchanged");
 
   const capture = new CaptureAndAbortTransport(new FetchRpcTransport(workEndpoint));
   const captureClient = new JamScriptClient(
     deployment,
-    new SplitRpcTransport(node, capture),
+    new SplitRpcTransport(node, capture, state),
   );
   const lowRun = makeRun([{ opcode: 1, amount: 1 }]);
   await assert.rejects(
@@ -310,30 +375,28 @@ async function main() {
   );
   assert.ok(capture.lastSubmitWork, "tamper request was not captured");
   const tamperContext = await node.call("minijam_getFinalizedContext");
-  const tampered = await work.call("minijam_submitWorkV1", {
-    ...capture.lastSubmitWork,
-    context: contextParams(tamperContext),
-    payloadBase64: tamperSignature(capture.lastSubmitWork.payloadBase64),
-  });
-  const tamperedResult = await client.waitForWork(tampered.packageHash, {
-    intervalMs: 500,
-    timeoutMs: 120_000,
-  });
-  assert.notEqual(tamperedResult.workId, null);
+  await assert.rejects(
+    work.call("minijam_submitWorkV1", {
+      ...capture.lastSubmitWork,
+      context: contextParams(tamperContext),
+      payloadBase64: tamperSignature(capture.lastSubmitWork.payloadBase64),
+    }),
+    (error) => error?.code === -32030,
+  );
   assert.equal(await client.readNonce(pair.publicKey), 1n);
   assert.equal((await client.query("getBestScore", pair.publicKey)).value, 131n);
-  console.log(
-    "[security] tampered package: " +
-      tampered.packageHash +
-      " Work ID: " +
-      tamperedResult.workId +
-      " status: " +
-      tamperedResult.status,
-  );
-  console.log("[security] invalid signature state unchanged");
+  console.log("[security] invalid signature rejected by preflight; state unchanged");
 
-  const lower = await client.submitAction("submitRun", { run: lowRun }, signer);
-  const lowerResult = await client.waitForWork(lower.packageHash, {
+  const staleWork = new StaleOnceTransport(
+    new FetchRpcTransport(workEndpoint),
+    original.context,
+  );
+  const staleClient = new JamScriptClient(
+    deployment,
+    new SplitRpcTransport(node, staleWork, state),
+  );
+  const lower = await staleClient.submitAction("submitRun", { run: lowRun }, signer);
+  const lowerResult = await staleClient.waitForWork(lower.packageHash, {
     intervalMs: 500,
     timeoutMs: 120_000,
   });
@@ -341,10 +404,118 @@ async function main() {
   assert.equal(await client.readNonce(pair.publicKey), 2n);
   const finalScore = await client.query("getBestScore", pair.publicKey);
   assert.equal(finalScore.value, 131n);
+  assert.equal(staleWork.submittedPayloads.length, 2);
+  assert.equal(staleWork.submittedPayloads[0], staleWork.submittedPayloads[1]);
   console.log("[action] lower score accepted");
   console.log("[action] lower package: " + lower.packageHash + " Work ID: " + lowerResult.workId);
   console.log("[action] nonce: 2");
   console.log("[action] best score remains: 131");
+  console.log("[stale] same SignedAction rebuilt against refreshed finalized root");
+
+  const logicalScoreKey = stateKey("best-score/v1", pair.publicKey);
+  const historical = await state.call("minijam_getManagedStateV1", {
+    serviceId,
+    stateRoot: historicalRoot,
+    keyBase64: Buffer.from(logicalScoreKey).toString("base64"),
+  });
+  const historicalValue = verifyManagedStateProof(
+    hexToU8a(historicalRoot),
+    logicalScoreKey,
+    historical.valueBase64 === null ? null : fromBase64(historical.valueBase64),
+    historical.proofBase64.map(fromBase64),
+  );
+  assert.equal(new DataView(historicalValue.buffer, historicalValue.byteOffset, 8).getBigUint64(0, true), 131n);
+  console.log("[query] historical R1 proof remains valid after R2 finalization");
+
+  const validPayload = encodeActionPayload(abi, "submitRun", { run: lowRun });
+  const now = await node.call("minijam_getFinalizedContext");
+  await assert.rejects(
+    submitRaw(signedRawAction(99, now.slot + 64, validPayload)),
+    (error) => error?.code === -32031,
+  );
+  assert.equal(await client.readNonce(pair.publicKey), 2n);
+  assert.equal((await client.queryLatest("getBestScore", pair.publicKey)).value, 131n);
+  console.log("[security] wrong nonce produced no state transition");
+
+  const validSigned = signedRawAction(2, now.slot + 64, validPayload);
+  const invalidSignature = Buffer.from(
+    tamperSignature(Buffer.from(validSigned).toString("base64")),
+    "base64",
+  );
+  await assert.rejects(
+    submitRaw(invalidSignature),
+    (error) => error?.code === -32030,
+  );
+  assert.equal(await client.readNonce(pair.publicKey), 2n);
+  console.log("[security] invalid signature produced no state transition");
+
+  const invalidNativeRun = makeRun([{ opcode: 9, amount: 1 }]);
+  const invalidNativePayload = encodeActionPayload(abi, "submitRun", { run: invalidNativeRun });
+  await assert.rejects(
+    submitRaw(signedRawAction(2, now.slot + 64, invalidNativePayload)),
+    (error) => error?.code === -32031 && error?.data?.errorCode === 0x80000009,
+  );
+  assert.equal(await client.readNonce(pair.publicKey), 2n);
+  assert.equal((await client.queryLatest("getBestScore", pair.publicKey)).value, 131n);
+  console.log("[security] native failure rolled back nonce with exact 0x80000009 code");
+
+  const expiryContext = await node.call("minijam_getFinalizedContext");
+  await assert.rejects(
+    submitRaw(signedRawAction(2, Math.max(0, expiryContext.slot - 1), validPayload)),
+    (error) => error?.code === -32032,
+  );
+  assert.equal(await client.readNonce(pair.publicKey), 2n);
+  assert.equal((await client.queryLatest("getBestScore", pair.publicKey)).value, 131n);
+  console.log("[security] expired transition was not accumulated");
+
+  await assert.rejects(
+    submitRaw(
+      signedRawAction(2, expiryContext.slot + 64, validPayload),
+      "jamscript_testSubmitTamperedWitnessV1",
+    ),
+    (error) => error?.code === -32033,
+  );
+  assert.equal(await client.readNonce(pair.publicKey), 2n);
+  assert.equal((await client.queryLatest("getBestScore", pair.publicKey)).value, 131n);
+  console.log("[security] tampered witness produced no state transition");
+
+  const malformedPayload = new Uint8Array([0xff]);
+  const applicationFailure = await submitRaw(
+    signedRawAction(2, expiryContext.slot + 64, malformedPayload),
+  );
+  assert.equal(
+    (await prediction(applicationFailure.submitted.packageHash)).receipts[0].errorCode,
+    1,
+  );
+  assert.equal(await client.readNonce(pair.publicKey), 3n);
+  assert.equal((await client.queryLatest("getBestScore", pair.publicKey)).value, 131n);
+  console.log("[security] application failure consumed nonce under established semantics");
+
+  await work.call("jamscript_testCorruptNextQueryV1", { mode: "value" });
+  await assert.rejects(
+    client.queryLatest("getBestScore", pair.publicKey),
+    /does not match its proof/,
+  );
+  await work.call("jamscript_testCorruptNextQueryV1", { mode: "proof" });
+  await assert.rejects(
+    client.queryLatest("getBestScore", pair.publicKey),
+    /requested root|invalid managed-state proof/,
+  );
+  console.log("[query] false value and bad proof rejected by client");
+
+  await work.call("jamscript_testForgetProviderV1", {});
+  const missingRootContext = await node.call("minijam_getFinalizedContext");
+  await assert.rejects(
+    work.call(
+      "minijam_submitWorkV1",
+      workRequest(
+        signedRawAction(3, missingRootContext.slot + 64, validPayload),
+        missingRootContext,
+      ),
+    ),
+    (error) => error?.code === -32030,
+  );
+  console.log("[builder] missing canonical Provider root failed closed");
 
   await waitWorkerEvidence(metricsBefore);
   const logs = await readWorkerLogs();

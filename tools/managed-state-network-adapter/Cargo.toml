@@ -1,0 +1,19 @@
+[package]
+name = "managed-state-network-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+jamscript-ir = { path = "../../crates/jamscript-ir" }
+jamscript-runtime-core = { path = "../../crates/jamscript-runtime-core" }
+serde.workspace = true
+serde_json.workspace = true
+service-runtime-core = { path = "../../crates/service-runtime-core" }
+service-runtime-guest = { path = "../../crates/service-runtime-guest" }
+service-runtime-host = { path = "../../crates/service-runtime-host" }
+service-runtime-state = { path = "../../crates/service-runtime-state" }
+
+[build-dependencies]
+cc = "1"

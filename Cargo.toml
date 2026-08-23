@@ -16,6 +16,7 @@ members = [
   "crates/service-build-polkavm",
   "crates/jamscript-cli",
   "examples/rust-managed-state",
+  "tools/managed-state-network-adapter",
 ]
 
 [workspace.package]

@@ -2139,6 +2139,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "managed-state-network-adapter"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "cc",
+ "jamscript-ir",
+ "jamscript-runtime-core",
+ "serde",
+ "serde_json",
+ "service-runtime-core",
+ "service-runtime-guest",
+ "service-runtime-host",
+ "service-runtime-state",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
