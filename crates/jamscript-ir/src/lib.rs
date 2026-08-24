@@ -11,6 +11,10 @@ pub const NATIVE_ABI_VERSION: u32 = 1;
 pub struct ServiceIr {
     pub package_name: String,
     pub package_version: String,
+    /// Original TypeScript compilation unit retained for the opt-in ScriptC
+    /// backend. Legacy consumers continue to use the structured IR fields.
+    #[serde(default)]
+    pub source: String,
     pub states: Vec<StateIr>,
     pub actions: Vec<ActionIr>,
     pub queries: Vec<QueryIr>,
@@ -57,7 +61,7 @@ pub enum ActionBodyIr {
     /// compute body to an explicitly compiled ScriptC symbol.
     ScriptC {
         symbol: String,
-        source: String,
+        source_unit: String,
         state_effect: Option<StateEffectIr>,
     },
 }
@@ -351,6 +355,7 @@ mod tests {
         let abi = abi_for(&ServiceIr {
             package_name: "game".into(),
             package_version: "0.1.0".into(),
+            source: String::new(),
             states: Vec::new(),
             actions: vec![ActionIr {
                 name: "submit".into(),

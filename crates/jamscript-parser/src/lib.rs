@@ -38,7 +38,6 @@ pub fn parse_service_v02(
     package_version: &str,
     native_modules: &[String],
 ) -> Result<ServiceIr, ParseError> {
-    reject_scriptc_forbidden_surfaces(source)?;
     parse_service_with_language(source, package_name, package_version, native_modules, "0.2")
 }
 
@@ -82,6 +81,13 @@ fn parse_service_with_language(
         match item {
             ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
                 collect_import(&import, native_modules, &mut native_imports)?
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+                decl: Decl::Fn(_),
+                ..
+            })) if language == "0.2" => {
+                // Exported helpers are retained in the original source unit
+                // and are not part of the JamScript metadata IR.
             }
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
                 let Decl::Var(var) = export.decl else {
@@ -128,6 +134,11 @@ fn parse_service_with_language(
                     states.push(parse_state(binding.id.sym.as_ref(), &init)?);
                 }
             }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(_))) if language == "0.2" => {
+                // ScriptC owns the original compilation unit. The Rust parser only
+                // extracts JamScript metadata, so top-level helpers remain in
+                // `ServiceIr::source` and are deliberately opaque here.
+            }
             ModuleItem::Stmt(Stmt::Empty(..)) => {}
             _ => {
                 return Err(diag(
@@ -156,6 +167,7 @@ fn parse_service_with_language(
     Ok(ServiceIr {
         package_name: package_name.into(),
         package_version: package_version.into(),
+        source: source.into(),
         states,
         actions,
         queries,
@@ -312,7 +324,7 @@ fn parse_scriptc_action(name: &str, init: &Expr) -> Result<ActionIr, ParseError>
     let config = call_object(init, "action", "1110")?;
     let mut auth = None;
     let mut input = None;
-    let mut script_source = None;
+    let mut has_execute = false;
     for prop in &config.props {
         let PropOrSpread::Prop(prop) = prop else {
             return Err(diag("1111", "spread properties are not supported"));
@@ -325,13 +337,14 @@ fn parse_scriptc_action(name: &str, init: &Expr) -> Result<ActionIr, ParseError>
                 input = Some(parse_input(&kv.value)?);
             }
             Prop::Method(method) if key_name(&method.key).as_deref() == Some("execute") => {
-                script_source = Some(scriptc_source_from_body(name, &method.function.body)?);
+                has_execute = true;
             }
             Prop::KeyValue(kv) if key_name(&kv.key).as_deref() == Some("execute") => {
                 let Expr::Fn(function) = &*kv.value else {
                     return Err(diag("1112", "execute must be a function"));
                 };
-                script_source = Some(scriptc_source_from_body(name, &function.function.body)?);
+                let _ = function;
+                has_execute = true;
             }
             _ => return Err(diag("1113", "unsupported action property for ScriptC")),
         }
@@ -344,69 +357,19 @@ fn parse_scriptc_action(name: &str, init: &Expr) -> Result<ActionIr, ParseError>
             "ScriptC M1 compute requires exactly one u64 input field",
         ));
     }
-    let source =
-        script_source.ok_or_else(|| diag("1115", "action must declare execute(ctx, input)"))?;
+    if !has_execute {
+        return Err(diag("1115", "action must declare execute(ctx, input)"));
+    }
     Ok(ActionIr {
         name: name.into(),
         auth: auth.ok_or_else(|| diag("1116", "action must declare auth"))?,
         input,
         body: ActionBodyIr::ScriptC {
             symbol: name.into(),
-            source,
+            source_unit: "service.ts".into(),
             state_effect: None,
         },
     })
-}
-
-fn scriptc_source_from_body(name: &str, body: &Option<BlockStmt>) -> Result<String, ParseError> {
-    let operation = parse_execution_operation(body, &[])?;
-    let expression = match operation {
-        ExecutionOpIr::ReturnInputField { .. } => "input".to_owned(),
-        ExecutionOpIr::AddInputField { value, .. } => format!("input + {value}"),
-        ExecutionOpIr::ReturnInteger { value } => value.to_string(),
-        ExecutionOpIr::NativeBytesToU64 { .. } => {
-            return Err(diag(
-                "1118",
-                "ScriptC M1 action does not support native compute yet",
-            ));
-        }
-    };
-    Ok(format!(
-        "export function {name}(input: number): number {{ return {expression}; }}\n"
-    ))
-}
-
-fn reject_scriptc_forbidden_surfaces(source: &str) -> Result<(), ParseError> {
-    const FORBIDDEN: &[(&str, &str)] = &[
-        ("Date", "Date"),
-        ("Date.now", "Date.now"),
-        ("Math.random", "Math.random"),
-        ("process", "process"),
-        ("process.env", "process.env"),
-        ("fs", "fs"),
-        ("fetch", "fetch"),
-        ("setTimeout", "timers"),
-        ("setInterval", "timers"),
-        ("Promise", "async/Promise"),
-        ("async", "async/Promise"),
-        ("eval", "eval"),
-        ("Function", "Function constructor"),
-        ("require", "dynamic module loading"),
-        ("globalThis", "global object"),
-        ("import(", "dynamic module loading"),
-    ];
-    for (needle, label) in FORBIDDEN {
-        let token_match = source
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .any(|token| token == *needle);
-        if token_match || source.contains(needle) {
-            return Err(diag(
-                "1117",
-                format!("ScriptC deterministic profile forbids reachable surface `{label}`"),
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn parse_auth(expr: &Expr) -> Result<AuthKind, ParseError> {
@@ -949,9 +912,20 @@ mod tests {
         let source = r#"import { action, wallet, u64 } from "jam"; export const increment = action({ auth: wallet(), input: { value: u64 }, execute(ctx, input) { return input.value + 1; } });"#;
         let ir = parse_service_v02(source, "counter", "0.2.0", &[]).unwrap();
         assert_eq!(ir.actions[0].auth, AuthKind::Wallet);
+        assert_eq!(ir.source, source);
         assert!(
             matches!(ir.actions[0].body, ActionBodyIr::ScriptC { ref symbol, .. } if symbol == "increment")
         );
+    }
+
+    #[test]
+    fn keeps_top_level_scriptc_helpers_in_original_source() {
+        let source = r#"import { action, wallet, u64 } from "jam";
+export function bump(value: number): number { return value + 1; }
+export const increment = action({ auth: wallet(), input: { value: u64 }, execute(ctx, input) { return bump(input.value); } });"#;
+        let ir = parse_service_v02(source, "counter", "0.2.0", &[]).unwrap();
+        assert_eq!(ir.source, source);
+        assert!(matches!(ir.actions[0].body, ActionBodyIr::ScriptC { .. }));
     }
 
     #[test]
@@ -962,9 +936,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_scriptc_nondeterministic_surface() {
+    fn leaves_determinism_to_scriptc_reachability_policy() {
         let source = r#"import { action, wallet, u64 } from "jam"; export const now = action({ auth: wallet(), input: { value: u64 }, execute(ctx, input) { return Date.now(); } });"#;
-        let error = parse_service_v02(source, "counter", "0.2.0", &[]).unwrap_err();
-        assert!(error.to_string().contains("JAM1117"));
+        let ir = parse_service_v02(source, "counter", "0.2.0", &[]).unwrap();
+        assert!(matches!(ir.actions[0].body, ActionBodyIr::ScriptC { .. }));
     }
 }

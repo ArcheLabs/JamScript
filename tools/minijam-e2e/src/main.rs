@@ -757,7 +757,10 @@ fn provider_value(
     key: &[u8],
 ) -> Option<Vec<u8>> {
     provider
-        .open(service_key, provider.materialized_root(service_key).unwrap())
+        .open(
+            service_key,
+            provider.materialized_root(service_key).unwrap(),
+        )
         .unwrap()
         .get(key)
         .unwrap()
@@ -790,7 +793,7 @@ fn provider_score(
 }
 
 fn run_counter(blob: &[u8], item_gas: u64) {
-    let service_key = ServiceKeyV1::new([0x22; 32]);
+    let service_key = counter_service_key();
     let mut state = new_state();
     let mut provider = FullStateProvider::default();
     let code_hash = install_service(&mut state, blob, item_gas);
@@ -829,19 +832,12 @@ fn run_counter(blob: &[u8], item_gas: u64) {
 }
 
 fn run_first_counter_diagnostic(blob: &[u8]) {
-    let service_key = ServiceKeyV1::new([0x22; 32]);
+    let service_key = counter_service_key();
     let mut state = new_state();
     let mut provider = FullStateProvider::default();
     let code_hash = install_service(&mut state, blob, ITEM_GAS);
     let selector = jamscript_ir::action_selector("increment");
-    let (signed, sender) = action(
-        service_key,
-        7,
-        0,
-        10,
-        selector,
-        7u64.to_le_bytes().to_vec(),
-    );
+    let (signed, sender) = action(service_key, 7, 0, 10, selector, 7u64.to_le_bytes().to_vec());
 
     eprintln!("diagnostic guest: one item, refine gas limit={ITEM_GAS}");
     execute_batch(
@@ -858,6 +854,25 @@ fn run_first_counter_diagnostic(blob: &[u8]) {
         "diagnostic guest completed: sender_nonce={:?}",
         provider_nonce(&provider, service_key, &sender)
     );
+}
+
+fn counter_service_key() -> ServiceKeyV1 {
+    let Some(value) = env::var_os("JAMSCRIPT_COUNTER_SERVICE_KEY") else {
+        return ServiceKeyV1::new([0x22; 32]);
+    };
+    let value = value.to_string_lossy();
+    let value = value.strip_prefix("0x").unwrap_or(&value);
+    assert_eq!(
+        value.len(),
+        64,
+        "JAMSCRIPT_COUNTER_SERVICE_KEY must be 32-byte hex"
+    );
+    let mut bytes = [0u8; 32];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16)
+            .expect("JAMSCRIPT_COUNTER_SERVICE_KEY must be hex");
+    }
+    ServiceKeyV1::new(bytes)
 }
 
 fn run_game(blob: &[u8], item_gas: u64) {
@@ -1081,6 +1096,7 @@ fn main() {
     let mut item_gas = ITEM_GAS;
     let mut benchmark_batch = false;
     let mut diagnostic_only = false;
+    let mut counter_only = false;
     let mut paths = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--diagnostic-item-gas" {
@@ -1093,6 +1109,8 @@ fn main() {
             benchmark_batch = true;
         } else if arg == "--diagnostic-only" {
             diagnostic_only = true;
+        } else if arg == "--counter-only" {
+            counter_only = true;
         } else {
             paths.push(arg);
         }
@@ -1117,6 +1135,10 @@ fn main() {
         return;
     }
     run_counter(&counter, item_gas);
+    if counter_only {
+        println!("MiniJAM wallet counter E2E passed: nonce/auth/replay path.");
+        return;
+    }
     println!(
         "MiniJAM wallet E2E passed: valid nonce, replay rejection, next nonce, expiry rejection."
     );

@@ -27,8 +27,21 @@ await writeFile(profilePath, JSON.stringify({
     collect_symbol: null,
     result_reset_symbol: null,
   },
-  exports: [{ export: "add", symbol: "jamscript_m0_scalar_entry", params: ["f64", "f64"], returns: "f64" }],
-  determinism: { fences: [] },
+  exports: [
+    { export: "add", symbol: "jamscript_m0_scalar_entry", params: ["f64", "f64"], returns: "f64" },
+    { export: "arrays", symbol: "jamscript_m0_scalar_arrays_entry", params: ["f64", "f64"], returns: "f64" },
+    { export: "objects", symbol: "jamscript_m0_scalar_objects_entry", params: ["f64"], returns: "f64" },
+    { export: "strings", symbol: "jamscript_m0_scalar_strings_entry", params: ["f64"], returns: "f64" },
+    { export: "uint8array", symbol: "jamscript_m0_scalar_uint8array_entry", params: ["f64"], returns: "f64" },
+  ],
+  determinism: {
+    fences: [
+      { id: "stdlib.date.now" },
+      { id: "stdlib.math.random" },
+      { id: "node-builtin.process.env" },
+      { id: "node-builtin.perf_hooks.performance.now" },
+    ],
+  },
 }, null, 2));
 const result = await compileLibrary({
   profilePath,

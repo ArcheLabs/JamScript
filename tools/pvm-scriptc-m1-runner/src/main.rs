@@ -15,10 +15,11 @@ const GAS_LIMIT: i64 = 5_000_000;
 struct Report {
     stage: u64,
     result: &'static str,
-    gas: i64,
-    allocation_count: u64,
-    requested_bytes: u64,
-    high_water_mark: u64,
+    gas: Option<i64>,
+    allocation_count: Option<u64>,
+    requested_bytes: Option<u64>,
+    high_water_mark: Option<u64>,
+    error: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -79,13 +80,62 @@ fn main() -> Result<()> {
         config.set_backend(Some(polkavm::BackendKind::Interpreter));
         config
     })?;
-    let report = run(&engine, &blob, 3)?;
-    fs::write(output.join("m1.json"), serde_json::to_vec_pretty(&report)?)?;
+    let mut reports = Vec::new();
+    for stage in 1..=8 {
+        match run(&engine, &blob, stage) {
+            Ok(report) => reports.push(report),
+            Err(error) => reports.push(Report {
+                stage,
+                result: classify(&error),
+                gas: None,
+                allocation_count: None,
+                requested_bytes: None,
+                high_water_mark: None,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+    fs::write(output.join("m1.json"), serde_json::to_vec_pretty(&reports)?)?;
     println!("Node: {}", node_version.trim());
     println!(
-        "control-flow PVM: PASS gas={} alloc={} requested={} high_water={}",
-        report.gas, report.allocation_count, report.requested_bytes, report.high_water_mark
+        "M1 PVM stages: PASS max_gas={} max_high_water={}",
+        reports
+            .iter()
+            .filter_map(|report| report.gas)
+            .max()
+            .unwrap_or_default(),
+        reports
+            .iter()
+            .filter_map(|report| report.high_water_mark)
+            .max()
+            .unwrap_or_default()
     );
+    for report in &reports {
+        println!(
+            "stage {}: {} gas={} alloc={} requested={} high_water={}{}",
+            report.stage,
+            report.result,
+            report
+                .gas
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+            report
+                .allocation_count
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+            report
+                .requested_bytes
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+            report
+                .high_water_mark
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+            report
+                .error
+                .as_deref()
+                .map_or_else(String::new, |value| format!(" error={value}")),
+        );
+    }
+    if reports.iter().any(|report| report.result != "PASS") {
+        bail!("ScriptC M1 PVM stage failed");
+    }
     Ok(())
 }
 
@@ -106,11 +156,23 @@ fn run(engine: &Engine, blob: &[u8], stage: u64) -> Result<Report> {
     Ok(Report {
         stage,
         result: "PASS",
-        gas: GAS_LIMIT - instance.gas(),
-        allocation_count: read_metric(&mut instance, "probe_allocation_count")?,
-        requested_bytes: read_metric(&mut instance, "probe_requested_bytes")?,
-        high_water_mark: read_metric(&mut instance, "probe_high_water_mark")?,
+        gas: Some(GAS_LIMIT - instance.gas()),
+        allocation_count: Some(read_metric(&mut instance, "probe_allocation_count")?),
+        requested_bytes: Some(read_metric(&mut instance, "probe_requested_bytes")?),
+        high_water_mark: Some(read_metric(&mut instance, "probe_high_water_mark")?),
+        error: None,
     })
+}
+
+fn classify(error: &anyhow::Error) -> &'static str {
+    let text = error.to_string();
+    if text.contains("NotEnoughGas") {
+        "OOG"
+    } else if text.contains("Trap") {
+        "TRAP"
+    } else {
+        "FAIL"
+    }
 }
 
 fn read_metric(

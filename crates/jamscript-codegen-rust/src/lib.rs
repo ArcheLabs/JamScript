@@ -535,6 +535,7 @@ mod tests {
         let source = generate_no_std_rust(&ServiceIr {
             package_name: "x".into(),
             package_version: "0.1.0".into(),
+            source: String::new(),
             states: Vec::new(),
             queries: Vec::new(),
             native_imports: vec![NativeImportIr {
@@ -573,6 +574,7 @@ mod tests {
             ServiceIr {
                 package_name: "counter".into(),
                 package_version: "0.1.0".into(),
+                source: String::new(),
                 states: vec![jamscript_ir::StateIr {
                     name: "counter".into(),
                     schema: "counter/v1".into(),
@@ -601,6 +603,7 @@ mod tests {
             ServiceIr {
                 package_name: "game".into(),
                 package_version: "0.1.0".into(),
+                source: String::new(),
                 states: Vec::new(),
                 queries: Vec::new(),
                 native_imports: vec![NativeImportIr {
@@ -646,6 +649,7 @@ mod tests {
         let source = generate_no_std_rust(&ServiceIr {
             package_name: "x".into(),
             package_version: "0.1.0".into(),
+            source: String::new(),
             states: vec![jamscript_ir::StateIr {
                 name: "score".into(),
                 schema: "score/v1".into(),
@@ -701,6 +705,7 @@ mod tests {
         let ir = ServiceIr {
             package_name: "x".into(),
             package_version: "0.1.0".into(),
+            source: String::new(),
             states: Vec::new(),
             queries: Vec::new(),
             native_imports: Vec::new(),

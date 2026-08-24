@@ -50,6 +50,10 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 extern "C" {
     fn jamscript_m0_scalar_init();
     fn jamscript_m0_scalar_entry(left: f64, right: f64) -> f64;
+    fn jamscript_m0_scalar_arrays_entry(left: f64, right: f64) -> f64;
+    fn jamscript_m0_scalar_objects_entry(value: f64) -> f64;
+    fn jamscript_m0_scalar_strings_entry(value: f64) -> f64;
+    fn jamscript_m0_scalar_uint8array_entry(value: f64) -> f64;
     fn jamscript_m0_u64_add(left: u64, right: u64) -> u64;
 }
 
@@ -66,8 +70,21 @@ pub extern "C" fn probe_entry(stage: u64) -> u64 {
     if stage == 2 {
         return 1;
     }
-    let result = unsafe { jamscript_m0_scalar_entry(20.0, 22.0) };
-    (result == 42.0) as u64
+    let result = match stage {
+        5 => unsafe { jamscript_m0_scalar_arrays_entry(20.0, 21.0) },
+        6 => unsafe { jamscript_m0_scalar_objects_entry(42.0) },
+        7 => unsafe { jamscript_m0_scalar_strings_entry(39.0) },
+        8 => unsafe { jamscript_m0_scalar_uint8array_entry(0.0) },
+        _ => unsafe { jamscript_m0_scalar_entry(20.0, 22.0) },
+    };
+    let expected = match stage {
+        5 => 42.0,
+        6 => 42.0,
+        7 => 42.0,
+        8 => 42.0,
+        _ => 42.0,
+    };
+    (result == expected) as u64
 }
 
 #[no_mangle]
@@ -88,7 +105,11 @@ pub extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
     let bytes = count.saturating_mul(size);
     let pointer = malloc(bytes);
     if !pointer.is_null() {
-        unsafe { core::ptr::write_bytes(pointer, 0, bytes) };
+        unsafe {
+            for index in 0..bytes {
+                pointer.add(index).write_volatile(0);
+            }
+        }
     }
     pointer
 }
@@ -128,7 +149,11 @@ pub extern "C" fn probe_high_water_mark() -> u64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(destination: *mut u8, source: *const u8, length: usize) -> *mut u8 {
-    core::ptr::copy_nonoverlapping(source, destination, length);
+    for index in 0..length {
+        destination
+            .add(index)
+            .write_volatile(core::ptr::read_volatile(source.add(index)));
+    }
     destination
 }
 
@@ -138,21 +163,35 @@ pub unsafe extern "C" fn memmove(
     source: *const u8,
     length: usize,
 ) -> *mut u8 {
-    core::ptr::copy(source, destination, length);
+    if (destination as usize) <= (source as usize) {
+        for index in 0..length {
+            destination
+                .add(index)
+                .write_volatile(core::ptr::read_volatile(source.add(index)));
+        }
+    } else {
+        for index in (0..length).rev() {
+            destination
+                .add(index)
+                .write_volatile(core::ptr::read_volatile(source.add(index)));
+        }
+    }
     destination
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn memset(destination: *mut u8, value: i32, length: usize) -> *mut u8 {
-    core::ptr::write_bytes(destination, value as u8, length);
+    for index in 0..length {
+        destination.add(index).write_volatile(value as u8);
+    }
     destination
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn memcmp(left: *const u8, right: *const u8, length: usize) -> i32 {
     for index in 0..length {
-        let a = *left.add(index);
-        let b = *right.add(index);
+        let a = core::ptr::read_volatile(left.add(index));
+        let b = core::ptr::read_volatile(right.add(index));
         if a != b {
             return a as i32 - b as i32;
         }
