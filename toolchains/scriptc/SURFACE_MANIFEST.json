@@ -1,0 +1,7 @@
+{
+  "source": "@scriptc/compiler@0.0.34/surface-manifest.json",
+  "compilerVersion": "0.0.34",
+  "upstreamRevision": "d7b4480",
+  "sha256": "5bc22383db4e57edf171bfeb6dd518e964844efae54b6a2574e2bd29afb134c9",
+  "verification": "The M0 helper must compare the installed package surface-manifest.json byte hash with this value before compiling."
+}
