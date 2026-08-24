@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/service-state-plane",
   "crates/service-runtime-core",
   "crates/service-runtime-state",
   "crates/service-runtime-guest",

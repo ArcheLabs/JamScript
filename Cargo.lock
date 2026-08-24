@@ -3131,6 +3131,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "service-state-plane"
+version = "0.1.0"
+dependencies = [
+ "service-runtime-core",
+ "service-runtime-state",
+]
+
+[[package]]
 name = "sha2"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
