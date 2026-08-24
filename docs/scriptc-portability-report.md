@@ -7,7 +7,7 @@ Status: M0 feasibility gate **not passed**; investigation artifacts are in place
 - ScriptC release: `v0.0.34`
 - ScriptC upstream commit: `d7b4480` (recorded in [`toolchains/scriptc/REVISION`](../toolchains/scriptc/REVISION))
 - npm package: `@scriptc/compiler@0.0.34`
-- ScriptC release notes require Node 24 or newer for this baseline.
+- Node version selected for the reproducible lane: `24.15.0` (see [`toolchains/scriptc/NODE_VERSION`](../toolchains/scriptc/NODE_VERSION)). ScriptC release notes require Node 24 or newer for this baseline.
 - Current workspace probe host: Node 22.22.2; ScriptC v0.0.34 requires Node 24 or newer, so the result below is exploratory and is not a production M0 pass.
 - Published surface manifest SHA-256: `5bc22383db4e57edf171bfeb6dd518e964844efae54b6a2574e2bd29afb134c9`.
 
@@ -82,3 +82,55 @@ least the scalar sample links as `riscv64-unknown-elf` and converts to PVM. The 
 therefore stops at investigation: the next required work is Node 24 execution, reached-object
 dead-code analysis, a freestanding runtime subset, and an actual RISC-V/PVM link-and-convert
 probe.
+
+## M0.5 initial evidence
+
+The isolated target probe is [`toolchains/scriptc/m0/m05.mjs`](../toolchains/scriptc/m0/m05.mjs).
+It bypasses ScriptC's `zigcc` driver and compiles generated C with the existing JamScript target
+flags. The first scalar compilation produced a valid RISC-V relocatable object and its
+undefined-symbol set included:
+
+```text
+__adddf3
+scr_error_vts
+scr_library_check_exc
+scr_library_entry
+scr_library_reset
+scr_library_set_sink
+```
+
+The `__adddf3` result confirms that ordinary ScriptC `number` arithmetic reaches software
+floating point on `rv64emac/lp64e`. A standalone `uint64_t` addition probe is included for the
+comparison. The generated scalar C still requires the ScriptC library runtime; its RISC-V object
+does not constitute a link or PVM acceptance.
+
+After the M0 host artifacts exist, run:
+
+```text
+SCRIPTC_M0_RUNTIME=toolchains/scriptc/node_modules/@scriptc/runtime \\
+  node toolchains/scriptc/m0/m05.mjs
+node toolchains/scriptc/m0/reachability.mjs
+```
+
+The first command records object sizes and undefined compiler/runtime symbols for the double,
+u64, and generated ScriptC scalar probes. The second command is explicitly host-only and records
+which archive members are pulled by a scalar link root; it is not allowed to stand in for a PVM
+execution.
+
+The host-only link-root diagnostic is [`toolchains/scriptc/m0/reachability.mjs`](../toolchains/scriptc/m0/reachability.mjs).
+It produces `scalar-link.map`, `scalar-reachable-symbols.txt`, and
+`scalar-unresolved-symbols.txt`. Its current map pulls these runtime units for the scalar entry:
+
+```text
+scr_exception.o scr_error.o scr_cycle.o scr_library.o scr_number.o
+scr_string.o scr_array.o scr_bytes.o scr_object.o scr_lib.o scr_map.o
+scr_console.o
+```
+
+It does not pull the network, filesystem, URL, or async runtime units at the object level. This is
+the first useful reachability result, but it is not yet a final freestanding proof because several
+pulled units are compiled as coarse translation units and still expose broad libc dependencies.
+
+M0.5 is therefore currently **CONDITIONAL**, pending the reachable runtime subset, explicit
+soft-float/compiler-rt decision, and a real freestanding ELF/PVM execution. No production
+ScriptC backend or production allocator has been changed.
