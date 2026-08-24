@@ -18,7 +18,30 @@ pub fn generate_no_std_rust_with_context(
     ir: &ServiceIr,
     context: PortableServiceContext,
 ) -> Result<String, String> {
-    let application_source = generate_application_rust_with_context(ir, context)?;
+    generate_no_std_rust_with_backend(ir, context, None)
+}
+
+pub fn generate_no_std_rust_with_scriptc_context(
+    ir: &ServiceIr,
+    context: PortableServiceContext,
+) -> Result<String, String> {
+    let symbol = ir
+        .actions
+        .first()
+        .and_then(|action| match &action.body {
+            ActionBodyIr::ScriptC { symbol, .. } => Some(symbol.as_str()),
+            ActionBodyIr::Execute(_) => None,
+        })
+        .ok_or_else(|| "language 0.2 service does not contain a ScriptC action".to_string())?;
+    generate_no_std_rust_with_backend(ir, context, Some(symbol))
+}
+
+fn generate_no_std_rust_with_backend(
+    ir: &ServiceIr,
+    context: PortableServiceContext,
+    scriptc_symbol: Option<&str>,
+) -> Result<String, String> {
+    let application_source = generate_application_rust_with_context(ir, context, scriptc_symbol)?;
     let stage_entry = if context.diagnostic {
         "service_runtime_guest::guest_support::diagnostic_stage(b\"jamscript:entry\");"
     } else {
@@ -83,6 +106,7 @@ static mut OUTPUT: [u8; 2097152] = [0; 2097152];
 
 #[no_mangle]
 pub extern "C" fn minijam_refine() -> RefineOutput {{
+    service_runtime_guest::guest_support::reset_runtime();
     {stage_entry}
     let mut input_size = 0usize;
     let status = unsafe {{ minijam_payload(INPUT.as_mut_ptr(), 1048576, &mut input_size) }};
@@ -184,12 +208,17 @@ pub fn generate_builder_application_rust(
     mut context: PortableServiceContext,
 ) -> Result<String, String> {
     context.diagnostic = false;
-    generate_application_rust_with_context(ir, context)
+    let symbol = ir.actions.first().and_then(|action| match &action.body {
+        ActionBodyIr::ScriptC { symbol, .. } => Some(symbol.as_str()),
+        ActionBodyIr::Execute(_) => None,
+    });
+    generate_application_rust_with_context(ir, context, symbol)
 }
 
 fn generate_application_rust_with_context(
     ir: &ServiceIr,
     context: PortableServiceContext,
+    scriptc_symbol: Option<&str>,
 ) -> Result<String, String> {
     let action = ir
         .actions
@@ -197,18 +226,56 @@ fn generate_application_rust_with_context(
         .ok_or_else(|| "IR contains no action".to_string())?;
     let selector = action_selector(&action.name);
     let decoder = payload_decoder(action)?;
-    let ActionBodyIr::Execute(execute) = &action.body;
-    let setup = application_setup(
-        &execute.operation,
-        action,
-        "decoded",
-        &ir.native_imports,
-        context.diagnostic,
-    )?;
+    let (setup, application_effect, decode_input) = match &action.body {
+        ActionBodyIr::Execute(execute) => (
+            application_setup(
+                &execute.operation,
+                action,
+                "decoded",
+                &ir.native_imports,
+                context.diagnostic,
+            )?,
+            application_state_effect(execute.state_effect.as_ref(), ir)?,
+            true,
+        ),
+        ActionBodyIr::ScriptC {
+            symbol,
+            state_effect,
+            ..
+        } => {
+            let expected = scriptc_symbol.ok_or_else(|| "ScriptC symbol is missing".to_string())?;
+            if expected != symbol {
+                return Err("ScriptC symbol does not match action metadata".into());
+            }
+            let stable_symbol = scriptc_native_symbol(symbol);
+            let marker = if context.diagnostic {
+                "service_runtime_guest::guest_support::diagnostic_stage(b\"jamscript:scriptc-compute\");"
+            } else {
+                ""
+            };
+            (
+                format!("let mut value = 0u64; let status = unsafe {{ {stable_symbol}(input.as_ptr(), input.len() as u32, &mut value) }}; if status != 0 {{ return Err(StateAccessError::ApplicationFailed(status)); }} {marker}"),
+                application_state_effect(state_effect.as_ref(), ir)?,
+                false,
+            )
+        }
+    };
     let native_declarations = native_declarations(ir);
-    let application_effect = application_state_effect(execute.state_effect.as_ref(), ir)?;
-    let application_body =
-        application_body(action, &setup, &application_effect, context.diagnostic);
+    let scriptc_declaration = scriptc_symbol
+        .map(|symbol| {
+            format!(
+                "    fn {}(input: *const u8, input_len: u32, output: *mut u64) -> u32;\n",
+                scriptc_native_symbol(symbol)
+            )
+        })
+        .unwrap_or_default();
+    let application_body = application_body(
+        action,
+        &setup,
+        &application_effect,
+        context.diagnostic,
+        decode_input,
+    );
     Ok(format!(
         r##"mod generated_application_impl {{
 use service_runtime_core::{{ServiceApplication, ServiceKeyV1, StateAccessError}};
@@ -218,7 +285,7 @@ const GENESIS_HASH: [u8; 32] = {genesis_hash};
 const ACTION_SELECTOR: [u8; 8] = {selector};
 
 unsafe extern "C" {{
-{native_declarations}}}
+{native_declarations}{scriptc_declaration}}}
 
 struct PayloadReader<'a> {{ input: &'a [u8], offset: usize }}
 #[allow(dead_code)]
@@ -254,6 +321,7 @@ pub use generated_application_impl::GeneratedApplication;
         selector = byte_array_literal(&selector),
         decoder = decoder,
         application_body = application_body,
+        scriptc_declaration = scriptc_declaration,
     ))
 }
 
@@ -346,7 +414,13 @@ fn application_setup(
     }
 }
 
-fn application_body(action: &ActionIr, setup: &str, effect: &str, diagnostic: bool) -> String {
+fn application_body(
+    action: &ActionIr,
+    setup: &str,
+    effect: &str,
+    diagnostic: bool,
+    decode_input: bool,
+) -> String {
     let marker = |name: &str| {
         if diagnostic {
             format!(
@@ -378,8 +452,20 @@ fn application_body(action: &ActionIr, setup: &str, effect: &str, diagnostic: bo
             "let input = verified.payload;",
         ].join(" ")
     };
+    let decode = if decode_input {
+        "let decoded = decode_input(input).map_err(|_| StateAccessError::Backend)?;"
+    } else {
+        ""
+    };
+    let value = if decode_input {
+        format!(
+            "let value: u64 = (|| -> Result<u64, StateAccessError> {{ {setup} Ok(value) }})()?;"
+        )
+    } else {
+        setup.to_string()
+    };
     format!(
-        "{auth} {begin} context.begin_transaction()?; let business = (|| -> Result<(), StateAccessError> {{ let decoded = decode_input(input).map_err(|_| StateAccessError::Backend)?; let value: u64 = (|| -> Result<u64, StateAccessError> {{ {setup} Ok(value) }})()?; {effect} Ok(()) }})(); {business_done} match business {{ Ok(()) => {{ {commit} context.commit_transaction() }}, Err(StateAccessError::MissingWitness) => {{ context.rollback_transaction()?; Err(StateAccessError::MissingWitness) }}, Err(StateAccessError::InvalidProof) => {{ context.rollback_transaction()?; Err(StateAccessError::InvalidProof) }}, Err(StateAccessError::ApplicationFailed(code)) => {{ let _ = context.rollback_transaction(); Err(StateAccessError::ApplicationFailed(code)) }}, Err(_) => {{ context.rollback_transaction()?; Err(StateAccessError::ApplicationFailed(1)) }} }}",
+        "{auth} {begin} context.begin_transaction()?; let business = (|| -> Result<(), StateAccessError> {{ {decode} {value} {effect} Ok(()) }})(); {business_done} match business {{ Ok(()) => {{ {commit} context.commit_transaction() }}, Err(StateAccessError::MissingWitness) => {{ context.rollback_transaction()?; Err(StateAccessError::MissingWitness) }}, Err(StateAccessError::InvalidProof) => {{ context.rollback_transaction()?; Err(StateAccessError::InvalidProof) }}, Err(StateAccessError::ApplicationFailed(code)) => {{ let _ = context.rollback_transaction(); Err(StateAccessError::ApplicationFailed(code)) }}, Err(_) => {{ context.rollback_transaction()?; Err(StateAccessError::ApplicationFailed(1)) }} }}",
         begin = marker("application-business"),
         business_done = marker("application-business-done"),
         commit = marker("application-commit"),
@@ -425,6 +511,9 @@ fn native_declarations(ir: &ServiceIr) -> String {
 }
 fn native_symbol(module: &str, function: &str) -> String {
     format!("jamscript_native_{module}_{function}_v1")
+}
+fn scriptc_native_symbol(action: &str) -> String {
+    format!("jamscript_scriptc_{action}_v1")
 }
 fn byte_array_literal(bytes: &[u8]) -> String {
     format!(

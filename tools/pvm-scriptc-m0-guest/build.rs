@@ -19,7 +19,7 @@ fn main() {
         env::var_os("SCRIPTC_LLVM_AR").unwrap_or_else(|| "/usr/lib/llvm-20/bin/llvm-ar".into());
     let nm = env::var_os("SCRIPTC_LLVM_NM").unwrap_or_else(|| "/usr/bin/llvm-nm".into());
     let size = env::var_os("SCRIPTC_LLVM_SIZE").unwrap_or_else(|| "/usr/bin/llvm-size".into());
-    let sources = [
+    let mut sources = vec![
         scalar,
         u64_probe,
         runtime.join("src/scr_library.c"),
@@ -33,6 +33,9 @@ fn main() {
         runtime.join("src/scr_object.c"),
         shim,
     ];
+    if let Some(extra) = env::var_os("SCRIPTC_M06_EXTRA_C") {
+        sources.push(extra.into());
+    }
     let mut objects = Vec::new();
     for (index, source) in sources.iter().enumerate() {
         println!("cargo:rerun-if-changed={}", source.display());

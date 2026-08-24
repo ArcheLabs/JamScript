@@ -8,6 +8,8 @@ license.workspace = true
 anyhow.workspace = true
 blake2b_simd.workspace = true
 jamscript-codegen-rust = { path = "../jamscript-codegen-rust" }
+jamscript-backend-scriptc = { path = "../jamscript-backend-scriptc" }
+jamscript-runtime-scriptc = { path = "../jamscript-runtime-scriptc" }
 jamscript-ir = { path = "../jamscript-ir" }
 service-build-polkavm = { path = "../service-build-polkavm" }
 service-runtime-core = { path = "../service-runtime-core" }

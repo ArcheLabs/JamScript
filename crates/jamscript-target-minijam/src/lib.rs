@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
+use jamscript_backend_scriptc::{ScriptcArtifact, ScriptcBuildMetadata, ScriptcCompiler};
 use jamscript_codegen_rust::{
-    generate_builder_application_rust, generate_no_std_rust_with_context, PortableServiceContext,
+    generate_builder_application_rust, generate_no_std_rust_with_context,
+    generate_no_std_rust_with_scriptc_context, PortableServiceContext,
 };
-use jamscript_ir::{abi_for, ServiceIr, NATIVE_ABI_VERSION};
+use jamscript_ir::{abi_for, abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
 use serde::{Deserialize, Serialize};
 use service_build_polkavm::{
     GuestBuildArtifacts, NativeArchive, PolkaVmBuildConfig, PolkaVmBuildRequest, PolkaVmBuilder,
@@ -69,6 +71,8 @@ pub struct BuildMetadata {
     pub code_hash: Option<String>,
     pub native_abi_version: u32,
     pub native_modules: Vec<NativeModuleMetadata>,
+    #[serde(flatten)]
+    pub scriptc: Option<ScriptcBuildMetadata>,
 }
 
 #[derive(Clone, Debug)]
@@ -183,9 +187,48 @@ impl MiniJamTarget {
         output_dir: &Path,
         native_modules: &[NativeModule],
     ) -> Result<BuildMetadata> {
+        self.build_probe_inner(project_root, ir, context, output_dir, native_modules, None)
+    }
+
+    pub fn build_scriptc_probe(
+        &self,
+        project_root: &Path,
+        ir: &ServiceIr,
+        context: PortableServiceContext,
+        output_dir: &Path,
+        native_modules: &[NativeModule],
+    ) -> Result<BuildMetadata> {
+        let toolchain_root = workspace_root().join("toolchains/scriptc");
+        let compiler = ScriptcCompiler::from_toolchain(&toolchain_root)?;
+        let artifact = compiler.compile_service_action(ir, &output_dir.join("scriptc"))?;
+        self.build_probe_inner(
+            project_root,
+            ir,
+            context,
+            output_dir,
+            native_modules,
+            Some(artifact),
+        )
+    }
+
+    fn build_probe_inner(
+        &self,
+        project_root: &Path,
+        ir: &ServiceIr,
+        context: PortableServiceContext,
+        output_dir: &Path,
+        native_modules: &[NativeModule],
+        scriptc: Option<ScriptcArtifact>,
+    ) -> Result<BuildMetadata> {
         fs::create_dir_all(output_dir)?;
         let generated = output_dir.join("generated_service.rs");
-        self.emit_generated_source(ir, context, &generated)?;
+        let generated_source = match scriptc.as_ref() {
+            Some(_) => generate_no_std_rust_with_scriptc_context(ir, context),
+            None => generate_no_std_rust_with_context(ir, context),
+        }
+        .map_err(|error| anyhow::anyhow!(error))?;
+        fs::write(&generated, generated_source)
+            .with_context(|| format!("writing {}", generated.display()))?;
         fs::write(
             output_dir.join("generated_builder_application.rs"),
             generate_builder_application_rust(ir, context)
@@ -199,7 +242,7 @@ impl MiniJamTarget {
             output_dir.join("protocol-v0.json"),
             serde_json::to_vec_pretty(&ProtocolBoundaryV0 {
                 release_channel: "testnet-developer-preview",
-                language: "0.1",
+                language: if scriptc.is_some() { "0.2" } else { "0.1" },
                 signed_action: "SignedActionV2",
                 application_abi: 1,
                 managed_state_protocol: MANAGED_STATE_PROTOCOL_VERSION,
@@ -208,7 +251,11 @@ impl MiniJamTarget {
                 builder_artifact: 1,
             })?,
         )?;
-        let abi = abi_for(ir);
+        let abi = if scriptc.is_some() {
+            abi_for_language(ir, "0.2")
+        } else {
+            abi_for(ir)
+        };
         fs::write(
             output_dir.join("service.abi.json"),
             serde_json::to_vec_pretty(&abi)?,
@@ -236,6 +283,9 @@ impl MiniJamTarget {
         let work = tempdir().context("creating MiniJAM native build directory")?;
         let clang = pinned_clang()?;
         let mut archives = vec![compile_sdk_archive(&self.sdk_root, &clang, work.path())?];
+        if let Some(scriptc) = scriptc.as_ref() {
+            archives.push(compile_scriptc_archive(scriptc, &clang, work.path())?);
+        }
         for module in native_modules {
             archives.push(compile_native_archive(module, &clang, work.path())?);
         }
@@ -290,7 +340,7 @@ impl MiniJamTarget {
             )?;
         }
         fs::copy(&polkavm, output_dir.join("service.pvm"))?;
-        let checksum_files = [
+        let mut checksum_files = vec![
             "service.blob",
             "service.polkavm",
             "service.pvm",
@@ -301,6 +351,15 @@ impl MiniJamTarget {
             "builder.json",
             "protocol-v0.json",
         ];
+        if scriptc.is_some() {
+            checksum_files.extend([
+                "scriptc/scriptc_action.ts",
+                "scriptc/scriptc_action.json",
+                "scriptc/scriptc_action.profile.json",
+                "scriptc/scriptc_action.lib.c",
+                "scriptc/scriptc_action_adapter.c",
+            ]);
+        }
         let files = checksum_files
             .into_iter()
             .map(|name| Ok((name.to_owned(), hash_file(&output_dir.join(name))?)))
@@ -325,6 +384,8 @@ impl MiniJamTarget {
             sdk_revision.clone(),
             native_metadata,
             artifacts,
+            scriptc.as_ref().map(|artifact| artifact.metadata.clone()),
+            if scriptc.is_some() { "0.2" } else { "0.1" },
         ))
     }
 }
@@ -339,6 +400,8 @@ fn build_metadata(
     sdk_revision: String,
     native_modules: Vec<NativeModuleMetadata>,
     artifacts: GuestBuildArtifacts,
+    scriptc: Option<ScriptcBuildMetadata>,
+    language_version: &str,
 ) -> BuildMetadata {
     let toolchain = artifacts.metadata;
     BuildMetadata {
@@ -350,7 +413,7 @@ fn build_metadata(
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
         ),
-        language_version: "0.1".into(),
+        language_version: language_version.into(),
         compiler_version: env!("CARGO_PKG_VERSION").into(),
         runtime_version: "0.1.0".into(),
         runtime_package_version: "service-runtime-0.1.0".into(),
@@ -383,6 +446,7 @@ fn build_metadata(
         code_hash: Some(code_hash),
         native_abi_version: NATIVE_ABI_VERSION,
         native_modules,
+        scriptc,
     }
 }
 
@@ -436,11 +500,18 @@ mod linker_override_tests {
 }
 
 fn workspace_crate(name: &str) -> Result<PathBuf> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
+    workspace_root()
+        .join("crates")
         .join(name)
         .canonicalize()
         .with_context(|| format!("locating workspace crate {name}"))
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
 }
 
 fn build_script() -> &'static str {
@@ -489,6 +560,75 @@ fn compile_native_archive(
         clang,
         work,
     )
+}
+
+fn compile_scriptc_archive(
+    artifact: &ScriptcArtifact,
+    clang: &Path,
+    work: &Path,
+) -> Result<NativeArchive> {
+    let toolchain = workspace_root().join("toolchains/scriptc");
+    let runtime = toolchain.join("node_modules/@scriptc/runtime/src");
+    if !runtime.is_dir() {
+        bail!("ScriptC runtime is not installed at {}", runtime.display());
+    }
+    let runtime_include = workspace_root().join("crates/jamscript-runtime-scriptc/include");
+    let mut sources = vec![artifact.generated_c.clone(), artifact.adapter_c.clone()];
+    sources.extend(
+        jamscript_runtime_scriptc::selected_runtime_units()
+            .iter()
+            .map(|name| {
+                if *name == "scr_lib_cleanup.c" {
+                    workspace_root().join("crates/jamscript-runtime-scriptc/src/scr_lib_cleanup.c")
+                } else if *name == "freestanding.c" {
+                    workspace_root().join("crates/jamscript-runtime-scriptc/src/freestanding.c")
+                } else {
+                    runtime.join(name)
+                }
+            }),
+    );
+    let common = [
+        "--target=riscv64-unknown-elf",
+        "-march=rv64emac",
+        "-mabi=lp64e",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-fPIC",
+        "-fdata-sections",
+        "-ffunction-sections",
+        "-Os",
+        "-DSCR_LIB",
+    ];
+    let mut objects = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        let object = work.join(format!("scriptc_runtime_{index}.o"));
+        let mut command = Command::new(clang);
+        command.args(common).arg("-std=c11");
+        command.arg("-I").arg(&runtime_include);
+        command.arg("-I").arg(&runtime);
+        command.args([
+            "-c",
+            source.to_str().unwrap(),
+            "-o",
+            object.to_str().unwrap(),
+        ]);
+        run(
+            &mut command,
+            &format!("compiling ScriptC runtime {}", source.display()),
+        )?;
+        objects.push(object);
+    }
+    let ar = std::env::var_os("JAMSCRIPT_LLVM_AR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-20/bin/llvm-ar"));
+    let archive = work.join("libscriptc_runtime.a");
+    let mut command = Command::new(ar);
+    command.arg("crs").arg(&archive).args(&objects);
+    run(&mut command, "archiving ScriptC runtime")?;
+    Ok(NativeArchive {
+        name: "scriptc_runtime".into(),
+        path: archive,
+    })
 }
 
 fn compile_archive(

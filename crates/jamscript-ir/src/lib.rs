@@ -53,6 +53,13 @@ pub struct NativeImportIr {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ActionBodyIr {
     Execute(ExecuteIr),
+    /// Language 0.2 keeps service metadata in this IR but delegates the
+    /// compute body to an explicitly compiled ScriptC symbol.
+    ScriptC {
+        symbol: String,
+        source: String,
+        state_effect: Option<StateEffectIr>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -214,6 +221,10 @@ pub fn selector_hex(selector: [u8; 8]) -> String {
 }
 
 pub fn abi_for(ir: &ServiceIr) -> Abi {
+    abi_for_language(ir, LANGUAGE_VERSION)
+}
+
+pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Abi {
     let mut types = std::collections::BTreeMap::new();
     for ty in ir
         .actions
@@ -270,7 +281,7 @@ pub fn abi_for(ir: &ServiceIr) -> Abi {
         .collect();
     Abi {
         abi_version: ABI_VERSION,
-        language_version: LANGUAGE_VERSION.into(),
+        language_version: language_version.into(),
         package: AbiPackage {
             name: ir.package_name.clone(),
             version: ir.package_version.clone(),
@@ -322,6 +333,7 @@ fn abi_output(action: &ActionIr) -> String {
                 "u64".into()
             }
         },
+        ActionBodyIr::ScriptC { .. } => "u64".into(),
     }
 }
 

@@ -30,6 +30,15 @@ pub mod guest_support {
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     static mut HEAP_OFFSET: usize = 0;
 
+    const C_ALLOCATION_MAGIC: u32 = 0x4a53_4354;
+
+    #[repr(C)]
+    struct CAllocationHeader {
+        magic: u32,
+        freed: u32,
+        size: usize,
+    }
+
     #[cfg(feature = "diagnostic")]
     static mut ALLOCATION_COUNT: usize = 0;
     #[cfg(feature = "diagnostic")]
@@ -65,6 +74,23 @@ pub mod guest_support {
 
     #[global_allocator]
     static ALLOCATOR: RuntimeAllocator = RuntimeAllocator;
+
+    /// Reset all guest allocations at the beginning of a refine invocation.
+    ///
+    /// The PVM service is single threaded and the host owns the invocation
+    /// boundary, so an arena reset is the deterministic lifecycle boundary for
+    /// both Rust and ScriptC allocations.
+    pub fn reset_runtime() {
+        unsafe {
+            HEAP_OFFSET = 0;
+            #[cfg(feature = "diagnostic")]
+            {
+                ALLOCATION_COUNT = 0;
+                REQUESTED_BYTES = 0;
+                HIGH_WATER_MARK = 0;
+            }
+        }
+    }
 
     #[cfg(feature = "diagnostic")]
     extern "C" {
@@ -147,6 +173,84 @@ pub mod guest_support {
     #[cfg(not(feature = "diagnostic"))]
     pub fn diagnostic_stage(_message: &'static [u8]) {}
 
+    #[no_mangle]
+    #[inline(never)]
+    pub unsafe extern "C" fn jamscript_guest_malloc(size: usize) -> *mut u8 {
+        let header_size = core::mem::size_of::<CAllocationHeader>();
+        let total = match header_size.checked_add(size.max(1)) {
+            Some(value) => value,
+            None => return core::ptr::null_mut(),
+        };
+        let layout =
+            match Layout::from_size_align(total, core::mem::align_of::<CAllocationHeader>()) {
+                Ok(layout) => layout,
+                Err(_) => return core::ptr::null_mut(),
+            };
+        let base = ALLOCATOR.alloc(layout);
+        if base.is_null() {
+            return base;
+        }
+        let header = base.cast::<CAllocationHeader>();
+        header.write(CAllocationHeader {
+            magic: C_ALLOCATION_MAGIC,
+            freed: 0,
+            size,
+        });
+        base.add(header_size)
+    }
+
+    #[no_mangle]
+    #[inline(never)]
+    pub unsafe extern "C" fn jamscript_guest_calloc(count: usize, size: usize) -> *mut u8 {
+        let total = match count.checked_mul(size) {
+            Some(value) => value,
+            None => return core::ptr::null_mut(),
+        };
+        let pointer = jamscript_guest_malloc(total);
+        if !pointer.is_null() {
+            memset(pointer, 0, total);
+        }
+        pointer
+    }
+
+    #[no_mangle]
+    #[inline(never)]
+    pub unsafe extern "C" fn jamscript_guest_realloc(pointer: *mut u8, size: usize) -> *mut u8 {
+        if pointer.is_null() {
+            return jamscript_guest_malloc(size);
+        }
+        if size == 0 {
+            jamscript_guest_free(pointer);
+            return core::ptr::null_mut();
+        }
+        let header_size = core::mem::size_of::<CAllocationHeader>();
+        let header = pointer.sub(header_size).cast::<CAllocationHeader>();
+        if (*header).magic != C_ALLOCATION_MAGIC || (*header).freed != 0 {
+            return core::ptr::null_mut();
+        }
+        let replacement = jamscript_guest_malloc(size);
+        if replacement.is_null() {
+            return replacement;
+        }
+        memcpy(replacement, pointer, (*header).size.min(size));
+        jamscript_guest_free(pointer);
+        replacement
+    }
+
+    #[no_mangle]
+    #[inline(never)]
+    pub unsafe extern "C" fn jamscript_guest_free(pointer: *mut u8) {
+        if pointer.is_null() {
+            return;
+        }
+        let header = pointer
+            .sub(core::mem::size_of::<CAllocationHeader>())
+            .cast::<CAllocationHeader>();
+        if (*header).magic == C_ALLOCATION_MAGIC {
+            (*header).freed = 1;
+        }
+    }
+
     #[cfg(feature = "diagnostic")]
     #[inline(never)]
     pub fn diagnostic_trap(code: u32) -> ! {
@@ -226,6 +330,32 @@ pub mod guest_support {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn memmove(
+        destination: *mut u8,
+        source: *const u8,
+        length: usize,
+    ) -> *mut u8 {
+        if (destination as usize) <= (source as usize) {
+            let mut index = 0;
+            while index < length {
+                destination
+                    .add(index)
+                    .write_volatile(core::ptr::read_volatile(source.add(index)));
+                index += 1;
+            }
+        } else {
+            let mut index = length;
+            while index != 0 {
+                index -= 1;
+                destination
+                    .add(index)
+                    .write_volatile(core::ptr::read_volatile(source.add(index)));
+            }
+        }
+        destination
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn memcmp(left: *const u8, right: *const u8, length: usize) -> i32 {
         let mut index = 0;
         while index < length {
@@ -238,12 +368,69 @@ pub mod guest_support {
         }
         0
     }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn strlen(value: *const u8) -> usize {
+        let mut length = 0;
+        while *value.add(length) != 0 {
+            length += 1;
+        }
+        length
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn strcmp(left: *const u8, right: *const u8) -> i32 {
+        let mut index = 0;
+        loop {
+            let a = *left.add(index);
+            let b = *right.add(index);
+            if a != b {
+                return if a < b { -1 } else { 1 };
+            }
+            if a == 0 {
+                return 0;
+            }
+            index += 1;
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn stpcpy(destination: *mut u8, source: *const u8) -> *mut u8 {
+        let mut index = 0;
+        loop {
+            let byte = *source.add(index);
+            destination.add(index).write(byte);
+            if byte == 0 {
+                return destination.add(index);
+            }
+            index += 1;
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn abort() -> ! {
+        #[cfg(feature = "diagnostic")]
+        diagnostic_trap(0xE004);
+        #[cfg(not(feature = "diagnostic"))]
+        core::arch::asm!(".4byte 0xc0001073", options(noreturn));
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn __assert_fail(
+        _expression: *const u8,
+        _file: *const u8,
+        _line: u32,
+        _function: *const u8,
+    ) -> ! {
+        abort()
+    }
 }
 
 #[cfg(not(target_env = "polkavm"))]
 pub mod guest_support {
     pub struct DiagnosticObserver;
     pub fn diagnostic_stage(_message: &'static [u8]) {}
+    pub fn reset_runtime() {}
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

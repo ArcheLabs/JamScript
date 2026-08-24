@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use jamscript_codegen_rust::{
     generate_builder_application_rust, generate_no_std_rust_with_context, PortableServiceContext,
 };
-use jamscript_ir::abi_for;
+use jamscript_ir::{abi_for, abi_for_language};
 use jamscript_parser::parse_service_with_native_modules;
 use jamscript_target_minijam::{verify_deployment_bundle, MiniJamTarget, NativeModule};
 use serde::Deserialize;
@@ -54,8 +54,15 @@ enum CommandKind {
 #[serde(deny_unknown_fields)]
 struct Manifest {
     package: Package,
+    compiler: Option<CompilerConfig>,
     target: Option<Target>,
     native: Option<BTreeMap<String, NativeConfig>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompilerConfig {
+    backend: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,8 +113,13 @@ fn main() -> Result<()> {
             Ok(())
         }
         CommandKind::Abi { path } => {
-            let (_, ir) = load(&path)?;
-            println!("{}", serde_json::to_string_pretty(&abi_for(&ir))?);
+            let (manifest, ir) = load(&path)?;
+            let abi = if manifest.package.language == "0.2" {
+                abi_for_language(&ir, "0.2")
+            } else {
+                abi_for(&ir)
+            };
+            println!("{}", serde_json::to_string_pretty(&abi)?);
             Ok(())
         }
         CommandKind::Build { path, output } => build(&path, &output),
@@ -143,7 +155,19 @@ fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
         &fs::read_to_string(&manifest_path)
             .with_context(|| format!("reading {}", manifest_path.display()))?,
     )?;
-    if manifest.package.language != "0.1" {
+    let backend = manifest
+        .compiler
+        .as_ref()
+        .map(|config| config.backend.as_str());
+    if manifest.package.language == "0.1" {
+        if backend.is_some() {
+            bail!("language 0.1 cannot select a compiler backend");
+        }
+    } else if manifest.package.language == "0.2" {
+        if backend != Some("scriptc") {
+            bail!("language 0.2 requires [compiler] backend = \"scriptc\"");
+        }
+    } else {
         bail!(
             "unsupported language version `{}`",
             manifest.package.language
@@ -157,12 +181,21 @@ fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
         .as_ref()
         .map(|modules| modules.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    let ir = parse_service_with_native_modules(
-        &source,
-        &manifest.package.name,
-        &manifest.package.version,
-        &native_modules,
-    )
+    let ir = if manifest.package.language == "0.2" {
+        jamscript_parser::parse_service_v02(
+            &source,
+            &manifest.package.name,
+            &manifest.package.version,
+            &native_modules,
+        )
+    } else {
+        parse_service_with_native_modules(
+            &source,
+            &manifest.package.name,
+            &manifest.package.version,
+            &native_modules,
+        )
+    }
     .map_err(|e| anyhow::anyhow!("{}: {e}", source_path.display()))?;
     Ok((manifest, ir))
 }
@@ -220,14 +253,23 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         diagnostic: std::env::var_os("JAMSCRIPT_DIAGNOSTIC_GUEST").is_some(),
     };
     fs::create_dir_all(output)?;
-    let abi = abi_for(&ir);
+    let abi = if manifest.package.language == "0.2" {
+        abi_for_language(&ir, "0.2")
+    } else {
+        abi_for(&ir)
+    };
     fs::write(
         output.join("service.abi.json"),
         serde_json::to_vec_pretty(&abi)?,
     )?;
     fs::write(
         output.join("generated_service.rs"),
-        generate_no_std_rust_with_context(&ir, context).map_err(|e| anyhow::anyhow!(e))?,
+        if manifest.package.language == "0.2" {
+            jamscript_codegen_rust::generate_no_std_rust_with_scriptc_context(&ir, context)
+        } else {
+            generate_no_std_rust_with_context(&ir, context)
+        }
+        .map_err(|e| anyhow::anyhow!(e))?,
     )?;
     fs::write(
         output.join("generated_builder_application.rs"),
@@ -255,9 +297,13 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("canonicalizing project root {}", path.display()))?;
     let native_modules = resolve_native_modules(&project_root, manifest.native.as_ref())?;
-    let metadata = MiniJamTarget::from_sdk_root(sdk_root)
-        .build_probe(&project_root, &ir, context, output, &native_modules)
-        .context("MiniJAM target build")?;
+    let target = MiniJamTarget::from_sdk_root(sdk_root);
+    let metadata = if manifest.package.language == "0.2" {
+        target.build_scriptc_probe(&project_root, &ir, context, output, &native_modules)
+    } else {
+        target.build_probe(&project_root, &ir, context, output, &native_modules)
+    }
+    .context("MiniJAM target build")?;
     fs::write(
         output.join("build.json"),
         serde_json::to_vec_pretty(&metadata)?,

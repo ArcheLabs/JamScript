@@ -1844,6 +1844,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jamscript-backend-scriptc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake2b_simd",
+ "jamscript-ir",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "jamscript-cli"
 version = "0.1.0"
 dependencies = [
@@ -1928,13 +1940,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jamscript-runtime-scriptc"
+version = "0.1.0"
+
+[[package]]
 name = "jamscript-target-minijam"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake2b_simd",
+ "jamscript-backend-scriptc",
  "jamscript-codegen-rust",
  "jamscript-ir",
+ "jamscript-runtime-scriptc",
  "serde",
  "serde_json",
  "service-build-polkavm",

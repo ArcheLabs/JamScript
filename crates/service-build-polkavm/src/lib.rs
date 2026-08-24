@@ -249,10 +249,17 @@ fn validate_elf(
         }
     }
     let forbidden_undefined = ["libc", "malloc", "calloc", "realloc", "free", "pthread"];
-    if symbols.lines().any(|line| {
-        line.contains(" UND ") && forbidden_undefined.iter().any(|name| line.contains(name))
-    }) {
-        bail!("canonical guest ELF contains an undefined system/libc symbol");
+    let forbidden_symbols = symbols
+        .lines()
+        .filter(|line| {
+            line.contains(" UND ") && forbidden_undefined.iter().any(|name| line.contains(name))
+        })
+        .collect::<Vec<_>>();
+    if !forbidden_symbols.is_empty() {
+        bail!(
+            "canonical guest ELF contains undefined system/libc symbols: {}",
+            forbidden_symbols.join(" | ")
+        );
     }
     if require_relocations && relocations.contains("There are no relocations") {
         bail!("canonical guest ELF has no PolkaVM relocations");
