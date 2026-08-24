@@ -8,5 +8,8 @@ void *calloc(size_t count, size_t size);
 void *realloc(void *pointer, size_t size);
 void free(void *pointer);
 _Noreturn void abort(void);
+char *getenv(const char *name);
+long strtol(const char *value, char **end, int base);
+double strtod(const char *value, char **end);
 
 #endif
