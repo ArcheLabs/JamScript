@@ -4,8 +4,20 @@ use jamscript_ir::{
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ManagementPolicyConfig {
+    #[default]
+    Immutable,
+    Key {
+        account: [u8; 32],
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PortableServiceContext {
     pub service_key: [u8; 32],
+    /// Stable per-deployment identity, distinct from the numeric chain id.
+    pub service_instance_id: [u8; 32],
+    pub management_policy: ManagementPolicyConfig,
     pub genesis_hash: [u8; 32],
     pub diagnostic: bool,
 }
@@ -281,6 +293,8 @@ fn generate_application_rust_with_context(
 use service_runtime_core::{{ServiceApplication, ServiceKeyV1, StateAccessError}};
 
 const SERVICE_KEY: ServiceKeyV1 = ServiceKeyV1::new({service_key});
+const SERVICE_INSTANCE_ID: [u8; 32] = {service_instance_id};
+const GENESIS_MANAGEMENT_POLICY: jamscript_runtime_core::ManagementPolicyV1 = {management_policy};
 const GENESIS_HASH: [u8; 32] = {genesis_hash};
 const ACTION_SELECTOR: [u8; 8] = {selector};
 
@@ -317,6 +331,8 @@ impl ServiceApplication for GeneratedApplication {{
 pub use generated_application_impl::GeneratedApplication;
 "##,
         service_key = byte_array_literal(&context.service_key),
+        service_instance_id = byte_array_literal(&context.service_instance_id),
+        management_policy = management_policy_literal(context.management_policy),
         genesis_hash = byte_array_literal(&context.genesis_hash),
         selector = byte_array_literal(&selector),
         decoder = decoder,
@@ -526,6 +542,18 @@ fn byte_array_literal(bytes: &[u8]) -> String {
     )
 }
 
+fn management_policy_literal(policy: ManagementPolicyConfig) -> String {
+    match policy {
+        ManagementPolicyConfig::Immutable => {
+            "jamscript_runtime_core::ManagementPolicyV1::Immutable".into()
+        }
+        ManagementPolicyConfig::Key { account } => format!(
+            "jamscript_runtime_core::ManagementPolicyV1::Key {{ account: {} }}",
+            byte_array_literal(&account)
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +658,8 @@ mod tests {
         ];
         let context = PortableServiceContext {
             service_key: [7; 32],
+            service_instance_id: [6; 32],
+            management_policy: ManagementPolicyConfig::Key { account: [4; 32] },
             genesis_hash: [8; 32],
             diagnostic: false,
         };
@@ -729,6 +759,8 @@ mod tests {
             &ir,
             PortableServiceContext {
                 service_key: [1; 32],
+                service_instance_id: [3; 32],
+                management_policy: ManagementPolicyConfig::Immutable,
                 genesis_hash: [2; 32],
                 diagnostic: true,
             },

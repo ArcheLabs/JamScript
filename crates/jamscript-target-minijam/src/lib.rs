@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use jamscript_backend_scriptc::{ScriptcArtifact, ScriptcBuildMetadata, ScriptcCompiler};
 use jamscript_codegen_rust::{
     generate_builder_application_rust, generate_no_std_rust_with_context,
-    generate_no_std_rust_with_scriptc_context, PortableServiceContext,
+    generate_no_std_rust_with_scriptc_context, ManagementPolicyConfig, PortableServiceContext,
 };
 use jamscript_ir::{abi_for, abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,9 @@ use tempfile::tempdir;
 pub struct BuildMetadata {
     #[serde(rename = "serviceKey")]
     pub service_key: String,
+    #[serde(rename = "serviceInstanceId")]
+    pub service_instance_id: String,
+    pub management: ManagementMetadata,
     pub language_version: String,
     pub compiler_version: String,
     pub runtime_version: String,
@@ -73,6 +76,13 @@ pub struct BuildMetadata {
     pub native_modules: Vec<NativeModuleMetadata>,
     #[serde(flatten)]
     pub scriptc: Option<ScriptcBuildMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ManagementMetadata {
+    pub mode: String,
+    #[serde(rename = "genesisAccount", skip_serializing_if = "Option::is_none")]
+    pub genesis_account: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -413,6 +423,30 @@ fn build_metadata(
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
         ),
+        service_instance_id: format!(
+            "0x{}",
+            context
+                .service_instance_id
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ),
+        management: match context.management_policy {
+            ManagementPolicyConfig::Immutable => ManagementMetadata {
+                mode: "immutable".into(),
+                genesis_account: None,
+            },
+            ManagementPolicyConfig::Key { account } => ManagementMetadata {
+                mode: "key".into(),
+                genesis_account: Some(format!(
+                    "0x{}",
+                    account
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                )),
+            },
+        },
         language_version: language_version.into(),
         compiler_version: env!("CARGO_PKG_VERSION").into(),
         runtime_version: "0.1.0".into(),

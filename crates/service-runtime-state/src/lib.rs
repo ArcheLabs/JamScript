@@ -4,7 +4,8 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use service_runtime_core::{
-    ManagedStateAccess, StateAccessError, StateChangeV1, StateDiffV1, StateRoot,
+    is_reserved_service_storage_key, ManagedStateAccess, StateAccessError, StateChangeV1,
+    StateDiffV1, StateRoot,
 };
 
 #[cfg(feature = "std")]
@@ -32,6 +33,7 @@ pub enum StateError {
     InvalidProof,
     Backend,
     Unsupported,
+    ReservedKey,
 }
 
 pub type TrieLayout = LayoutV1<Blake2Hasher>;
@@ -216,6 +218,9 @@ impl ManagedState for StateTransaction {
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
+        if is_reserved_service_storage_key(key) {
+            return Err(StateError::ReservedKey);
+        }
         self.touched.insert(key.to_vec());
         let target = self.transactions.last_mut().unwrap_or(&mut self.writes);
         target.insert(key.to_vec(), Some(value.to_vec()));
@@ -223,6 +228,9 @@ impl ManagedState for StateTransaction {
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error> {
+        if is_reserved_service_storage_key(key) {
+            return Err(StateError::ReservedKey);
+        }
         self.touched.insert(key.to_vec());
         let target = self.transactions.last_mut().unwrap_or(&mut self.writes);
         target.insert(key.to_vec(), None);
@@ -233,15 +241,15 @@ impl ManagedState for StateTransaction {
 #[cfg(feature = "std")]
 impl ManagedStateAccess for StateTransaction {
     fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
-        ManagedState::get(self, key).map_err(|_| StateAccessError::Backend)
+        ManagedState::get(self, key).map_err(state_access_error)
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), StateAccessError> {
-        ManagedState::set(self, key, value).map_err(|_| StateAccessError::Backend)
+        ManagedState::set(self, key, value).map_err(state_access_error)
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), StateAccessError> {
-        ManagedState::delete(self, key).map_err(|_| StateAccessError::Backend)
+        ManagedState::delete(self, key).map_err(state_access_error)
     }
 
     fn begin_transaction(&mut self) -> Result<(), StateAccessError> {
@@ -405,6 +413,9 @@ impl ManagedState for ProofState {
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
+        if is_reserved_service_storage_key(key) {
+            return Err(StateError::ReservedKey);
+        }
         if self.overlay_value(key).is_none() && !self.base_cache.contains_key(key) {
             self.base_value(key)?;
         }
@@ -414,6 +425,9 @@ impl ManagedState for ProofState {
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error> {
+        if is_reserved_service_storage_key(key) {
+            return Err(StateError::ReservedKey);
+        }
         if self.overlay_value(key).is_none() && !self.base_cache.contains_key(key) {
             self.base_value(key)?;
         }
@@ -454,6 +468,7 @@ fn state_access_error(error: StateError) -> StateAccessError {
     match error {
         StateError::MissingWitness => StateAccessError::MissingWitness,
         StateError::InvalidProof => StateAccessError::InvalidProof,
+        StateError::ReservedKey => StateAccessError::ReservedKey,
         _ => StateAccessError::Backend,
     }
 }
@@ -609,6 +624,29 @@ mod tests {
             .unwrap();
         assert_eq!(next.get(b"nonce").unwrap(), Some(b"2".to_vec()));
         assert_eq!(next.get(b"score").unwrap(), Some(b"100".to_vec()));
+    }
+
+    #[test]
+    fn management_metadata_is_not_application_writable() {
+        let base = FullState::empty();
+        let mut transaction = StateTransaction::new(base.clone());
+        assert_eq!(
+            ManagedState::set(
+                &mut transaction,
+                service_runtime_core::MANAGEMENT_POLICY_KEY_V1,
+                b"mutable",
+            ),
+            Err(StateError::ReservedKey)
+        );
+
+        let proof = base
+            .proof_for(&[service_runtime_core::MANAGEMENT_NONCE_KEY_V1])
+            .unwrap();
+        let mut verifier = ProofState::from_proof(base.root(), proof).unwrap();
+        assert_eq!(
+            ManagedState::delete(&mut verifier, service_runtime_core::MANAGEMENT_NONCE_KEY_V1,),
+            Err(StateError::ReservedKey)
+        );
     }
 
     #[test]

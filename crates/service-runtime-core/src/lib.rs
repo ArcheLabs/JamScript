@@ -15,6 +15,13 @@ pub const EMPTY_STATE_ROOT_V1: StateRoot = [
     0x62, 0xb1, 0x57, 0xe7, 0x87, 0x86, 0xd8, 0xc0, 0x82, 0xf2, 0x9d, 0xcf, 0x4c, 0x11, 0x13, 0x14,
 ];
 pub const MANAGED_STATE_COMMITMENT_KEY_V1: &[u8] = b":jam-service-runtime:managed-state:v1";
+/// Runtime-owned JamScript management metadata.  Applications may read these
+/// keys when the execution path needs them, but may never mutate them through
+/// the ordinary managed-state API.
+pub const MANAGEMENT_VERSION_KEY_V1: &[u8] = b"__jamscript/management/version";
+pub const MANAGEMENT_INITIALIZED_KEY_V1: &[u8] = b"__jamscript/management/initialized";
+pub const MANAGEMENT_POLICY_KEY_V1: &[u8] = b"__jamscript/management/policy";
+pub const MANAGEMENT_NONCE_KEY_V1: &[u8] = b"__jamscript/management/nonce";
 pub const APPLICATION_KEY_CLASS_V1: u8 = 0x01;
 pub const RUNTIME_KEY_CLASS_V1: u8 = 0x00;
 pub const WALLET_AUTH_MODULE_V1: u8 = 0x01;
@@ -115,6 +122,7 @@ pub enum WireError {
     DuplicateKey,
     UnsortedKeys,
     TooManyItems,
+    ReservedKey,
 }
 
 pub fn application_key_v1(
@@ -159,6 +167,9 @@ impl StateDiffV1 {
             return Err(WireError::TooManyItems);
         }
         for change in &self.changes {
+            if is_reserved_service_storage_key(&change.key) {
+                return Err(WireError::ReservedKey);
+            }
             if change.key.len() > MAX_STATE_KEY_BYTES {
                 return Err(WireError::TooManyItems);
             }
@@ -921,7 +932,14 @@ pub struct StateQueryResponseV1 {
 }
 
 pub fn is_reserved_service_storage_key(key: &[u8]) -> bool {
-    key == MANAGED_STATE_COMMITMENT_KEY_V1
+    matches!(
+        key,
+        MANAGED_STATE_COMMITMENT_KEY_V1
+            | MANAGEMENT_VERSION_KEY_V1
+            | MANAGEMENT_INITIALIZED_KEY_V1
+            | MANAGEMENT_POLICY_KEY_V1
+            | MANAGEMENT_NONCE_KEY_V1
+    )
 }
 
 pub trait ServiceApplication {

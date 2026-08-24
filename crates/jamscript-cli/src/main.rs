@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use jamscript_codegen_rust::{
-    generate_builder_application_rust, generate_no_std_rust_with_context, PortableServiceContext,
+    generate_builder_application_rust, generate_no_std_rust_with_context, ManagementPolicyConfig,
+    PortableServiceContext,
 };
 use jamscript_ir::{abi_for, abi_for_language};
 use jamscript_parser::parse_service_with_native_modules;
@@ -57,6 +58,7 @@ struct Manifest {
     compiler: Option<CompilerConfig>,
     target: Option<Target>,
     native: Option<BTreeMap<String, NativeConfig>>,
+    management: Option<ManagementConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,7 +73,21 @@ struct ServiceMetadata {
     version: u8,
     #[serde(rename = "serviceKey")]
     service_key: String,
+    #[serde(rename = "instanceId")]
+    instance_id: Option<String>,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagementConfig {
+    #[serde(default = "default_management_mode")]
+    mode: String,
+    account: Option<String>,
+}
+
+fn default_management_mode() -> String {
+    "deployer".into()
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -155,6 +171,31 @@ fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
         &fs::read_to_string(&manifest_path)
             .with_context(|| format!("reading {}", manifest_path.display()))?,
     )?;
+    if let Some(management) = &manifest.management {
+        match management.mode.as_str() {
+            "deployer" => {
+                if let Some(account) = management.account.as_deref() {
+                    parse_hash(account).with_context(|| {
+                        "[management] deployer account must be a 32-byte hex key"
+                    })?;
+                }
+            }
+            "immutable" => {
+                if management.account.is_some() {
+                    bail!("[management] account is not valid with mode = \"immutable\"");
+                }
+            }
+            "key" => {
+                let account = management
+                    .account
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("[management] key mode requires account"))?;
+                parse_hash(account)
+                    .with_context(|| "[management] account must be a 32-byte hex key")?;
+            }
+            mode => bail!("unsupported management mode `{mode}`"),
+        }
+    }
     let backend = manifest
         .compiler
         .as_ref()
@@ -200,17 +241,33 @@ fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
     Ok((manifest, ir))
 }
 
-fn load_service_key(path: &Path) -> Result<ServiceKeyV1> {
+fn load_service_identity(path: &Path) -> Result<(ServiceKeyV1, [u8; 32])> {
     let metadata_path = path.join(".jamscript/service.json");
     let metadata: ServiceMetadata = serde_json::from_str(
         &fs::read_to_string(&metadata_path)
             .with_context(|| format!("reading {}", metadata_path.display()))?,
     )?;
-    if metadata.version != 1 || metadata.name.is_empty() {
+    if (metadata.version != 1 && metadata.version != 2) || metadata.name.is_empty() {
         bail!("invalid service metadata in {}", metadata_path.display());
     }
     let bytes = parse_hash(&metadata.service_key)?;
-    Ok(ServiceKeyV1::new(bytes))
+    let instance_id = match metadata.instance_id {
+        Some(value) => parse_hash(&value)?,
+        None => {
+            let mut generated = [0u8; 32];
+            getrandom::fill(&mut generated)
+                .map_err(|error| anyhow::anyhow!("generating service instance id: {error:?}"))?;
+            let updated = serde_json::json!({
+                "version": 2,
+                "serviceKey": format!("0x{}", encode_hex(&bytes)),
+                "instanceId": format!("0x{}", encode_hex(&generated)),
+                "name": metadata.name,
+            });
+            fs::write(metadata_path, serde_json::to_vec_pretty(&updated)?)?;
+            generated
+        }
+    };
+    Ok((ServiceKeyV1::new(bytes), instance_id))
 }
 
 fn new_project(name: &str) -> Result<()> {
@@ -223,15 +280,18 @@ fn new_project(name: &str) -> Result<()> {
     let mut service_key = [0u8; 32];
     getrandom::fill(&mut service_key)
         .map_err(|error| anyhow::anyhow!("generating service key: {error:?}"))?;
+    let mut instance_id = [0u8; 32];
+    getrandom::fill(&mut instance_id)
+        .map_err(|error| anyhow::anyhow!("generating service instance id: {error:?}"))?;
     let service_key = service_key
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    fs::write(root.join("jamscript.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/service.ts\"\nlanguage = \"0.1\"\n"))?;
+    fs::write(root.join("jamscript.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/service.ts\"\nlanguage = \"0.1\"\n\n[management]\nmode = \"deployer\"\n"))?;
     fs::write(root.join("src/service.ts"), "import { action, wallet, u64 } from \"jam\";\n\nexport const increment = action({\n  auth: wallet(),\n  input: { value: u64 },\n  execute(ctx, input) {\n    return input.value + 1;\n  },\n});\n")?;
     fs::write(
         root.join(".jamscript/service.json"),
-        format!("{{\n  \"version\": 1,\n  \"serviceKey\": \"0x{service_key}\",\n  \"name\": \"{name}\"\n}}\n"),
+        format!("{{\n  \"version\": 2,\n  \"serviceKey\": \"0x{service_key}\",\n  \"instanceId\": \"0x{}\",\n  \"name\": \"{name}\"\n}}\n", encode_hex(&instance_id)),
     )?;
     println!("created {}", root.display());
     Ok(())
@@ -243,8 +303,12 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         .target
         .as_ref()
         .and_then(|target| target.minijam.as_ref());
+    let (service_key, service_instance_id) = load_service_identity(path)?;
+    let management_policy = resolve_management_policy(manifest.management.as_ref(), &service_key)?;
     let context = PortableServiceContext {
-        service_key: load_service_key(path)?.into_bytes(),
+        service_key: service_key.into_bytes(),
+        service_instance_id,
+        management_policy,
         genesis_hash: minijam
             .and_then(|target| target.genesis_hash.as_deref())
             .map(parse_hash)
@@ -312,6 +376,48 @@ fn build(path: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
+fn resolve_management_policy(
+    config: Option<&ManagementConfig>,
+    service_key: &ServiceKeyV1,
+) -> Result<ManagementPolicyConfig> {
+    let Some(config) = config else {
+        return Ok(ManagementPolicyConfig::Immutable);
+    };
+    match config.mode.as_str() {
+        "immutable" => Ok(ManagementPolicyConfig::Immutable),
+        "key" => Ok(ManagementPolicyConfig::Key {
+            account: parse_hash(
+                config
+                    .account
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("[management] key mode requires account"))?,
+            )?,
+        }),
+        "deployer" => {
+            let account = config
+                .account
+                .as_deref()
+                .map(parse_hash)
+                .transpose()?
+                .or_else(|| {
+                    std::env::var("JAMSCRIPT_DEPLOYER_ACCOUNT")
+                        .ok()
+                        .and_then(|value| parse_hash(&value).ok())
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "[management] deployer requires account or JAMSCRIPT_DEPLOYER_ACCOUNT"
+                    )
+                })?;
+            if account == service_key.into_bytes() {
+                bail!("[management] deployer account must be a wallet public key, not serviceKey");
+            }
+            Ok(ManagementPolicyConfig::Key { account })
+        }
+        mode => bail!("unsupported management mode `{mode}`"),
+    }
+}
+
 fn resolve_native_modules(
     root: &Path,
     configs: Option<&BTreeMap<String, NativeConfig>>,
@@ -376,4 +482,8 @@ fn parse_hash(value: &str) -> Result<[u8; 32]> {
             .with_context(|| "genesis_hash contains invalid hexadecimal data")?;
     }
     Ok(hash)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
