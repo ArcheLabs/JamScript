@@ -97,3 +97,21 @@ Each builder invocation resolves its context and commitment again. Retrying
 after a stale Work anchor therefore reuses the signed action but rebuilds the
 root, witness, refine input, and Work payload. `build_one` is a convenience
 wrapper over the batch-shaped `build_actions` API.
+
+## Generated Builder application
+
+`jamscript build` emits both `generated_service.rs` for the PolkaVM guest and
+`generated_builder_application.rs` for producer-side witness discovery. Both
+embed the same generated `ServiceApplication` semantics: selector, application
+ABI decoder, wallet authentication, nonce transitions, state keys, business
+transactions, and native ABI calls. `builder.json` lists the generated host
+application and the native source/include inputs required to compile it.
+
+The Builder must consume these artifacts rather than maintain a handwritten
+companion implementation for each Service. Native modules are compiled from
+the same declared source files for the PolkaVM and host targets. This artifact
+does not contain PVM hostcalls or Accumulate logic.
+
+JamScript application ABI encoding remains separate from JAM/PVM protocol
+encoding. In particular, `Bytes<N>` uses a fixed little-endian `u32` length in
+the application ABI; JAM FnEncode is used only by the JAM protocol boundary.

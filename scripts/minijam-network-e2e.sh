@@ -72,7 +72,6 @@ echo "[prepare] MiniJAM revision: ${actual_revision}"
 "${MINIJAM_ROOT}/scripts/stage0-native.sh" build
 
 (cd "${JAMSCRIPT_ROOT}" && cargo build --locked --bin jamscript)
-(cd "${JAMSCRIPT_ROOT}" && cargo build --locked --bin managed-state-network-adapter)
 npm --prefix "${JAMSCRIPT_ROOT}/packages/client" ci --no-audit
 npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run build
 
@@ -135,6 +134,29 @@ service_key="$(
 )"
 echo "[build] JamScript service built: ${ARTIFACTS}/service.blob"
 
+builder_native_sources="$(
+  node --input-type=module -e '
+    import fs from "node:fs";
+    import path from "node:path";
+    const [metadataPath, project] = process.argv.slice(1);
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+    process.stdout.write(metadata.native_modules.flatMap(module => module.sources.map(source => path.resolve(project, source))).join(path.delimiter));
+  ' "${ARTIFACTS}/builder.json" "${E2E_PROJECT}"
+)"
+builder_native_includes="$(
+  node --input-type=module -e '
+    import fs from "node:fs";
+    import path from "node:path";
+    const [metadataPath, project] = process.argv.slice(1);
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+    process.stdout.write(metadata.native_modules.flatMap(module => module.include_dirs.map(include => path.resolve(project, include))).join(path.delimiter));
+  ' "${ARTIFACTS}/builder.json" "${E2E_PROJECT}"
+)"
+JAMSCRIPT_BUILDER_APPLICATION_RS="${ARTIFACTS}/generated_builder_application.rs" \
+JAMSCRIPT_BUILDER_NATIVE_SOURCES="${builder_native_sources}" \
+JAMSCRIPT_BUILDER_NATIVE_INCLUDES="${builder_native_includes}" \
+  cargo build --locked --manifest-path "${JAMSCRIPT_ROOT}/Cargo.toml" --bin managed-state-network-adapter
+
 node "${JAMSCRIPT_ROOT}/packages/client/tests/support/provision-service.mjs" \
   --command upgrade \
   --base-url http://127.0.0.1:8080 \
@@ -148,6 +170,7 @@ JAMSCRIPT_E2E_SERVICE_KEY="${service_key}" \
 JAMSCRIPT_E2E_CODE_HASH="${code_hash}" \
 JAMSCRIPT_E2E_GENESIS_HASH="${genesis_hash}" \
 JAMSCRIPT_E2E_TEST_METHODS=true \
+JAMSCRIPT_PROVIDER_STORE="${E2E_PROJECT}/provider-recovery.log" \
 "${JAMSCRIPT_ROOT}/target/debug/managed-state-network-adapter" \
   >"${E2E_RUNTIME}/logs/jamscript-adapter.log" 2>&1 &
 adapter_pid=$!

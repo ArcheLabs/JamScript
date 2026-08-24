@@ -8,7 +8,10 @@ The first slice deliberately supports one exported action, imports from the
 `jam` standard library, a bounded primitive input schema, one `execute` action
 body, ABI generation, and generated `no_std` Rust for the MiniJAM target. With the
 pinned Rust target and Clang 20 installed, `build` emits `service.blob`,
-`service.polkavm`, and `service.pvm`.
+`service.polkavm`, `service.pvm`, and a portable Builder host artifact. The
+PVM guest and Builder artifact embed the same compiler-generated
+`ServiceApplication`; native imports use the same declared C sources compiled
+once for PolkaVM and once for the host.
 
 The protocol layer also includes `SignedActionV1`: canonical bounded
 encoding, payload commitments, domain-separated sr25519 verification, sender
@@ -37,3 +40,6 @@ Managed-state architecture details are in
 [`docs/service-runtime-architecture.md`](docs/service-runtime-architecture.md),
 [`docs/managed-state.md`](docs/managed-state.md), and
 [`docs/state-recovery.md`](docs/state-recovery.md).
+
+The v0 testnet release boundary and operator workflow are documented in
+[`docs/releasing.md`](docs/releasing.md).

@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ArcheLabs/minijam-client
-          ref: 7370681143ee34e5ec42bcfb1140dde5fa3b4695
+          ref: 1dceda20d501b19207fc33252f180e658dc064d7
           path: minijam-client
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master

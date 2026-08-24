@@ -71,3 +71,14 @@ test("ABI integer and boolean encoders reject silent coercion and wrap", () => {
   assert.throws(() => encodeValue("bool", 1), /bool must be a boolean/);
   assert.deepEqual([...encodeValue("bool", true)], [1]);
 });
+
+test("JamScript Bytes ABI uses fixed u32 length and never JAM FnEncode", () => {
+  assert.deepEqual(
+    [...encodeValue("Bytes<64>", Uint8Array.of(0xaa, 0xbb, 0xcc))],
+    [3, 0, 0, 0, 0xaa, 0xbb, 0xcc],
+  );
+  assert.deepEqual(
+    [...encodeValue("Bytes<1024>", new Uint8Array(128)).slice(0, 4)],
+    [128, 0, 0, 0],
+  );
+});

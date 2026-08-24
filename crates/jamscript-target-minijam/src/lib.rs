@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
-use jamscript_codegen_rust::{generate_no_std_rust_with_context, PortableServiceContext};
+use jamscript_codegen_rust::{
+    generate_builder_application_rust, generate_no_std_rust_with_context, PortableServiceContext,
+};
 use jamscript_ir::{abi_for, ServiceIr, NATIVE_ABI_VERSION};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use service_build_polkavm::{
     GuestBuildArtifacts, NativeArchive, PolkaVmBuildConfig, PolkaVmBuildRequest, PolkaVmBuilder,
 };
@@ -9,6 +11,7 @@ use service_runtime_core::{
     MANAGED_STATE_LAYOUT_VERSION, MANAGED_STATE_PROTOCOL_VERSION, RECOVERY_FORMAT_VERSION,
 };
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -88,6 +91,60 @@ pub struct NativeSourceMetadata {
     pub hash: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct BuilderArtifactMetadata {
+    pub version: u8,
+    pub application: String,
+    pub native_modules: Vec<BuilderNativeModuleMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BuilderNativeModuleMetadata {
+    pub name: String,
+    pub sources: Vec<String>,
+    pub include_dirs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProtocolBoundaryV0 {
+    release_channel: &'static str,
+    language: &'static str,
+    signed_action: &'static str,
+    application_abi: u8,
+    managed_state_protocol: u8,
+    managed_state_layout: u8,
+    recovery_format: u8,
+    builder_artifact: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct BundleChecksums {
+    version: u8,
+    algorithm: String,
+    files: BTreeMap<String, String>,
+}
+
+pub fn verify_deployment_bundle(bundle: &Path) -> Result<BTreeMap<String, String>> {
+    let manifest_path = bundle.join("checksums.json");
+    let manifest: BundleChecksums = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .with_context(|| format!("reading {}", manifest_path.display()))?,
+    )?;
+    if manifest.version != 1 || manifest.algorithm != "blake2b-256" {
+        bail!("unsupported deployment bundle checksum manifest");
+    }
+    for (name, expected) in &manifest.files {
+        if Path::new(name).is_absolute() || name.contains("..") {
+            bail!("invalid deployment bundle path `{name}`");
+        }
+        let actual = hash_file(&bundle.join(name))?;
+        if &actual != expected {
+            bail!("deployment bundle checksum mismatch for `{name}`");
+        }
+    }
+    Ok(manifest.files)
+}
+
 pub struct MiniJamTarget {
     pub sdk_root: PathBuf,
     pub converter_manifest: PathBuf,
@@ -129,6 +186,28 @@ impl MiniJamTarget {
         fs::create_dir_all(output_dir)?;
         let generated = output_dir.join("generated_service.rs");
         self.emit_generated_source(ir, context, &generated)?;
+        fs::write(
+            output_dir.join("generated_builder_application.rs"),
+            generate_builder_application_rust(ir, context)
+                .map_err(|error| anyhow::anyhow!(error))?,
+        )?;
+        fs::write(
+            output_dir.join("builder.json"),
+            serde_json::to_vec_pretty(&builder_metadata(project_root, native_modules))?,
+        )?;
+        fs::write(
+            output_dir.join("protocol-v0.json"),
+            serde_json::to_vec_pretty(&ProtocolBoundaryV0 {
+                release_channel: "testnet-developer-preview",
+                language: "0.1",
+                signed_action: "SignedActionV2",
+                application_abi: 1,
+                managed_state_protocol: MANAGED_STATE_PROTOCOL_VERSION,
+                managed_state_layout: MANAGED_STATE_LAYOUT_VERSION,
+                recovery_format: RECOVERY_FORMAT_VERSION,
+                builder_artifact: 1,
+            })?,
+        )?;
         let abi = abi_for(ir);
         fs::write(
             output_dir.join("service.abi.json"),
@@ -211,6 +290,29 @@ impl MiniJamTarget {
             )?;
         }
         fs::copy(&polkavm, output_dir.join("service.pvm"))?;
+        let checksum_files = [
+            "service.blob",
+            "service.polkavm",
+            "service.pvm",
+            "service.elf",
+            "service.abi.json",
+            "generated_service.rs",
+            "generated_builder_application.rs",
+            "builder.json",
+            "protocol-v0.json",
+        ];
+        let files = checksum_files
+            .into_iter()
+            .map(|name| Ok((name.to_owned(), hash_file(&output_dir.join(name))?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        fs::write(
+            output_dir.join("checksums.json"),
+            serde_json::to_vec_pretty(&BundleChecksums {
+                version: 1,
+                algorithm: "blake2b-256".into(),
+                files,
+            })?,
+        )?;
         let clang_version = command_version(&clang)?;
         let sdk_revision = git_revision(&self.sdk_root)?;
         let native_metadata = native_metadata(project_root, native_modules)?;
@@ -298,7 +400,8 @@ fn jam_rustflags_from(existing: &str) -> String {
 
 #[cfg(test)]
 mod linker_override_tests {
-    use super::jam_rustflags_from;
+    use super::{hash_file, jam_rustflags_from, verify_deployment_bundle, BundleChecksums};
+    use std::{collections::BTreeMap, fs};
 
     #[test]
     fn jam_metadata_relocation_override_is_explicit() {
@@ -307,6 +410,28 @@ mod linker_override_tests {
             jam_rustflags_from("-C opt-level=2"),
             "-C opt-level=2 -C link-arg=-z -C link-arg=notext"
         );
+    }
+
+    #[test]
+    fn deployment_bundle_verification_rejects_tampering() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("service.blob"), b"canonical").unwrap();
+        let manifest = BundleChecksums {
+            version: 1,
+            algorithm: "blake2b-256".into(),
+            files: BTreeMap::from([(
+                "service.blob".into(),
+                hash_file(&temp.path().join("service.blob")).unwrap(),
+            )]),
+        };
+        fs::write(
+            temp.path().join("checksums.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(verify_deployment_bundle(temp.path()).is_ok());
+        fs::write(temp.path().join("service.blob"), b"tampered").unwrap();
+        assert!(verify_deployment_bundle(temp.path()).is_err());
     }
 }
 
@@ -449,6 +574,31 @@ fn native_metadata(
             })
         })
         .collect()
+}
+
+fn builder_metadata(project_root: &Path, modules: &[NativeModule]) -> BuilderArtifactMetadata {
+    let relative = |path: &Path| {
+        path.strip_prefix(project_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    BuilderArtifactMetadata {
+        version: 1,
+        application: "generated_builder_application.rs".into(),
+        native_modules: modules
+            .iter()
+            .map(|module| BuilderNativeModuleMetadata {
+                name: module.name.clone(),
+                sources: module.sources.iter().map(|path| relative(path)).collect(),
+                include_dirs: module
+                    .include_dirs
+                    .iter()
+                    .map(|path| relative(path))
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
 fn command_version(command: &Path) -> Result<String> {

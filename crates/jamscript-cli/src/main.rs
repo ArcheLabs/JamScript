@@ -1,9 +1,11 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use jamscript_codegen_rust::{generate_no_std_rust_with_context, PortableServiceContext};
+use jamscript_codegen_rust::{
+    generate_builder_application_rust, generate_no_std_rust_with_context, PortableServiceContext,
+};
 use jamscript_ir::abi_for;
 use jamscript_parser::parse_service_with_native_modules;
-use jamscript_target_minijam::{MiniJamTarget, NativeModule};
+use jamscript_target_minijam::{verify_deployment_bundle, MiniJamTarget, NativeModule};
 use serde::Deserialize;
 use service_runtime_core::ServiceKeyV1;
 use std::{
@@ -41,6 +43,10 @@ enum CommandKind {
         path: PathBuf,
         #[arg(long, default_value = "dist")]
         output: PathBuf,
+    },
+    Inspect {
+        #[arg(default_value = "dist")]
+        bundle: PathBuf,
     },
 }
 
@@ -105,7 +111,30 @@ fn main() -> Result<()> {
             Ok(())
         }
         CommandKind::Build { path, output } => build(&path, &output),
+        CommandKind::Inspect { bundle } => inspect(&bundle),
     }
+}
+
+fn inspect(bundle: &Path) -> Result<()> {
+    let files = verify_deployment_bundle(bundle)?;
+    let read_json = |name: &str| -> Result<serde_json::Value> {
+        let path = bundle.join(name);
+        serde_json::from_slice(
+            &fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+        )
+        .with_context(|| format!("decoding {}", path.display()))
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "verified": true,
+            "files": files.len(),
+            "build": read_json("build.json")?,
+            "protocol": read_json("protocol-v0.json")?,
+            "builder": read_json("builder.json")?,
+        }))?
+    );
+    Ok(())
 }
 
 fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
@@ -199,6 +228,10 @@ fn build(path: &Path, output: &Path) -> Result<()> {
     fs::write(
         output.join("generated_service.rs"),
         generate_no_std_rust_with_context(&ir, context).map_err(|e| anyhow::anyhow!(e))?,
+    )?;
+    fs::write(
+        output.join("generated_builder_application.rs"),
+        generate_builder_application_rust(&ir, context).map_err(|e| anyhow::anyhow!(e))?,
     )?;
     let sdk_root = minijam
         .and_then(|target| target.sdk_root.as_deref())

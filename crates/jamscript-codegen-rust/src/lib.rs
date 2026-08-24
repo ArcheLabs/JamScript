@@ -18,18 +18,7 @@ pub fn generate_no_std_rust_with_context(
     ir: &ServiceIr,
     context: PortableServiceContext,
 ) -> Result<String, String> {
-    let action = ir
-        .actions
-        .first()
-        .ok_or_else(|| "IR contains no action".to_string())?;
-    let selector = action_selector(&action.name);
-    let decoder = payload_decoder(action)?;
-    let ActionBodyIr::Execute(execute) = &action.body;
-    let setup = application_setup(&execute.operation, action, "decoded", &ir.native_imports)?;
-    let native_declarations = native_declarations(ir);
-    let application_effect = application_state_effect(execute.state_effect.as_ref(), ir)?;
-    let application_body =
-        application_body(action, &setup, &application_effect, context.diagnostic);
+    let application_source = generate_application_rust_with_context(ir, context)?;
     let stage_entry = if context.diagnostic {
         "service_runtime_guest::guest_support::diagnostic_stage(b\"jamscript:entry\");"
     } else {
@@ -72,8 +61,7 @@ pub fn generate_no_std_rust_with_context(
 compile_error!("generated service must be built with the official PolkaVM target");
 
 use service_runtime_core::{{
-    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV2,
-    ServiceApplication, ServiceKeyV1, StateAccessError, StateRoot,
+    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV2, StateRoot,
     MANAGED_STATE_COMMITMENT_KEY_V1,
 }};
 #[repr(C)]
@@ -85,30 +73,13 @@ extern "C" {{
     fn minijam_result(index: usize, output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
     fn minijam_storage_read(key: *const u8, key_size: usize, output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
     fn minijam_storage_write(key: *const u8, key_size: usize, value: *const u8, value_size: usize) -> u32;
-{native_declarations}}}
+}}
 
 static mut INPUT: [u8; 1048576] = [0; 1048576];
 static mut RESULT: [u8; 2097152] = [0; 2097152];
 static mut OUTPUT: [u8; 2097152] = [0; 2097152];
 
-const SERVICE_KEY: ServiceKeyV1 = ServiceKeyV1::new({service_key});
-const GENESIS_HASH: [u8; 32] = {genesis_hash};
-const ACTION_SELECTOR: [u8; 8] = {selector};
-
-struct PayloadReader<'a> {{ input: &'a [u8], offset: usize }}
-impl<'a> PayloadReader<'a> {{
-    fn take(&mut self, length: usize) -> Result<&'a [u8], ()> {{
-        let end = self.offset.checked_add(length).ok_or(())?;
-        let value = self.input.get(self.offset..end).ok_or(())?;
-        self.offset = end; Ok(value)
-    }}
-    fn u32(&mut self) -> Result<u32, ()> {{ Ok(u32::from_le_bytes(self.take(4)?.try_into().map_err(|_| ())?)) }}
-    #[allow(dead_code)]
-    fn u64(&mut self) -> Result<u64, ()> {{ Ok(u64::from_le_bytes(self.take(8)?.try_into().map_err(|_| ())?)) }}
-    fn bounded_bytes(&mut self, max: usize) -> Result<&'a [u8], ()> {{ let length = self.u32()? as usize; if length > max {{ return Err(()); }} self.take(length) }}
-}}
-
-{decoder}
+{application_source}
 
 #[no_mangle]
 pub extern "C" fn minijam_refine() -> RefineOutput {{
@@ -203,22 +174,84 @@ fn read_fnencode(input: &[u8], offset: &mut usize) -> Result<u64, ()> {{
     Ok(((first as u64 & (0x7fu64 >> length)) << (8 * length)) | low)
 }}
 
-struct GeneratedApplication;
+fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_slice(&code.to_le_bytes()); RefineOutput {{ data: OUTPUT.as_ptr(), size: 4 }} }} }}
+"##,
+    ))
+}
+
+pub fn generate_builder_application_rust(
+    ir: &ServiceIr,
+    mut context: PortableServiceContext,
+) -> Result<String, String> {
+    context.diagnostic = false;
+    generate_application_rust_with_context(ir, context)
+}
+
+fn generate_application_rust_with_context(
+    ir: &ServiceIr,
+    context: PortableServiceContext,
+) -> Result<String, String> {
+    let action = ir
+        .actions
+        .first()
+        .ok_or_else(|| "IR contains no action".to_string())?;
+    let selector = action_selector(&action.name);
+    let decoder = payload_decoder(action)?;
+    let ActionBodyIr::Execute(execute) = &action.body;
+    let setup = application_setup(
+        &execute.operation,
+        action,
+        "decoded",
+        &ir.native_imports,
+        context.diagnostic,
+    )?;
+    let native_declarations = native_declarations(ir);
+    let application_effect = application_state_effect(execute.state_effect.as_ref(), ir)?;
+    let application_body =
+        application_body(action, &setup, &application_effect, context.diagnostic);
+    Ok(format!(
+        r##"mod generated_application_impl {{
+use service_runtime_core::{{ServiceApplication, ServiceKeyV1, StateAccessError}};
+
+const SERVICE_KEY: ServiceKeyV1 = ServiceKeyV1::new({service_key});
+const GENESIS_HASH: [u8; 32] = {genesis_hash};
+const ACTION_SELECTOR: [u8; 8] = {selector};
+
+unsafe extern "C" {{
+{native_declarations}}}
+
+struct PayloadReader<'a> {{ input: &'a [u8], offset: usize }}
+#[allow(dead_code)]
+impl<'a> PayloadReader<'a> {{
+    fn take(&mut self, length: usize) -> Result<&'a [u8], ()> {{
+        let end = self.offset.checked_add(length).ok_or(())?;
+        let value = self.input.get(self.offset..end).ok_or(())?;
+        self.offset = end; Ok(value)
+    }}
+    fn u32(&mut self) -> Result<u32, ()> {{ Ok(u32::from_le_bytes(self.take(4)?.try_into().map_err(|_| ())?)) }}
+    #[allow(dead_code)]
+    fn u64(&mut self) -> Result<u64, ()> {{ Ok(u64::from_le_bytes(self.take(8)?.try_into().map_err(|_| ())?)) }}
+    fn bounded_bytes(&mut self, max: usize) -> Result<&'a [u8], ()> {{ let length = self.u32()? as usize; if length > max {{ return Err(()); }} self.take(length) }}
+}}
+
+{decoder}
+
+pub struct GeneratedApplication;
 impl ServiceApplication for GeneratedApplication {{
     type Error = StateAccessError;
+    #[allow(unused_variables)]
     fn execute(
         &self,
         context: &mut service_runtime_core::ExecutionContext<'_>,
         raw_action: &[u8],
     ) -> Result<(), Self::Error> {{ {application_body} }}
 }}
-
-fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_slice(&code.to_le_bytes()); RefineOutput {{ data: OUTPUT.as_ptr(), size: 4 }} }} }}
+}}
+pub use generated_application_impl::GeneratedApplication;
 "##,
         service_key = byte_array_literal(&context.service_key),
         genesis_hash = byte_array_literal(&context.genesis_hash),
         selector = byte_array_literal(&selector),
-        native_declarations = native_declarations,
         decoder = decoder,
         application_body = application_body,
     ))
@@ -272,6 +305,7 @@ fn application_setup(
     action: &ActionIr,
     decoded: &str,
     native_imports: &[jamscript_ir::NativeImportIr],
+    diagnostic: bool,
 ) -> Result<String, String> {
     let field_index = |name: &str| {
         action
@@ -302,7 +336,12 @@ fn application_setup(
                 .find(|item| item.module == *module && item.function == *function)
                 .ok_or_else(|| "native import is missing from IR".to_string())?;
             let symbol = native_symbol(&import.module, &import.function);
-            Ok(format!("let mut value = 0u64; let native_status = unsafe {{ {symbol}({decoded}.{index}.as_ptr(), {decoded}.{index}.len() as u32, &mut value) }}; if native_status != 0 {{ service_runtime_guest::guest_support::diagnostic_stage(b\"jamscript:application-native-error\"); return Err(StateAccessError::ApplicationFailed(0x8000_0000u32 | native_status)); }}"))
+            let marker = if diagnostic {
+                "service_runtime_guest::guest_support::diagnostic_stage(b\"jamscript:application-native-error\");"
+            } else {
+                ""
+            };
+            Ok(format!("let mut value = 0u64; let native_status = unsafe {{ {symbol}({decoded}.{index}.as_ptr(), {decoded}.{index}.len() as u32, &mut value) }}; if native_status != 0 {{ {marker} return Err(StateAccessError::ApplicationFailed(0x8000_0000u32 | native_status)); }}"))
         }
     }
 }
@@ -437,6 +476,80 @@ mod tests {
         assert!(source.contains("0x8000_0000u32 | native_status"));
         assert!(source.contains("output.receipts.len() == 1"));
         assert!(source.contains("return error_output(error_code)"));
+    }
+
+    #[test]
+    fn guest_and_builder_embed_the_same_generated_application() {
+        let services = [
+            ServiceIr {
+                package_name: "counter".into(),
+                package_version: "0.1.0".into(),
+                states: vec![jamscript_ir::StateIr {
+                    name: "counter".into(),
+                    schema: "counter/v1".into(),
+                    key_type: jamscript_ir::StateKeyType::Address,
+                    value_type: TypeIr::U64,
+                }],
+                queries: Vec::new(),
+                native_imports: Vec::new(),
+                actions: vec![ActionIr {
+                    name: "increment".into(),
+                    auth: AuthKind::Wallet,
+                    input: vec![FieldIr {
+                        name: "value".into(),
+                        ty: TypeIr::U64,
+                    }],
+                    body: ActionBodyIr::Execute(jamscript_ir::ExecuteIr {
+                        operation: ExecutionOpIr::ReturnInputField {
+                            field: "value".into(),
+                        },
+                        state_effect: Some(StateEffectIr::Set {
+                            state: "counter".into(),
+                        }),
+                    }),
+                }],
+            },
+            ServiceIr {
+                package_name: "game".into(),
+                package_version: "0.1.0".into(),
+                states: Vec::new(),
+                queries: Vec::new(),
+                native_imports: vec![NativeImportIr {
+                    module: "game".into(),
+                    function: "replay".into(),
+                }],
+                actions: vec![ActionIr {
+                    name: "submitRun".into(),
+                    auth: AuthKind::Wallet,
+                    input: vec![FieldIr {
+                        name: "run".into(),
+                        ty: TypeIr::Bytes { max: 262_144 },
+                    }],
+                    body: ActionBodyIr::Execute(jamscript_ir::ExecuteIr {
+                        operation: ExecutionOpIr::NativeBytesToU64 {
+                            module: "game".into(),
+                            function: "replay".into(),
+                            field: "run".into(),
+                        },
+                        state_effect: None,
+                    }),
+                }],
+            },
+        ];
+        let context = PortableServiceContext {
+            service_key: [7; 32],
+            genesis_hash: [8; 32],
+            diagnostic: false,
+        };
+        for ir in services {
+            let builder = generate_builder_application_rust(&ir, context).unwrap();
+            let guest = generate_no_std_rust_with_context(&ir, context).unwrap();
+            assert!(guest.contains(&builder));
+            assert!(!builder.contains("minijam_payload"));
+            assert!(!builder.contains("minijam_storage_write"));
+            assert!(!builder.contains("read_fnencode"));
+            assert!(!builder.contains("service_runtime_guest"));
+        }
     }
 
     #[test]

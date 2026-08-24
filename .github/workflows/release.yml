@@ -1,0 +1,36 @@
+name: Developer Preview Release
+
+on:
+  push:
+    tags:
+      - "v0.*"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/client/package-lock.json
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - working-directory: packages/client
+        run: npm ci && npm run build && npm test
+      - name: Record release scope
+        run: |
+          printf '%s\n' \
+            'JamScript v0 Testnet Developer Preview' \
+            'No production DoS economics, sponsorship, distributed Provider, or mainnet security guarantee.' \
+            > RELEASE-SCOPE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-scope-${{ github.ref_name }}
+          path: RELEASE-SCOPE.txt

@@ -1,8 +1,10 @@
 use std::{
     collections::BTreeMap,
     env,
+    fs::{self, OpenOptions},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -12,8 +14,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use service_runtime_core::{
-    application_key_v1, wallet_nonce_key_v1, ExecutionContext, ManagedStateCommitmentV1,
-    RuntimeRefineOutputV2, ServiceApplication, ServiceKeyV1, StateAccessError, StateRecoveryV1,
+    ManagedStateCommitmentV1, RuntimeRefineOutputV2, ServiceKeyV1, StateRecoveryV1,
     EMPTY_STATE_ROOT_V1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
 use service_runtime_host::{
@@ -22,11 +23,8 @@ use service_runtime_host::{
 };
 
 const MAX_HTTP_BYTES: usize = 8 * 1024 * 1024;
-const NATIVE_ERROR_BASE: u32 = 0x8000_0000;
 
-unsafe extern "C" {
-    fn jamscript_native_game_replay_v1(input: *const u8, input_len: u32, output: *mut u64) -> u32;
-}
+include!(env!("JAMSCRIPT_BUILDER_APPLICATION_RS"));
 
 #[derive(Clone)]
 struct Config {
@@ -35,9 +33,9 @@ struct Config {
     formal_url: String,
     service_id: u32,
     service_key: ServiceKeyV1,
-    network_domain: [u8; 32],
     code_hash: [u8; 32],
     test_methods: bool,
+    provider_store: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -141,90 +139,6 @@ impl FinalizedManagedStateSource for NodeSource<'_> {
     }
 }
 
-struct GameReplayApplication {
-    network_domain: [u8; 32],
-    service_key: ServiceKeyV1,
-    selector: [u8; 8],
-}
-
-impl ServiceApplication for GameReplayApplication {
-    type Error = StateAccessError;
-
-    fn execute(
-        &self,
-        context: &mut ExecutionContext<'_>,
-        raw_action: &[u8],
-    ) -> Result<(), Self::Error> {
-        let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action)
-            .map_err(|_| StateAccessError::Backend)?;
-        let verified = jamscript_runtime_core::verify_signed_action_v2(
-            signed,
-            self.network_domain,
-            self.service_key,
-            self.selector,
-        )
-        .map_err(|_| StateAccessError::Backend)?;
-        let nonce_key = wallet_nonce_key_v1(&verified.sender);
-        let nonce = context.state().get(&nonce_key)?.unwrap_or_default();
-        let expected_nonce = decode_u64_or_zero(&nonce)?;
-        if verified.nonce != expected_nonce {
-            return Err(StateAccessError::Backend);
-        }
-        context.constrain_valid_until(verified.valid_until);
-        context.state().set(
-            &nonce_key,
-            &expected_nonce
-                .checked_add(1)
-                .ok_or(StateAccessError::Backend)?
-                .to_le_bytes(),
-        )?;
-        context.begin_transaction()?;
-        let business = (|| -> Result<(), StateAccessError> {
-            let run =
-                decode_single_bytes(verified.payload).map_err(|_| StateAccessError::Backend)?;
-            let mut score = 0u64;
-            let status = unsafe {
-                jamscript_native_game_replay_v1(
-                    run.as_ptr(),
-                    u32::try_from(run.len()).map_err(|_| StateAccessError::Backend)?,
-                    &mut score,
-                )
-            };
-            if status != 0 {
-                return Err(StateAccessError::ApplicationFailed(
-                    NATIVE_ERROR_BASE | status,
-                ));
-            }
-            let key = application_key_v1(b"best-score/v1", &verified.sender)
-                .map_err(|_| StateAccessError::Backend)?;
-            let current = context.state().get(&key)?.unwrap_or_default();
-            if current.is_empty() || score > decode_u64_or_zero(&current)? {
-                context.state().set(&key, &score.to_le_bytes())?;
-            }
-            Ok(())
-        })();
-        match business {
-            Ok(()) => context.commit_transaction(),
-            Err(StateAccessError::MissingWitness) => {
-                context.rollback_transaction()?;
-                Err(StateAccessError::MissingWitness)
-            }
-            Err(StateAccessError::InvalidProof) => {
-                context.rollback_transaction()?;
-                Err(StateAccessError::InvalidProof)
-            }
-            Err(StateAccessError::ApplicationFailed(code)) => {
-                let _ = context.rollback_transaction();
-                Err(StateAccessError::ApplicationFailed(code))
-            }
-            Err(_) => {
-                context.rollback_transaction()?;
-                Err(StateAccessError::ApplicationFailed(1))
-            }
-        }
-    }
-}
-
 impl Adapter {
     fn handle_rpc(&self, request: RpcRequest) -> Value {
         let id = request.id;
@@ -288,11 +202,7 @@ impl Adapter {
         let action = STANDARD
             .decode(&request.payload_base64)
             .map_err(|error| RpcFailure::invalid(error.to_string()))?;
-        let application = GameReplayApplication {
-            network_domain: self.config.network_domain,
-            service_key: self.config.service_key,
-            selector: jamscript_ir::action_selector("submitRun"),
-        };
+        let application = GeneratedApplication;
         let mut state = self.state.lock().expect("adapter state lock");
         let mut source = NodeSource {
             config: &self.config,
@@ -454,6 +364,9 @@ impl Adapter {
                     .provider
                     .apply_recovery(self.config.service_key, &output)
                     .map_err(|error| RpcFailure::builder(format!("recovery: {error:?}")))?;
+                if let Some(path) = &self.config.provider_store {
+                    append_recovery(path, &output).map_err(RpcFailure::builder)?;
+                }
                 state.pending.remove(&package_hash.to_lowercase());
                 return Ok(());
             }
@@ -595,6 +508,12 @@ impl RpcFailure {
 }
 
 fn main() -> Result<(), String> {
+    if env!("JAMSCRIPT_BUILDER_ARTIFACT_CONFIGURED") != "1" {
+        return Err(
+            "generated Builder application is required; compile with JAMSCRIPT_BUILDER_APPLICATION_RS"
+                .into(),
+        );
+    }
     let config = Config {
         bind: env::var("JAMSCRIPT_ADAPTER_BIND").unwrap_or_else(|_| "127.0.0.1:8091".into()),
         node_url: env::var("MINIJAM_NODE_RPC").unwrap_or_else(|_| "http://127.0.0.1:9944".into()),
@@ -602,14 +521,18 @@ fn main() -> Result<(), String> {
             .unwrap_or_else(|_| "http://127.0.0.1:8090".into()),
         service_id: env_parse("JAMSCRIPT_E2E_SERVICE_ID")?,
         service_key: ServiceKeyV1::new(parse_hash(&required_env("JAMSCRIPT_E2E_SERVICE_KEY")?)?),
-        network_domain: parse_hash(&required_env("JAMSCRIPT_E2E_GENESIS_HASH")?)?,
         code_hash: parse_hash(&required_env("JAMSCRIPT_E2E_CODE_HASH")?)?,
         test_methods: env::var("JAMSCRIPT_E2E_TEST_METHODS").as_deref() == Ok("true"),
+        provider_store: env::var_os("JAMSCRIPT_PROVIDER_STORE").map(PathBuf::from),
     };
+    let provider = load_provider(config.provider_store.as_deref(), config.service_key)?;
     let listener = TcpListener::bind(&config.bind).map_err(|error| error.to_string())?;
     let adapter = Adapter {
         config,
-        state: Arc::new(Mutex::new(AdapterState::default())),
+        state: Arc::new(Mutex::new(AdapterState {
+            provider,
+            ..Default::default()
+        })),
     };
     eprintln!(
         "JamScript managed-state adapter listening on {}",
@@ -627,6 +550,57 @@ fn main() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn load_provider(path: Option<&Path>, service: ServiceKeyV1) -> Result<FullStateProvider, String> {
+    let Some(path) = path else {
+        return Ok(FullStateProvider::default());
+    };
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(FullStateProvider::default())
+        }
+        Err(error) => return Err(format!("reading Provider recovery log: {error}")),
+    };
+    let mut provider = FullStateProvider::default();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let length_bytes = bytes
+            .get(offset..offset + 4)
+            .ok_or("truncated Provider recovery log length")?;
+        let length = u32::from_le_bytes(length_bytes.try_into().expect("four bytes")) as usize;
+        offset += 4;
+        let encoded = bytes
+            .get(offset..offset + length)
+            .ok_or("truncated Provider recovery log entry")?;
+        offset += length;
+        let output = RuntimeRefineOutputV2::decode(encoded)
+            .map_err(|_| "invalid Provider recovery log entry")?;
+        provider
+            .apply_recovery(service, &output)
+            .map_err(|error| format!("invalid Provider recovery chain: {error:?}"))?;
+    }
+    Ok(provider)
+}
+
+fn append_recovery(path: &Path, output: &RuntimeRefineOutputV2) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let encoded = output
+        .encode()
+        .map_err(|error| format!("encoding Provider recovery: {error:?}"))?;
+    let length = u32::try_from(encoded.len()).map_err(|_| "Provider recovery entry too large")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    file.write_all(&length.to_le_bytes())
+        .and_then(|_| file.write_all(&encoded))
+        .and_then(|_| file.sync_data())
+        .map_err(|error| error.to_string())
 }
 
 fn handle_http(mut stream: TcpStream, adapter: &Adapter) -> Result<(), String> {
@@ -762,25 +736,6 @@ fn decode_state_value(encoded: &[u8]) -> Result<Vec<u8>, String> {
         return Err("invalid StateValue length".into());
     }
     Ok(encoded[prefix..].to_vec())
-}
-
-fn decode_single_bytes(encoded: &[u8]) -> Result<&[u8], String> {
-    let prefix = encoded.get(..4).ok_or("truncated bounded bytes length")?;
-    let length = u32::from_le_bytes(prefix.try_into().expect("four bytes")) as usize;
-    if 4 + length != encoded.len() {
-        return Err("trailing action payload bytes".into());
-    }
-    Ok(&encoded[4..])
-}
-
-fn decode_u64_or_zero(bytes: &[u8]) -> Result<u64, StateAccessError> {
-    match bytes {
-        [] => Ok(0),
-        bytes if bytes.len() == 8 => Ok(u64::from_le_bytes(
-            bytes.try_into().map_err(|_| StateAccessError::Backend)?,
-        )),
-        _ => Err(StateAccessError::Backend),
-    }
 }
 
 fn decode_compact(input: &[u8]) -> Result<(usize, usize), String> {
