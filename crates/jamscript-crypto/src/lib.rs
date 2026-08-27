@@ -4,7 +4,11 @@ use blake2b_simd::Params;
 use schnorrkel::{context::signing_context, PublicKey, Signature};
 use thiserror::Error;
 
-pub const SR25519_CONTEXT: &[u8] = b"JAMSCRIPT_ACTION_V1";
+/// The standard Substrate sr25519 signing context used by `signRaw`.
+///
+/// JamScript's protocol domain remains part of the digest constructed by
+/// `SignedActionV1`; it must not be used as the sr25519 transcript context.
+pub const SR25519_CONTEXT: &[u8] = b"substrate";
 pub type Address = [u8; 32];
 
 #[derive(Debug, Error, Eq, PartialEq)]

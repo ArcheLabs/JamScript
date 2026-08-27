@@ -1,0 +1,19 @@
+[package]
+name = "service-runtime-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["std"]
+std = ["sp-core/std", "sp-trie/std"]
+state-machine = ["dep:sp-state-machine", "sp-state-machine/std"]
+
+[dependencies]
+service-runtime-core = { path = "../service-runtime-core", default-features = false }
+sp-core = { version = "=43.0.0", default-features = false }
+sp-trie = { version = "=46.0.0", default-features = false }
+sp-state-machine = { version = "=0.53.0", default-features = false, optional = true }
+
+[dev-dependencies]
+hex = "0.4.3"

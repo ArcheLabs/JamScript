@@ -9,21 +9,60 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.88.0
-          components: rustfmt, clippy
+          toolchain: nightly-2026-05-02
+          components: rust-src, rustfmt, clippy
+      - run: cargo fetch --locked
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --locked
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  typescript-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/client/package-lock.json
+      - working-directory: packages/client
+        run: npm ci
+      - working-directory: packages/client
+        run: npm run build
+      - working-directory: packages/client
+        run: npm test
+
   minijam:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: JamScript
+      - uses: actions/checkout@v4
+        with:
+          repository: ArcheLabs/minijam-client
+          ref: 1dceda20d501b19207fc33252f180e658dc064d7
+          path: minijam-client
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-05-02
-          components: rust-src
-      - run: ./scripts/e2e-minijam.sh
+          components: rust-src, rustfmt, clippy
+      - run: sudo apt-get update && sudo apt-get install -y clang-20 lld-20
+      - working-directory: JamScript
+        run: cargo fetch --locked
+      - working-directory: minijam-client/service-toolchain/compiler/polkavm-to-jam
+        run: cargo fetch --locked
+      - working-directory: JamScript
+        run: cargo fetch --locked --manifest-path tools/minijam-e2e/Cargo.toml
+      - working-directory: JamScript
+        run: cargo fmt --manifest-path tools/minijam-e2e/Cargo.toml -- --check
+      - working-directory: minijam-client
+        run: cargo test -p minijam-formal-rpc --locked
+      - working-directory: JamScript
+        env:
+          JAMSCRIPT_MINIJAM_SDK: ../minijam-client
+        run: ./scripts/e2e-minijam.sh

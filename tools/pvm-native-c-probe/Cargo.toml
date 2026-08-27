@@ -1,0 +1,12 @@
+[package]
+name = "pvm-native-c-probe"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+polkavm-derive = "=0.30.0"
+
+[workspace]

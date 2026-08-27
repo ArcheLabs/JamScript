@@ -1,0 +1,16 @@
+[package]
+name = "service-state-plane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["std"]
+std = ["service-runtime-state/std"]
+
+[dependencies]
+service-runtime-core = { path = "../service-runtime-core", default-features = false }
+service-runtime-state = { path = "../service-runtime-state", default-features = false }
+
+[dev-dependencies]
+service-runtime-state = { path = "../service-runtime-state", features = ["std"] }

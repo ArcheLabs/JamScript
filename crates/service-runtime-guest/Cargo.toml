@@ -1,0 +1,17 @@
+[package]
+name = "service-runtime-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+diagnostic = []
+
+[dependencies]
+service-runtime-core = { path = "../service-runtime-core", default-features = false }
+service-runtime-state = { path = "../service-runtime-state", default-features = false }
+polkavm-derive = "=0.30.0"
+
+[dev-dependencies]
+service-runtime-state = { path = "../service-runtime-state", features = ["std"] }

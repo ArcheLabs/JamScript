@@ -1,0 +1,58 @@
+name: MiniJAM Network E2E
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v0.*"
+  pull_request:
+    paths:
+      - "crates/jamscript-codegen-rust/**"
+      - "crates/jamscript-target-minijam/**"
+      - "crates/service-runtime-*/**"
+      - "packages/client/**"
+      - "scripts/minijam-network-e2e.sh"
+      - "tools/managed-state-network-adapter/**"
+      - "toolchains/minijam.lock"
+
+jobs:
+  network-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: JamScript
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ArcheLabs/minijam-client
+          path: minijam-client
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src, rustfmt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang-20 lld-20
+
+      - name: Checkout pinned MiniJAM revision
+        working-directory: JamScript
+        run: |
+          revision="$(sed -n 's/^revision = "\([^"]*\)"/\1/p' toolchains/minijam.lock)"
+          git -C ../minijam-client checkout --detach "${revision}"
+          git -C ../minijam-client submodule update --init --recursive
+
+      - name: Run real network E2E
+        working-directory: JamScript
+        env:
+          CI: "true"
+          JAMSCRIPT_MINIJAM_SDK: ../minijam-client
+        run: ./scripts/minijam-network-e2e.sh

@@ -1,0 +1,9 @@
+version = 1
+rust = "nightly-2026-05-02"
+polkavm_linker = "0.30.0"
+polkavm_derive = "0.30.0"
+architecture = "riscv64"
+abi = "lp64e"
+target_source = "polkavm-linker"
+target_selection = "autodetect"
+clang_major = 20
