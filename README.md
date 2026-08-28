@@ -13,9 +13,10 @@ PVM guest and Builder artifact embed the same compiler-generated
 `ServiceApplication`; native imports use the same declared C sources compiled
 once for PolkaVM and once for the host.
 
-The protocol layer also includes `SignedActionV1`: canonical bounded
-encoding, payload commitments, domain-separated sr25519 verification, sender
-derivation, expiry, and nonce-context validation.
+The v0 release boundary uses `SignedActionV2`: canonical bounded encoding,
+payload commitments, ServiceKey identity, domain-separated sr25519
+verification, sender derivation, expiry, and nonce-context validation.
+`SignedActionV1` remains available only as a compatibility implementation.
 
 The runtime layer provides a language-independent managed-state foundation:
 SDK LayoutV1 trie roots and proofs, canonical diffs/transitions, managed wallet
@@ -43,3 +44,7 @@ Managed-state architecture details are in
 
 The v0 testnet release boundary and operator workflow are documented in
 [`docs/releasing.md`](docs/releasing.md).
+
+The MiniJamSpec compatibility audit, including the pinned revisions and the
+Refine/Accumulate ABI decision, is documented in
+[`docs/minijam-spec-compatibility.md`](docs/minijam-spec-compatibility.md).

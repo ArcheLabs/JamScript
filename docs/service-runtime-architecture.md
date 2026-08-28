@@ -53,7 +53,7 @@ The following versions are independent and are emitted in `build.json`:
 - Managed State protocol version 1;
 - Managed State layout version 1;
 - Recovery format version 1;
-- SignedActionV1 wallet protocol version.
+- SignedActionV2 wallet protocol version; SignedActionV1 is compatibility-only.
 
 Changing the SDK trie encoding requires a managed-state layout version change,
 not a silent dependency upgrade.

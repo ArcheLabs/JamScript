@@ -157,10 +157,25 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
 }}
 
 #[no_mangle]
-pub extern "C" fn minijam_accumulate(init_input: *const u8, init_size: usize) {{
-    let init_input = unsafe {{ core::slice::from_raw_parts(init_input, init_size) }};
-    let mut init_offset = 0usize;
-    let authoritative_tick = match read_fnencode(init_input, &mut init_offset) {{ Ok(value) => value, Err(_) => return }};
+pub extern "C" fn minijam_accumulate() {{
+    // Jambda starts an accumulate VM with the init input in A memory and
+    // initializes a0/a1 to its pointer and length.  The SDK export metadata
+    // deliberately declares this entry as input_regs=0, so these values are
+    // an invocation-context transport, not C function arguments.
+    let init_pointer: usize;
+    let init_size: usize;
+    unsafe {{
+        core::arch::asm!(
+            "mv {{pointer}}, a0",
+            "mv {{size}}, a1",
+            pointer = out(reg) init_pointer,
+            size = out(reg) init_size,
+            options(nomem, nostack, preserves_flags),
+        );
+    }}
+    let init_input = unsafe {{ core::slice::from_raw_parts(init_pointer as *const u8, init_size) }};
+    let (authoritative_tick, _sid, _items_count) =
+        match decode_accumulate_init_input(init_input) {{ Ok(value) => value, Err(_) => return }};
     let mut current = match read_current_commitment() {{ Ok(root) => root, Err(_) => return }};
     let count = unsafe {{ minijam_result_count() }};
     for index in 0..count {{
@@ -208,6 +223,15 @@ fn read_fnencode(input: &[u8], offset: &mut usize) -> Result<u64, ()> {{
     for index in 0..length {{ low |= (*input.get(*offset + index).ok_or(())? as u64) << (8 * index); }}
     *offset += length;
     Ok(((first as u64 & (0x7fu64 >> length)) << (8 * length)) | low)
+}}
+
+fn decode_accumulate_init_input(input: &[u8]) -> Result<(u64, u64, u64), ()> {{
+    let mut offset = 0usize;
+    let tick = read_fnencode(input, &mut offset)?;
+    let sid = read_fnencode(input, &mut offset)?;
+    let items_count = read_fnencode(input, &mut offset)?;
+    if offset != input.len() {{ return Err(()); }}
+    Ok((tick, sid, items_count))
 }}
 
 fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_slice(&code.to_le_bytes()); RefineOutput {{ data: OUTPUT.as_ptr(), size: 4 }} }} }}
@@ -295,7 +319,7 @@ use service_runtime_core::{{ServiceApplication, ServiceKeyV1, StateAccessError}}
 const SERVICE_KEY: ServiceKeyV1 = ServiceKeyV1::new({service_key});
 const SERVICE_INSTANCE_ID: [u8; 32] = {service_instance_id};
 const GENESIS_MANAGEMENT_POLICY: jamscript_runtime_core::ManagementPolicyV1 = {management_policy};
-const GENESIS_HASH: [u8; 32] = {genesis_hash};
+const NETWORK_DOMAIN: [u8; 32] = {genesis_hash};
 const ACTION_SELECTOR: [u8; 8] = {selector};
 
 unsafe extern "C" {{
@@ -452,7 +476,7 @@ fn application_body(
             "let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action).map_err(|_| StateAccessError::Backend)?;",
             &marker("application-auth-decoded"),
             &marker("application-auth-verifying"),
-            "let verified = jamscript_runtime_core::verify_signed_action_v2(signed, GENESIS_HASH, SERVICE_KEY, ACTION_SELECTOR).map_err(|_| StateAccessError::Backend)?;",
+            "let verified = jamscript_runtime_core::verify_signed_action_v2(signed, NETWORK_DOMAIN, SERVICE_KEY, ACTION_SELECTOR).map_err(|_| StateAccessError::Backend)?;",
             &marker("application-auth-verified"),
             "let sender = verified.sender;",
             "let nonce_key = jamscript_runtime_core::nonce_key(&sender);",
@@ -720,6 +744,10 @@ mod tests {
             .nth(1)
             .and_then(|tail| tail.split("struct GeneratedApplication").next())
             .expect("generated accumulate entrypoint");
+        assert!(source.contains("pub extern \"C\" fn minijam_accumulate()"));
+        assert!(!source.contains("minijam_accumulate(init_input"));
+        assert!(accumulate.contains("core::arch::asm!"));
+        assert!(accumulate.contains("decode_accumulate_init_input"));
         assert_eq!(accumulate.matches("minijam_storage_write").count(), 1);
         assert!(!accumulate.contains("nonce_key"));
         assert!(!accumulate.contains("application_key_v1"));
@@ -728,6 +756,69 @@ mod tests {
         assert!(accumulate.contains("authoritative_tick > valid_until"));
         assert!(accumulate.contains("header.parent_root != current"));
         assert!(accumulate.contains("MANAGED_STATE_COMMITMENT_KEY_V1"));
+    }
+
+    #[test]
+    fn accumulate_init_input_fixture_decodes_jambda_transport_and_rejects_malformed() {
+        fn encode_fnencode(value: u64, output: &mut Vec<u8>) {
+            if value < 0x80 {
+                output.push(value as u8);
+                return;
+            }
+            let bytes = value.to_le_bytes();
+            let length = bytes
+                .iter()
+                .rposition(|byte| *byte != 0)
+                .map_or(1, |index| index + 1);
+            output.push((0xffu8 << (8 - length)) | ((value >> (8 * length)) as u8));
+            output.extend_from_slice(&bytes[..length]);
+        }
+
+        fn decode_init_input(input: &[u8]) -> Result<(u64, u64, u64), ()> {
+            fn read(input: &[u8], offset: &mut usize) -> Result<u64, ()> {
+                let first = *input.get(*offset).ok_or(())?;
+                *offset += 1;
+                if first < 0x80 {
+                    return Ok(first as u64);
+                }
+                let mut length = 0usize;
+                while length < 8 && (first & (0x80u8 >> length)) != 0 {
+                    length += 1;
+                }
+                if length == 0 || length > 7 || input.len().saturating_sub(*offset) < length {
+                    return Err(());
+                }
+                let mut low = 0u64;
+                for index in 0..length {
+                    low |= (*input.get(*offset + index).ok_or(())? as u64) << (8 * index);
+                }
+                *offset += length;
+                Ok(((first as u64 & (0x7fu64 >> length)) << (8 * length)) | low)
+            }
+
+            let mut offset = 0;
+            let tick = read(input, &mut offset)?;
+            let service_id = read(input, &mut offset)?;
+            let items_count = read(input, &mut offset)?;
+            if offset != input.len() {
+                return Err(());
+            }
+            Ok((tick, service_id, items_count))
+        }
+
+        let mut init_input = Vec::new();
+        encode_fnencode(42, &mut init_input);
+        encode_fnencode(1000, &mut init_input);
+        encode_fnencode(3, &mut init_input);
+        assert_eq!(decode_init_input(&init_input), Ok((42, 1000, 3)));
+        assert_eq!(
+            decode_init_input(&init_input[..init_input.len() - 1]),
+            Err(())
+        );
+        let mut trailing = init_input.clone();
+        trailing.push(0);
+        assert_eq!(decode_init_input(&trailing), Err(()));
+        assert_eq!(decode_init_input(&[0x80]), Err(()));
     }
 
     #[test]

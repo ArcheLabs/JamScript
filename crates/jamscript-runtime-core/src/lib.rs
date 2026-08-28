@@ -822,15 +822,25 @@ mod tests {
 
     #[test]
     fn management_envelope_round_trips() {
-        let envelope = ManagementEnvelopeV1 {
+        use jamscript_crypto::SR25519_CONTEXT;
+        use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
+
+        let keypair = MiniSecretKey::from_bytes(&[12; 32])
+            .unwrap()
+            .expand_to_keypair(ExpansionMode::Ed25519);
+        let mut envelope = ManagementEnvelopeV1 {
             instance_id: [1; 32],
             nonce: 7,
             action: ManagementActionV1::SetPolicy {
                 new_policy: ManagementPolicyV1::Key { account: [2; 32] },
             },
-            signer: [2; 32],
-            signature: &[3; 64],
+            signer: keypair.public.to_bytes(),
+            signature: &[],
         };
+        let digest = envelope.signing_digest(&[9; 32]);
+        let signature = keypair.sign(signing_context(SR25519_CONTEXT).bytes(&digest));
+        let signature_bytes = signature.to_bytes();
+        envelope.signature = &signature_bytes;
         let mut encoded = alloc::vec::Vec::new();
         envelope.encode(&mut encoded);
         let decoded = ManagementEnvelopeV1::decode(&encoded).unwrap();
@@ -845,7 +855,9 @@ mod tests {
                 &[9; 32],
                 [1; 32],
                 7,
-                ManagementPolicyV1::Key { account: [2; 32] },
+                ManagementPolicyV1::Key {
+                    account: keypair.public.to_bytes(),
+                },
             )
             .unwrap(),
             envelope.action

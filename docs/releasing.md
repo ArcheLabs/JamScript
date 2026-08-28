@@ -18,6 +18,12 @@ The v0 release freezes `SignedActionV2`, the generated ABI/state descriptors, Po
 contains `protocol-v0.json` and `checksums.json`; `jamscript inspect <bundle>` verifies every
 listed artifact before displaying its metadata.
 
+MiniJamSpec compatibility is an execution-boundary property. JamScript does
+not target JAM FullSpec directly and does not embed MiniJamSpec constants. It
+targets the MiniJAM ABI and network identity. Every release must use the exact
+MiniJAM revision in `toolchains/minijam.lock`, and the generated bundle must
+record the matching MiniJAM SDK and converter revisions.
+
 The Builder/Provider process is deployed per Service. It statically compiles the generated host
 application and the same native C sources used by the PVM Service. Loading arbitrary native
 libraries into a shared daemon is not supported.

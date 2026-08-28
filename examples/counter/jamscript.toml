@@ -5,5 +5,7 @@ entry = "src/service.ts"
 language = "0.1"
 
 [target.minijam]
+# Legacy deployment/routing field only; SignedActionV2 uses ServiceKey.
 service_id = 1000
+# Legacy manifest spelling for the network domain.
 genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"

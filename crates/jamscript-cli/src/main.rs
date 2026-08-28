@@ -106,8 +106,11 @@ struct Target {
 #[serde(deny_unknown_fields)]
 struct MiniJamConfig {
     sdk_root: Option<String>,
+    /// Legacy deployment/routing identifier. It is never embedded in
+    /// SignedActionV2 or generated Service identity.
     #[allow(dead_code)]
     service_id: Option<u32>,
+    /// Legacy manifest spelling for the network domain (genesis hash).
     genesis_hash: Option<String>,
 }
 

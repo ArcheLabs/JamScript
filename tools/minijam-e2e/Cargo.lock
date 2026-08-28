@@ -1688,8 +1688,6 @@ dependencies = [
  "jp-vm-engine",
  "jp-vm-primitives",
  "log",
- "minijam-protocol",
- "parity-scale-codec",
 ]
 
 [[package]]
