@@ -330,6 +330,21 @@ pub struct AbiType {
     pub descriptor: AbiTypeDescriptor,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AbiError {
+    UnsupportedType(String),
+}
+
+impl std::fmt::Display for AbiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedType(name) => write!(formatter, "unsupported ABI type `{name}`"),
+        }
+    }
+}
+
+impl std::error::Error for AbiError {}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AbiTypeDescriptor {
@@ -366,9 +381,11 @@ pub struct AbiVariant {
     pub ty: AbiTypeDescriptor,
 }
 
-impl From<&TypeIr> for AbiTypeDescriptor {
-    fn from(ty: &TypeIr) -> Self {
-        match ty {
+impl TryFrom<&TypeIr> for AbiTypeDescriptor {
+    type Error = AbiError;
+
+    fn try_from(ty: &TypeIr) -> Result<Self, Self::Error> {
+        Ok(match ty {
             TypeIr::Unit => Self::Unit,
             TypeIr::Bool => Self::Bool,
             TypeIr::U8 => Self::U8,
@@ -386,44 +403,48 @@ impl From<&TypeIr> for AbiTypeDescriptor {
             TypeIr::Bytes { max } => Self::Bytes { max: *max },
             TypeIr::String { max } => Self::String { max: *max },
             TypeIr::FixedArray { item, len } => Self::FixedArray {
-                item: Box::new(Self::from(item.as_ref())),
+                item: Box::new(Self::try_from(item.as_ref())?),
                 len: *len,
             },
             TypeIr::Array { item, max } => Self::Array {
-                item: Box::new(Self::from(item.as_ref())),
+                item: Box::new(Self::try_from(item.as_ref())?),
                 max: *max,
             },
             TypeIr::Option { item } => Self::Option {
-                item: Box::new(Self::from(item.as_ref())),
+                item: Box::new(Self::try_from(item.as_ref())?),
             },
             TypeIr::Tuple { items } => Self::Tuple {
-                items: items.iter().map(Self::from).collect(),
+                items: items.iter().map(Self::try_from).collect::<Result<_, _>>()?,
             },
             TypeIr::Record { fields } => Self::Record {
                 fields: fields
                     .iter()
-                    .map(|field| AbiField {
-                        name: field.name.clone(),
-                        ty: Self::from(&field.ty),
+                    .map(|field| {
+                        Ok(AbiField {
+                            name: field.name.clone(),
+                            ty: Self::try_from(&field.ty)?,
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<_, AbiError>>()?,
             },
             TypeIr::Enum { variants } => Self::Enum {
                 variants: variants
                     .iter()
-                    .map(|variant| AbiVariant {
-                        name: variant.name.clone(),
-                        index: variant.index,
-                        ty: Self::from(&variant.ty),
+                    .map(|variant| {
+                        Ok(AbiVariant {
+                            name: variant.name.clone(),
+                            index: variant.index,
+                            ty: Self::try_from(&variant.ty)?,
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<_, AbiError>>()?,
             },
             TypeIr::Result { ok, err } => Self::Result {
-                ok: Box::new(Self::from(ok.as_ref())),
-                err: Box::new(Self::from(err.as_ref())),
+                ok: Box::new(Self::try_from(ok.as_ref())?),
+                err: Box::new(Self::try_from(err.as_ref())?),
             },
-            TypeIr::Unsupported(_) => Self::Unit,
-        }
+            TypeIr::Unsupported(name) => return Err(AbiError::UnsupportedType(name.clone())),
+        })
     }
 }
 
@@ -447,11 +468,11 @@ pub fn selector_hex(selector: [u8; 8]) -> String {
     )
 }
 
-pub fn abi_for(ir: &ServiceIr) -> Abi {
+pub fn abi_for(ir: &ServiceIr) -> Result<Abi, AbiError> {
     abi_for_language(ir, LANGUAGE_VERSION)
 }
 
-pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Abi {
+pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Result<Abi, AbiError> {
     let mut types = std::collections::BTreeMap::new();
     for ty in ir
         .actions
@@ -463,7 +484,7 @@ pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Abi {
                 .flat_map(|state| [&state.key_type, &state.value_type]),
         )
     {
-        collect_abi_types(&mut types, ty);
+        collect_abi_types(&mut types, ty)?;
     }
     types.entry("u64".into()).or_insert_with(|| AbiType {
         kind: "u64".into(),
@@ -478,28 +499,30 @@ pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Abi {
     let actions = ir
         .actions
         .iter()
-        .map(|action| {
+        .map(|action| -> Result<AbiAction, AbiError> {
             let auth = match action.auth {
                 AuthKind::Wallet => "wallet",
                 AuthKind::Public => "public",
             };
-            AbiAction {
+            Ok(AbiAction {
                 name: action.name.clone(),
                 selector: selector_hex(action_selector(&action.name)),
                 auth: auth.into(),
                 input: action
                     .input
                     .iter()
-                    .map(|f| AbiField {
-                        name: f.name.clone(),
-                        ty: AbiTypeDescriptor::from(&f.ty),
+                    .map(|f| {
+                        Ok(AbiField {
+                            name: f.name.clone(),
+                            ty: AbiTypeDescriptor::try_from(&f.ty)?,
+                        })
                     })
-                    .collect(),
-                execute_output: abi_output(action),
-            }
+                    .collect::<Result<Vec<_>, AbiError>>()?,
+                execute_output: abi_output(action)?,
+            })
         })
-        .collect();
-    Abi {
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Abi {
         abi_version: ABI_VERSION,
         language_version: language_version.into(),
         package: AbiPackage {
@@ -510,59 +533,84 @@ pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Abi {
         queries: ir
             .queries
             .iter()
-            .filter_map(|query| {
-                let state = ir.states.iter().find(|state| state.name == query.state)?;
-                Some(AbiQuery {
+            .map(|query| {
+                let state = ir
+                    .states
+                    .iter()
+                    .find(|state| state.name == query.state)
+                    .ok_or_else(|| {
+                        AbiError::UnsupportedType(format!("unknown query state `{}`", query.state))
+                    })?;
+                Ok(AbiQuery {
                     name: query.name.clone(),
                     kind: "state_get".into(),
                     state: state.name.clone(),
-                    key_type: AbiTypeDescriptor::from(&state.key_type),
+                    key_type: AbiTypeDescriptor::try_from(&state.key_type)?,
                     output: AbiQueryOutput {
-                        ty: AbiTypeDescriptor::from(&state.value_type),
+                        ty: AbiTypeDescriptor::try_from(&state.value_type)?,
                         nullable: true,
                     },
                 })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, AbiError>>()?,
         types,
         state: ir
             .states
             .iter()
-            .map(|state| AbiState {
-                name: state.name.clone(),
-                schema: state.schema.clone(),
-                kind: "map".into(),
-                key_type: AbiTypeDescriptor::from(&state.key_type),
-                value_type: AbiTypeDescriptor::from(&state.value_type),
+            .map(|state| -> Result<AbiState, AbiError> {
+                Ok(AbiState {
+                    name: state.name.clone(),
+                    schema: state.schema.clone(),
+                    kind: match state.kind {
+                        StateKind::Scalar => "scalar",
+                        StateKind::Map => "map",
+                    }
+                    .into(),
+                    key_type: AbiTypeDescriptor::try_from(&state.key_type)?,
+                    value_type: AbiTypeDescriptor::try_from(&state.value_type)?,
+                })
             })
-            .collect(),
-    }
+            .collect::<Result<Vec<_>, AbiError>>()?,
+    })
 }
 
-fn collect_abi_types(types: &mut std::collections::BTreeMap<String, AbiType>, ty: &TypeIr) {
+fn collect_abi_types(
+    types: &mut std::collections::BTreeMap<String, AbiType>,
+    ty: &TypeIr,
+) -> Result<(), AbiError> {
     let (kind, max) = abi_kind_max(ty);
+    let descriptor = AbiTypeDescriptor::try_from(ty)?;
     types.entry(ty.abi_name()).or_insert_with(|| AbiType {
         kind: kind.into(),
         max,
-        descriptor: AbiTypeDescriptor::from(ty),
+        descriptor,
     });
     match ty {
         TypeIr::FixedArray { item, .. } | TypeIr::Array { item, .. } | TypeIr::Option { item } => {
-            collect_abi_types(types, item)
+            collect_abi_types(types, item)?
         }
-        TypeIr::Tuple { items } => items.iter().for_each(|item| collect_abi_types(types, item)),
-        TypeIr::Record { fields } => fields
-            .iter()
-            .for_each(|field| collect_abi_types(types, &field.ty)),
-        TypeIr::Enum { variants } => variants
-            .iter()
-            .for_each(|variant| collect_abi_types(types, &variant.ty)),
+        TypeIr::Tuple { items } => {
+            for item in items {
+                collect_abi_types(types, item)?
+            }
+        }
+        TypeIr::Record { fields } => {
+            for field in fields {
+                collect_abi_types(types, &field.ty)?
+            }
+        }
+        TypeIr::Enum { variants } => {
+            for variant in variants {
+                collect_abi_types(types, &variant.ty)?
+            }
+        }
         TypeIr::Result { ok, err } => {
-            collect_abi_types(types, ok);
-            collect_abi_types(types, err);
+            collect_abi_types(types, ok)?;
+            collect_abi_types(types, err)?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn abi_kind_max(ty: &TypeIr) -> (&str, Option<u32>) {
@@ -594,21 +642,25 @@ fn abi_kind_max(ty: &TypeIr) -> (&str, Option<u32>) {
     }
 }
 
-fn abi_output(action: &ActionIr) -> AbiTypeDescriptor {
+fn abi_output(action: &ActionIr) -> Result<AbiTypeDescriptor, AbiError> {
     match &action.body {
         ActionBodyIr::Execute(execute) => match &execute.operation {
             ExecutionOpIr::ReturnInputField { field }
-            | ExecutionOpIr::AddInputField { field, .. } => action
-                .input
-                .iter()
-                .find(|f| f.name == *field)
-                .map(|f| AbiTypeDescriptor::from(&f.ty))
-                .unwrap_or(AbiTypeDescriptor::Unit),
+            | ExecutionOpIr::AddInputField { field, .. } => {
+                let input = action
+                    .input
+                    .iter()
+                    .find(|input| input.name == *field)
+                    .ok_or_else(|| {
+                        AbiError::UnsupportedType(format!("unknown action output field `{field}`"))
+                    })?;
+                AbiTypeDescriptor::try_from(&input.ty)
+            }
             ExecutionOpIr::ReturnInteger { .. } | ExecutionOpIr::NativeBytesToU64 { .. } => {
-                AbiTypeDescriptor::U64
+                Ok(AbiTypeDescriptor::U64)
             }
         },
-        ActionBodyIr::ScriptC { .. } => AbiTypeDescriptor::U64,
+        ActionBodyIr::ScriptC { .. } => Ok(AbiTypeDescriptor::U64),
     }
 }
 
@@ -642,7 +694,8 @@ mod tests {
             }],
             queries: Vec::new(),
             native_imports: Vec::new(),
-        });
+        })
+        .unwrap();
         assert_eq!(
             abi.types.get("Bytes<64>"),
             Some(&AbiType {
@@ -651,5 +704,64 @@ mod tests {
                 descriptor: AbiTypeDescriptor::Bytes { max: 64 },
             })
         );
+    }
+
+    #[test]
+    fn unsupported_types_cannot_cross_abi_boundary() {
+        let ir = ServiceIr {
+            package_name: "future".into(),
+            package_version: "0.1.0".into(),
+            source: String::new(),
+            states: Vec::new(),
+            actions: vec![ActionIr {
+                name: "submit".into(),
+                auth: AuthKind::Wallet,
+                input: vec![FieldIr {
+                    name: "future".into(),
+                    ty: TypeIr::Unsupported("future-type".into()),
+                }],
+                body: ActionBodyIr::Execute(ExecuteIr {
+                    operation: ExecutionOpIr::ReturnInteger { value: 1 },
+                    state_effect: None,
+                }),
+            }],
+            queries: Vec::new(),
+            native_imports: Vec::new(),
+        };
+        assert_eq!(
+            abi_for(&ir),
+            Err(AbiError::UnsupportedType("future-type".into()))
+        );
+    }
+
+    #[test]
+    fn scalar_and_map_states_have_distinct_abi_kinds() {
+        let ir = ServiceIr {
+            package_name: "states".into(),
+            package_version: "0.1.0".into(),
+            source: String::new(),
+            states: vec![
+                StateIr {
+                    name: "config".into(),
+                    schema: "config/v1".into(),
+                    kind: StateKind::Scalar,
+                    key_type: TypeIr::Unit,
+                    value_type: TypeIr::U64,
+                },
+                StateIr {
+                    name: "scores".into(),
+                    schema: "scores/v1".into(),
+                    kind: StateKind::Map,
+                    key_type: TypeIr::Address,
+                    value_type: TypeIr::U64,
+                },
+            ],
+            actions: Vec::new(),
+            queries: Vec::new(),
+            native_imports: Vec::new(),
+        };
+        let abi = abi_for(&ir).unwrap();
+        assert_eq!(abi.state[0].kind, "scalar");
+        assert_eq!(abi.state[1].kind, "map");
     }
 }

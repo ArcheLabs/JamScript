@@ -265,7 +265,7 @@ impl MiniJamTarget {
             abi_for_language(ir, "0.2")
         } else {
             abi_for(ir)
-        };
+        }?;
         fs::write(
             output_dir.join("service.abi.json"),
             serde_json::to_vec_pretty(&abi)?,

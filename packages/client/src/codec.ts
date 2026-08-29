@@ -23,8 +23,8 @@ function readLe(reader: Reader, width: number, signed: boolean): bigint { const 
 
 function descriptor(type: AbiTypeRef): AbiTypeDescriptor {
   if (typeof type !== "string") return type;
-  const bounded = /^(Bytes|string)<([0-9]+)>$/.exec(type); if (bounded) return { kind: bounded[1] === "Bytes" ? "bytes" : "string", max: Number(bounded[2]) };
-  const fixed = /^FixedBytes<([0-9]+)>$/.exec(type); if (fixed) return { kind: "fixedBytes", len: Number(fixed[1]) };
+  const bounded = /^(Bytes|bytes|String|string)<([0-9]+)>$/.exec(type); if (bounded) return { kind: bounded[1].toLowerCase() === "bytes" ? "bytes" : "string", max: Number(bounded[2]) };
+  const fixed = /^(FixedBytes|fixedBytes)<([0-9]+)>$/.exec(type); if (fixed) return { kind: "fixedBytes", len: Number(fixed[2]) };
   if (["unit", "bool", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "address"].includes(type)) return { kind: type as AbiTypeDescriptor["kind"] } as AbiTypeDescriptor;
   throw new Error("unsupported ABI type: " + type);
 }

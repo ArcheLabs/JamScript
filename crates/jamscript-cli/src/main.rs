@@ -143,7 +143,7 @@ fn main() -> Result<()> {
                 abi_for_language(&ir, "0.2")
             } else {
                 abi_for(&ir)
-            };
+            }?;
             println!("{}", serde_json::to_string_pretty(&abi)?);
             Ok(())
         }
@@ -330,7 +330,7 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         abi_for_language(&ir, "0.2")
     } else {
         abi_for(&ir)
-    };
+    }?;
     fs::write(
         output.join("service.abi.json"),
         serde_json::to_vec_pretty(&abi)?,

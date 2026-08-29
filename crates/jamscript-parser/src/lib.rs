@@ -806,9 +806,29 @@ fn parse_state(
     } else {
         key_type.ok_or_else(|| diag("1046", "stateMap requires key"))?
     };
-    value_type
+    let value_max = value_type
         .max_encoded_len()
         .map_err(|error| diag("1055", error))?;
+    if value_max > service_runtime_core::MAX_STATE_VALUE_BYTES {
+        return Err(diag(
+            "1057",
+            format!("state `{name}` maximum encoded value length exceeds Managed State limit"),
+        ));
+    }
+    let key_max = key_type
+        .max_encoded_len()
+        .map_err(|error| diag("1058", error))?;
+    let final_key_max = 1usize
+        .checked_add(2)
+        .and_then(|length| length.checked_add(schema.len()))
+        .and_then(|length| length.checked_add(key_max))
+        .ok_or_else(|| diag("1058", "state key encoded length overflows compiler limits"))?;
+    if final_key_max > service_runtime_core::MAX_STATE_KEY_BYTES {
+        return Err(diag(
+            "1058",
+            format!("state `{name}` maximum encoded key length exceeds Managed State limit"),
+        ));
+    }
     Ok(StateIr {
         name: name.into(),
         schema,
@@ -1058,6 +1078,28 @@ mod tests {
     fn rejects_unbounded_bytes() {
         let source = r#"import { action, wallet, bytes } from "jam"; export const add = action({ auth: wallet(), input: { value: bytes(0) }, execute(ctx, input) { return input.value; } });"#;
         assert!(parse_service(source, "x", "0.1.0").is_err());
+    }
+
+    #[test]
+    fn enforces_managed_state_encoded_limits() {
+        let valid = r#"import { action, wallet, stateMap, string, bytes, address } from "jam"; const x = stateMap({ schema: "x/v1", key: string(32), value: bytes(1024) }); export const set = action({ auth: wallet(), input: { value: bytes(1) }, execute(ctx, input) { return input.value; } });"#;
+        assert!(parse_service(valid, "x", "0.1.0").is_ok());
+
+        let oversized_value = r#"import { action, wallet, stateMap, bytes, address } from "jam"; const x = stateMap({ schema: "x/v1", key: address, value: bytes(65536) }); export const set = action({ auth: wallet(), input: { value: bytes(1) }, execute(ctx, input) { return input.value; } });"#;
+        let error = parse_service(oversized_value, "x", "0.1.0").unwrap_err();
+        assert!(error.to_string().contains("maximum encoded value length"));
+
+        let oversized_key = r#"import { action, wallet, stateMap, fixedBytes, bytes } from "jam"; const x = stateMap({ schema: "x/v1", key: fixedBytes(1000000), value: bytes(1) }); export const set = action({ auth: wallet(), input: { value: bytes(1) }, execute(ctx, input) { return input.value; } });"#;
+        let error = parse_service(oversized_key, "x", "0.1.0").unwrap_err();
+        assert!(error.to_string().contains("maximum encoded key length"));
+    }
+
+    #[test]
+    fn parses_scalar_state_with_empty_unit_key() {
+        let source = r#"import { action, wallet, state, query, u64, bytes } from "jam"; const config = state({ schema: "config/v1", value: u64 }); export const set = action({ auth: wallet(), input: { value: bytes(1) }, execute(ctx, input) { return input.value; } }); export const get = query(config);"#;
+        let ir = parse_service(source, "config", "0.1.0").unwrap();
+        assert_eq!(ir.states[0].kind, StateKind::Scalar);
+        assert_eq!(ir.states[0].key_type, TypeIr::Unit);
     }
 
     #[test]

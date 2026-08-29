@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 jamscript-ir = { path = "../jamscript-ir" }
+service-runtime-core = { path = "../service-runtime-core" }
 swc_common.workspace = true
 swc_ecma_ast.workspace = true
 swc_ecma_parser.workspace = true

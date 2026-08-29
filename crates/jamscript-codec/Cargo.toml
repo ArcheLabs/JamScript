@@ -9,3 +9,5 @@ jamscript-ir = { path = "../jamscript-ir" }
 
 [dev-dependencies]
 jam-codec = { version = "0.1.1", default-features = false }
+hex = "0.4.3"
+serde_json.workspace = true

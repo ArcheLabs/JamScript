@@ -1876,8 +1876,10 @@ dependencies = [
 name = "jamscript-codec"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "jam-codec",
  "jamscript-ir",
+ "serde_json",
 ]
 
 [[package]]
@@ -1910,6 +1912,7 @@ name = "jamscript-parser"
 version = "0.1.0"
 dependencies = [
  "jamscript-ir",
+ "service-runtime-core",
  "swc_common",
  "swc_ecma_ast",
  "swc_ecma_parser",

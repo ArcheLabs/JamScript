@@ -19,9 +19,10 @@ natural encoding followed by the bytes; `N` is validation-only. Fixed bytes,
 addresses, fixed arrays, tuples and records have no length/name metadata on the
 wire. Options, results and enums use their one-byte variant tag.
 
-The shared vectors are in `test-vectors/abi-codec/`. Decoders must consume the
-complete value and reject malformed UTF-8, invalid tags, out-of-bound values,
-and trailing bytes.
+The shared vectors under `test-vectors/abi-codec/` are normative ABI
+conformance vectors and are consumed by both the Rust codec and TypeScript
+client test suites. Decoders must consume the complete value and reject
+malformed UTF-8, invalid tags, out-of-bound values, and trailing bytes.
 
 ## Compatibility identity
 
@@ -34,6 +35,18 @@ runtime never silently rewrites existing managed state.
 
 The Rust `jamscript-codec` crate cross-checks JAM natural encoding against
 `jam-codec 0.1.1`. The TypeScript client accepts both generated descriptors and
-legacy string references while encoding new values with the canonical rules.
+legacy primitive references while encoding new values with the canonical rules.
 The release gate additionally requires the workspace tests and client tests to
-pass; a live MiniJAM node is required for the final wallet-to-proof E2E.
+pass.
+
+## Current conformance status
+
+- ABI foundation conformance: PASS after this hardening round.
+- Runtime execution conformance: BLOCKED by the upcoming ScriptC typed
+  ABI/state bridge.
+- Live MiniJAM conformance: BLOCKED; it requires typed ScriptC execution and a
+  live node.
+
+The `examples/jns` and `examples/typed-state` directories currently serve as
+language/ABI conformance fixtures. They are accepted by parser and ABI checks,
+but full execution requires the upcoming ScriptC typed runtime/state bridge.

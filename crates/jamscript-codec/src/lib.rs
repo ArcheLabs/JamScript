@@ -66,14 +66,8 @@ pub fn max_encoded_len(ty: &TypeIr) -> Result<usize, CodecError> {
         .map_err(|_| CodecError::UnsupportedType)
 }
 
-pub fn encode_natural(value: u128) -> Vec<u8> {
-    if value <= u64::MAX as u128 {
-        encode_natural_u64(value as u64)
-    } else {
-        let mut out = encode_natural_u64(value as u64);
-        out.extend(encode_natural_u64((value >> 64) as u64));
-        out
-    }
+pub fn encode_natural(value: u64) -> Vec<u8> {
+    encode_natural_u64(value)
 }
 
 fn encode_natural_u64(value: u64) -> Vec<u8> {
@@ -83,7 +77,7 @@ fn encode_natural_u64(value: u64) -> Vec<u8> {
     if value < (1 << 56) {
         let extra = ((64 - value.leading_zeros()) as usize - 1) / 7;
         let mut out = vec![(256u16 - (1u16 << (8 - extra))) as u8 | ((value >> (8 * extra)) as u8)];
-        out.extend_from_slice(&(value as u64).to_le_bytes()[..extra]);
+        out.extend_from_slice(&value.to_le_bytes()[..extra]);
         return out;
     }
     let mut out = vec![0xff];
@@ -121,14 +115,18 @@ fn encode_into(ty: &TypeIr, value: &Value, out: &mut Vec<u8>) -> Result<(), Code
             if value.len() > *max as usize {
                 return Err(CodecError::BoundExceeded);
             }
-            out.extend(encode_natural(value.len() as u128));
+            out.extend(encode_natural(
+                u64::try_from(value.len()).map_err(|_| CodecError::OutOfRange)?,
+            ));
             out.extend(value);
         }
         (TypeIr::String { max }, Value::String(value)) => {
             if value.len() > *max as usize {
                 return Err(CodecError::BoundExceeded);
             }
-            out.extend(encode_natural(value.len() as u128));
+            out.extend(encode_natural(
+                u64::try_from(value.len()).map_err(|_| CodecError::OutOfRange)?,
+            ));
             out.extend(value.as_bytes());
         }
         (TypeIr::FixedArray { item, len }, Value::Array(values))
@@ -142,7 +140,9 @@ fn encode_into(ty: &TypeIr, value: &Value, out: &mut Vec<u8>) -> Result<(), Code
             if values.len() > *max as usize {
                 return Err(CodecError::BoundExceeded);
             }
-            out.extend(encode_natural(values.len() as u128));
+            out.extend(encode_natural(
+                u64::try_from(values.len()).map_err(|_| CodecError::OutOfRange)?,
+            ));
             for value in values {
                 encode_into(item, value, out)?;
             }
@@ -241,10 +241,10 @@ impl<'a> Reader<'a> {
     fn u8(&mut self) -> Result<u8, CodecError> {
         Ok(self.take(1)?[0])
     }
-    fn natural(&mut self) -> Result<u128, CodecError> {
+    fn natural(&mut self) -> Result<u64, CodecError> {
         let first = self.u8()?;
         if first < 0x80 {
-            return Ok(first as u128);
+            return Ok(first as u64);
         }
         let extra = first.leading_ones() as usize;
         if extra == 8 {
@@ -252,11 +252,11 @@ impl<'a> Reader<'a> {
                 self.take(8)?
                     .try_into()
                     .map_err(|_| CodecError::InvalidLength)?,
-            ) as u128);
+            ));
         }
         let mut low = [0u8; 8];
         low[..extra].copy_from_slice(self.take(extra)?);
-        Ok(u64::from_le_bytes(low) as u128 | (((first & (0x7f >> extra)) as u128) << (8 * extra)))
+        Ok(u64::from_le_bytes(low) | (((first & (0x7f >> extra)) as u64) << (8 * extra)))
     }
 }
 
@@ -297,14 +297,14 @@ fn decode_from(ty: &TypeIr, reader: &mut Reader<'_>) -> Result<Value, CodecError
         TypeIr::Address => Ok(Value::Bytes(reader.take(32)?.to_vec())),
         TypeIr::FixedBytes { len } => Ok(Value::Bytes(reader.take(*len as usize)?.to_vec())),
         TypeIr::Bytes { max } => {
-            let len = reader.natural()? as usize;
+            let len = usize::try_from(reader.natural()?).map_err(|_| CodecError::InvalidLength)?;
             if len > *max as usize {
                 return Err(CodecError::BoundExceeded);
             }
             Ok(Value::Bytes(reader.take(len)?.to_vec()))
         }
         TypeIr::String { max } => {
-            let len = reader.natural()? as usize;
+            let len = usize::try_from(reader.natural()?).map_err(|_| CodecError::InvalidLength)?;
             if len > *max as usize {
                 return Err(CodecError::BoundExceeded);
             }
@@ -320,9 +320,10 @@ fn decode_from(ty: &TypeIr, reader: &mut Reader<'_>) -> Result<Value, CodecError
         )),
         TypeIr::Array { item, max } => {
             let len = reader.natural()?;
-            if len > *max as u128 {
+            if len > *max as u64 {
                 return Err(CodecError::BoundExceeded);
             }
+            let len = usize::try_from(len).map_err(|_| CodecError::InvalidLength)?;
             Ok(Value::Array(
                 (0..len)
                     .map(|_| decode_from(item, reader))
@@ -371,17 +372,62 @@ mod tests {
     use super::*;
     use jam_codec::Encode;
     use jamscript_ir::{FieldIr, TypeIr};
+    use serde_json::Value as JsonValue;
 
     #[test]
     fn natural_and_vec_match_jam_codec() {
-        for value in [0u32, 63, 64, 16_383, 16_384, u32::MAX] {
-            let ours = encode_natural(value as u128);
-            assert_eq!(ours, jam_codec::Compact(value).encode());
-            let ty = TypeIr::Bytes { max: u32::MAX };
-            assert_eq!(
-                encode(&ty, &Value::Bytes(Vec::new())).unwrap(),
-                jam_codec::Compact(0u32).encode()
-            );
+        let values = [
+            0,
+            1,
+            127,
+            128,
+            255,
+            256,
+            (1u64 << 14) - 1,
+            1u64 << 14,
+            (1u64 << 21) - 1,
+            1u64 << 21,
+            (1u64 << 28) - 1,
+            1u64 << 28,
+            (1u64 << 35) - 1,
+            1u64 << 35,
+            (1u64 << 42) - 1,
+            1u64 << 42,
+            (1u64 << 49) - 1,
+            1u64 << 49,
+            (1u64 << 56) - 1,
+            1u64 << 56,
+            u64::MAX,
+        ];
+        for value in values {
+            assert_eq!(encode_natural(value), jam_codec::Compact(value).encode());
+        }
+    }
+
+    #[test]
+    fn sequence_boundaries_round_trip_with_u64_natural() {
+        for len in [0usize, 1, 127, 128, 255, 256, 16_383, 16_384] {
+            let prefix = jam_codec::Compact(len as u64).encode();
+            let bytes_type = TypeIr::Bytes { max: 16_384 };
+            let bytes_value = Value::Bytes(vec![0xaa; len]);
+            let encoded = encode(&bytes_type, &bytes_value).unwrap();
+            assert_eq!(&encoded[..prefix.len()], prefix.as_slice());
+            assert_eq!(decode(&bytes_type, &encoded).unwrap(), bytes_value);
+
+            let string_type = TypeIr::String { max: 16_384 };
+            let string_value = Value::String("a".repeat(len));
+            let encoded = encode(&string_type, &string_value).unwrap();
+            assert_eq!(&encoded[..prefix.len()], prefix.as_slice());
+            assert_eq!(decode(&string_type, &encoded).unwrap(), string_value);
+
+            let array_type = TypeIr::Array {
+                item: Box::new(TypeIr::U8),
+                max: 16_384,
+            };
+            let array_value = Value::Array(vec![Value::Unsigned(0); len]);
+            let encoded = encode(&array_type, &array_value).unwrap();
+            assert_eq!(&encoded[..prefix.len()], prefix.as_slice());
+            assert_eq!(decode(&array_type, &encoded).unwrap(), array_value);
         }
     }
 
@@ -407,5 +453,224 @@ mod tests {
             ("xs".into(), Value::Array(vec![Value::Unsigned(7)])),
         ]);
         assert_eq!(decode(&ty, &encode(&ty, &value).unwrap()).unwrap(), value);
+    }
+
+    fn type_from_json(value: &JsonValue) -> TypeIr {
+        let object = value.as_object().unwrap();
+        let kind = object.get("kind").unwrap().as_str().unwrap();
+        match kind {
+            "unit" => TypeIr::Unit,
+            "bool" => TypeIr::Bool,
+            "u8" => TypeIr::U8,
+            "u16" => TypeIr::U16,
+            "u32" => TypeIr::U32,
+            "u64" => TypeIr::U64,
+            "u128" => TypeIr::U128,
+            "i8" => TypeIr::I8,
+            "i16" => TypeIr::I16,
+            "i32" => TypeIr::I32,
+            "i64" => TypeIr::I64,
+            "i128" => TypeIr::I128,
+            "address" => TypeIr::Address,
+            "fixedBytes" => TypeIr::FixedBytes {
+                len: object["len"].as_u64().unwrap() as u32,
+            },
+            "bytes" => TypeIr::Bytes {
+                max: object["max"].as_u64().unwrap() as u32,
+            },
+            "string" => TypeIr::String {
+                max: object["max"].as_u64().unwrap() as u32,
+            },
+            "fixedArray" => TypeIr::FixedArray {
+                item: Box::new(type_from_json(&object["item"])),
+                len: object["len"].as_u64().unwrap() as u32,
+            },
+            "array" => TypeIr::Array {
+                item: Box::new(type_from_json(&object["item"])),
+                max: object["max"].as_u64().unwrap() as u32,
+            },
+            "option" => TypeIr::Option {
+                item: Box::new(type_from_json(&object["item"])),
+            },
+            "tuple" => TypeIr::Tuple {
+                items: object["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(type_from_json)
+                    .collect(),
+            },
+            "record" => TypeIr::Record {
+                fields: object["fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|field| FieldIr {
+                        name: field["name"].as_str().unwrap().into(),
+                        ty: type_from_json(&field["type"]),
+                    })
+                    .collect(),
+            },
+            "enum" => TypeIr::Enum {
+                variants: object["variants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|variant| jamscript_ir::VariantIr {
+                        name: variant["name"].as_str().unwrap().into(),
+                        index: variant["index"].as_u64().unwrap() as u8,
+                        ty: type_from_json(&variant["type"]),
+                    })
+                    .collect(),
+            },
+            "result" => TypeIr::Result {
+                ok: Box::new(type_from_json(&object["ok"])),
+                err: Box::new(type_from_json(&object["err"])),
+            },
+            _ => panic!("unknown vector type {kind}"),
+        }
+    }
+
+    fn value_from_json(ty: &TypeIr, value: &JsonValue) -> Value {
+        match ty {
+            TypeIr::Unit => Value::Unit,
+            TypeIr::Bool => Value::Bool(value.as_bool().unwrap()),
+            TypeIr::U8 | TypeIr::U16 | TypeIr::U32 | TypeIr::U64 | TypeIr::U128 => Value::Unsigned(
+                value
+                    .as_u64()
+                    .map(u128::from)
+                    .unwrap_or_else(|| value.as_str().unwrap().parse().unwrap()),
+            ),
+            TypeIr::I8 | TypeIr::I16 | TypeIr::I32 | TypeIr::I64 | TypeIr::I128 => Value::Signed(
+                value
+                    .as_i64()
+                    .map(i128::from)
+                    .unwrap_or_else(|| value.as_str().unwrap().parse().unwrap()),
+            ),
+            TypeIr::Address | TypeIr::FixedBytes { .. } | TypeIr::Bytes { .. } => {
+                Value::Bytes(hex::decode(value.as_str().unwrap()).unwrap())
+            }
+            TypeIr::String { .. } => Value::String(value.as_str().unwrap().into()),
+            TypeIr::FixedArray { item, .. } | TypeIr::Array { item, .. } => Value::Array(
+                value
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value_from_json(item, value))
+                    .collect(),
+            ),
+            TypeIr::Option { item } => match value {
+                JsonValue::Null => Value::Option(None),
+                value => Value::Option(Some(Box::new(value_from_json(item, value)))),
+            },
+            TypeIr::Tuple { items } => Value::Tuple(
+                items
+                    .iter()
+                    .zip(value.as_array().unwrap())
+                    .map(|(ty, value)| value_from_json(ty, value))
+                    .collect(),
+            ),
+            TypeIr::Record { fields } => Value::Record(
+                fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name.clone(),
+                            value_from_json(&field.ty, &value[&field.name]),
+                        )
+                    })
+                    .collect(),
+            ),
+            TypeIr::Enum { variants } => {
+                let index = value["index"].as_u64().unwrap() as u8;
+                let variant = variants
+                    .iter()
+                    .find(|variant| variant.index == index)
+                    .unwrap();
+                Value::Enum {
+                    index,
+                    value: Box::new(value_from_json(&variant.ty, &value["value"])),
+                }
+            }
+            TypeIr::Result { ok, err } => {
+                if let Some(value) = value.get("ok") {
+                    Value::Result(Ok(Box::new(value_from_json(ok, value))))
+                } else {
+                    Value::Result(Err(Box::new(value_from_json(err, &value["err"]))))
+                }
+            }
+            TypeIr::Unsupported(_) => panic!("unsupported vector type"),
+        }
+    }
+
+    #[test]
+    fn shared_vectors_are_normative_codec_inputs() {
+        for source in [
+            include_str!("../../../test-vectors/abi-codec/primitives.json"),
+            include_str!("../../../test-vectors/abi-codec/composites.json"),
+        ] {
+            for vector in serde_json::from_str::<Vec<JsonValue>>(source).unwrap() {
+                let ty = type_from_json(&vector["type"]);
+                let value = value_from_json(&ty, &vector["value"]);
+                let expected = hex::decode(vector["encodedHex"].as_str().unwrap()).unwrap();
+                assert_eq!(encode(&ty, &value).unwrap(), expected);
+                assert_eq!(decode(&ty, &expected).unwrap(), value);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_values_are_rejected() {
+        assert_eq!(decode(&TypeIr::Bool, &[2]), Err(CodecError::InvalidBool));
+        assert_eq!(
+            decode(
+                &TypeIr::Option {
+                    item: Box::new(TypeIr::U8)
+                },
+                &[2]
+            ),
+            Err(CodecError::InvalidVariant)
+        );
+        assert_eq!(
+            decode(
+                &TypeIr::Enum {
+                    variants: vec![jamscript_ir::VariantIr {
+                        name: "Only".into(),
+                        index: 0,
+                        ty: TypeIr::Unit
+                    }]
+                },
+                &[1]
+            ),
+            Err(CodecError::InvalidVariant)
+        );
+        assert_eq!(
+            decode(
+                &TypeIr::Result {
+                    ok: Box::new(TypeIr::Unit),
+                    err: Box::new(TypeIr::Unit)
+                },
+                &[2]
+            ),
+            Err(CodecError::InvalidVariant)
+        );
+        assert_eq!(decode(&TypeIr::U32, &[0]), Err(CodecError::UnexpectedEof));
+        assert_eq!(
+            decode(&TypeIr::String { max: 4 }, &[1, 0xff]),
+            Err(CodecError::InvalidUtf8)
+        );
+        assert_eq!(decode(&TypeIr::U8, &[0, 1]), Err(CodecError::TrailingBytes));
+        assert_eq!(
+            encode(&TypeIr::Bytes { max: 1 }, &Value::Bytes(vec![1, 2])),
+            Err(CodecError::BoundExceeded)
+        );
+        assert_eq!(
+            encode(&TypeIr::FixedBytes { len: 2 }, &Value::Bytes(vec![1])),
+            Err(CodecError::InvalidLength)
+        );
+        assert_eq!(
+            encode(&TypeIr::Address, &Value::Bytes(vec![0; 31])),
+            Err(CodecError::InvalidLength)
+        );
     }
 }
