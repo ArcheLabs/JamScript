@@ -1873,6 +1873,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jamscript-codec"
+version = "0.1.0"
+dependencies = [
+ "jam-codec",
+ "jamscript-ir",
+]
+
+[[package]]
 name = "jamscript-codegen-rust"
 version = "0.1.0"
 dependencies = [

@@ -1,5 +1,5 @@
 import { actionByName, queryByName, stateByName, type DeploymentDescriptor } from "./abi.js";
-import { decodeStateValue, decodeValue, encodeActionPayload, type CodecValue } from "./codec.js";
+import { decodeStateValue, decodeValue, encodeActionPayload, encodeValue, type CodecValue } from "./codec.js";
 import {
   actionSelector,
   encodeSignedActionV2,
@@ -121,18 +121,19 @@ export class JamScriptClient {
     }
   }
 
-  async queryLatest(queryName: string, key: Uint8Array): Promise<QueryResult> {
+  async queryLatest(queryName: string, key?: CodecValue): Promise<QueryResult> {
     const query = queryByName(this.deployment.abi, queryName);
     const state = stateByName(this.deployment.abi, query.state);
-    if (query.keyType !== "address" || state.keyType !== "address" || key.length !== 32) {
-      throw new Error("managed-state queries require a 32-byte address key");
-    }
+    const keyBytes = isUnitType(state.keyType)
+      ? new Uint8Array()
+      : encodeValue(state.keyType, key === undefined ? null : key);
+    if (JSON.stringify(query.keyType) !== JSON.stringify(state.keyType)) throw new Error("query key type does not match state key type");
     const context = await this.rpc.finalizedContext();
     const root = await this.managedStateRoot(context);
     const valueBytes = await this.readManagedValue(
       context,
       root,
-      stateKey(state.schema, key),
+      stateKey(state.schema, keyBytes),
     );
     return {
       value: valueBytes === null
@@ -143,7 +144,7 @@ export class JamScriptClient {
     };
   }
 
-  async query(queryName: string, key: Uint8Array): Promise<QueryResult> {
+  async query(queryName: string, key?: CodecValue): Promise<QueryResult> {
     return this.queryLatest(queryName, key);
   }
 
@@ -218,6 +219,10 @@ export class JamScriptClient {
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }
+}
+
+function isUnitType(type: string | { kind: string }): boolean {
+  return typeof type === "string" ? type === "unit" : type.kind === "unit";
 }
 
 function blake2(bytes: Uint8Array): Uint8Array {

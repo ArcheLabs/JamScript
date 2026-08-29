@@ -33,13 +33,15 @@ pub struct ActionIr {
 pub struct StateIr {
     pub name: String,
     pub schema: String,
-    pub key_type: StateKeyType,
+    pub kind: StateKind,
+    pub key_type: TypeIr,
     pub value_type: TypeIr,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum StateKeyType {
-    Address,
+pub enum StateKind {
+    Scalar,
+    Map,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -111,27 +113,150 @@ pub struct FieldIr {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TypeIr {
+    Unit,
+    U8,
+    U16,
     U64,
-    Address,
     U32,
     U128,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
     Bool,
+    Address,
+    FixedBytes { len: u32 },
     Bytes { max: u32 },
     String { max: u32 },
+    FixedArray { item: Box<TypeIr>, len: u32 },
+    Array { item: Box<TypeIr>, max: u32 },
+    Option { item: Box<TypeIr> },
+    Tuple { items: Vec<TypeIr> },
+    Record { fields: Vec<FieldIr> },
+    Enum { variants: Vec<VariantIr> },
+    Result { ok: Box<TypeIr>, err: Box<TypeIr> },
     Unsupported(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VariantIr {
+    pub name: String,
+    pub index: u8,
+    pub ty: TypeIr,
 }
 
 impl TypeIr {
     pub fn abi_name(&self) -> String {
         match self {
+            Self::Unit => "unit".into(),
+            Self::U8 => "u8".into(),
+            Self::U16 => "u16".into(),
             Self::U64 => "u64".into(),
-            Self::Address => "address".into(),
             Self::U32 => "u32".into(),
             Self::U128 => "u128".into(),
+            Self::I8 => "i8".into(),
+            Self::I16 => "i16".into(),
+            Self::I32 => "i32".into(),
+            Self::I64 => "i64".into(),
+            Self::I128 => "i128".into(),
             Self::Bool => "bool".into(),
+            Self::Address => "address".into(),
+            Self::FixedBytes { len } => format!("FixedBytes<{len}>"),
             Self::Bytes { max } => format!("Bytes<{max}>"),
             Self::String { max } => format!("String<{max}>"),
+            Self::FixedArray { item, len } => format!("FixedArray<{}, {len}>", item.abi_name()),
+            Self::Array { item, max } => format!("Array<{}, {max}>", item.abi_name()),
+            Self::Option { item } => format!("Option<{}>", item.abi_name()),
+            Self::Tuple { items } => format!(
+                "Tuple<{}>",
+                items
+                    .iter()
+                    .map(TypeIr::abi_name)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::Record { fields } => format!(
+                "Record<{}>",
+                fields
+                    .iter()
+                    .map(|field| format!("{}:{}", field.name, field.ty.abi_name()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::Enum { variants } => format!(
+                "Enum<{}>",
+                variants
+                    .iter()
+                    .map(|variant| format!(
+                        "{}={}:{}",
+                        variant.name,
+                        variant.index,
+                        variant.ty.abi_name()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::Result { ok, err } => format!("Result<{},{}>", ok.abi_name(), err.abi_name()),
             Self::Unsupported(name) => name.clone(),
+        }
+    }
+
+    /// Maximum canonical JAM encoding length.  A bounded dynamic value uses
+    /// the same general-natural prefix as `jam_codec::Compact`.
+    pub fn max_encoded_len(&self) -> Result<usize, &'static str> {
+        fn add(left: usize, right: usize) -> Result<usize, &'static str> {
+            left.checked_add(right).ok_or("encoded length overflow")
+        }
+        fn mul(left: usize, right: usize) -> Result<usize, &'static str> {
+            left.checked_mul(right).ok_or("encoded length overflow")
+        }
+        fn compact_len(value: u128) -> usize {
+            if value <= u64::MAX as u128 {
+                let value = value as u64;
+                if value < (1u64 << 56) {
+                    1 + if value == 0 {
+                        0
+                    } else {
+                        ((64 - value.leading_zeros()) as usize - 1) / 7
+                    }
+                } else {
+                    9
+                }
+            } else {
+                compact_len(value & u64::MAX as u128) + compact_len(value >> 64)
+            }
+        }
+        match self {
+            Self::Unit => Ok(0),
+            Self::U8 | Self::I8 | Self::Bool => Ok(1),
+            Self::U16 | Self::I16 => Ok(2),
+            Self::U32 | Self::I32 => Ok(4),
+            Self::U64 | Self::I64 => Ok(8),
+            Self::U128 | Self::I128 => Ok(16),
+            Self::Address => Ok(32),
+            Self::FixedBytes { len } => Ok(*len as usize),
+            Self::Bytes { max } | Self::String { max } => {
+                add(compact_len(*max as u128), *max as usize)
+            }
+            Self::FixedArray { item, len } => mul(item.max_encoded_len()?, *len as usize),
+            Self::Array { item, max } => add(
+                compact_len(*max as u128),
+                mul(item.max_encoded_len()?, *max as usize)?,
+            ),
+            Self::Option { item } => add(1, item.max_encoded_len()?),
+            Self::Tuple { items } => items
+                .iter()
+                .try_fold(0, |total, item| add(total, item.max_encoded_len()?)),
+            Self::Record { fields } => fields
+                .iter()
+                .try_fold(0, |total, field| add(total, field.ty.max_encoded_len()?)),
+            Self::Enum { variants } => variants
+                .iter()
+                .map(|variant| variant.ty.max_encoded_len())
+                .try_fold(1usize, |max, value| Ok(max.max(1 + value?))),
+            Self::Result { ok, err } => Ok(1 + ok.max_encoded_len()?.max(err.max_encoded_len()?)),
+            Self::Unsupported(_) => Err("unsupported ABI type"),
         }
     }
 }
@@ -160,14 +285,14 @@ pub struct AbiAction {
     pub auth: String,
     pub input: Vec<AbiField>,
     #[serde(rename = "executeOutput")]
-    pub execute_output: String,
+    pub execute_output: AbiTypeDescriptor,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AbiField {
     pub name: String,
     #[serde(rename = "type")]
-    pub ty: String,
+    pub ty: AbiTypeDescriptor,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -176,9 +301,9 @@ pub struct AbiState {
     pub schema: String,
     pub kind: String,
     #[serde(rename = "keyType")]
-    pub key_type: String,
+    pub key_type: AbiTypeDescriptor,
     #[serde(rename = "valueType")]
-    pub value_type: String,
+    pub value_type: AbiTypeDescriptor,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -187,14 +312,14 @@ pub struct AbiQuery {
     pub kind: String,
     pub state: String,
     #[serde(rename = "keyType")]
-    pub key_type: String,
+    pub key_type: AbiTypeDescriptor,
     pub output: AbiQueryOutput,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AbiQueryOutput {
     #[serde(rename = "type")]
-    pub ty: String,
+    pub ty: AbiTypeDescriptor,
     pub nullable: bool,
 }
 
@@ -202,6 +327,104 @@ pub struct AbiQueryOutput {
 pub struct AbiType {
     pub kind: String,
     pub max: Option<u32>,
+    pub descriptor: AbiTypeDescriptor,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AbiTypeDescriptor {
+    Unit,
+    Bool,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Address,
+    FixedBytes { len: u32 },
+    Bytes { max: u32 },
+    String { max: u32 },
+    FixedArray { item: Box<Self>, len: u32 },
+    Array { item: Box<Self>, max: u32 },
+    Option { item: Box<Self> },
+    Tuple { items: Vec<Self> },
+    Record { fields: Vec<AbiField> },
+    Enum { variants: Vec<AbiVariant> },
+    Result { ok: Box<Self>, err: Box<Self> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AbiVariant {
+    pub name: String,
+    pub index: u8,
+    #[serde(rename = "type")]
+    pub ty: AbiTypeDescriptor,
+}
+
+impl From<&TypeIr> for AbiTypeDescriptor {
+    fn from(ty: &TypeIr) -> Self {
+        match ty {
+            TypeIr::Unit => Self::Unit,
+            TypeIr::Bool => Self::Bool,
+            TypeIr::U8 => Self::U8,
+            TypeIr::U16 => Self::U16,
+            TypeIr::U32 => Self::U32,
+            TypeIr::U64 => Self::U64,
+            TypeIr::U128 => Self::U128,
+            TypeIr::I8 => Self::I8,
+            TypeIr::I16 => Self::I16,
+            TypeIr::I32 => Self::I32,
+            TypeIr::I64 => Self::I64,
+            TypeIr::I128 => Self::I128,
+            TypeIr::Address => Self::Address,
+            TypeIr::FixedBytes { len } => Self::FixedBytes { len: *len },
+            TypeIr::Bytes { max } => Self::Bytes { max: *max },
+            TypeIr::String { max } => Self::String { max: *max },
+            TypeIr::FixedArray { item, len } => Self::FixedArray {
+                item: Box::new(Self::from(item.as_ref())),
+                len: *len,
+            },
+            TypeIr::Array { item, max } => Self::Array {
+                item: Box::new(Self::from(item.as_ref())),
+                max: *max,
+            },
+            TypeIr::Option { item } => Self::Option {
+                item: Box::new(Self::from(item.as_ref())),
+            },
+            TypeIr::Tuple { items } => Self::Tuple {
+                items: items.iter().map(Self::from).collect(),
+            },
+            TypeIr::Record { fields } => Self::Record {
+                fields: fields
+                    .iter()
+                    .map(|field| AbiField {
+                        name: field.name.clone(),
+                        ty: Self::from(&field.ty),
+                    })
+                    .collect(),
+            },
+            TypeIr::Enum { variants } => Self::Enum {
+                variants: variants
+                    .iter()
+                    .map(|variant| AbiVariant {
+                        name: variant.name.clone(),
+                        index: variant.index,
+                        ty: Self::from(&variant.ty),
+                    })
+                    .collect(),
+            },
+            TypeIr::Result { ok, err } => Self::Result {
+                ok: Box::new(Self::from(ok.as_ref())),
+                err: Box::new(Self::from(err.as_ref())),
+            },
+            TypeIr::Unsupported(_) => Self::Unit,
+        }
+    }
 }
 
 pub fn action_selector(name: &str) -> [u8; 8] {
@@ -234,30 +457,23 @@ pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Abi {
         .actions
         .iter()
         .flat_map(|action| action.input.iter().map(|field| &field.ty))
-        .chain(ir.states.iter().map(|state| &state.value_type))
+        .chain(
+            ir.states
+                .iter()
+                .flat_map(|state| [&state.key_type, &state.value_type]),
+        )
     {
-        let (kind, max) = match ty {
-            TypeIr::U64 => ("u64", None),
-            TypeIr::Address => ("address", Some(32)),
-            TypeIr::U32 => ("u32", None),
-            TypeIr::U128 => ("u128", None),
-            TypeIr::Bool => ("bool", None),
-            TypeIr::Bytes { max } => ("bytes", Some(*max)),
-            TypeIr::String { max } => ("string", Some(*max)),
-            TypeIr::Unsupported(name) => (name.as_str(), None),
-        };
-        types.entry(ty.abi_name()).or_insert_with(|| AbiType {
-            kind: kind.into(),
-            max,
-        });
+        collect_abi_types(&mut types, ty);
     }
     types.entry("u64".into()).or_insert_with(|| AbiType {
         kind: "u64".into(),
         max: None,
+        descriptor: AbiTypeDescriptor::U64,
     });
     types.entry("address".into()).or_insert_with(|| AbiType {
         kind: "address".into(),
         max: Some(32),
+        descriptor: AbiTypeDescriptor::Address,
     });
     let actions = ir
         .actions
@@ -276,7 +492,7 @@ pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Abi {
                     .iter()
                     .map(|f| AbiField {
                         name: f.name.clone(),
-                        ty: f.ty.abi_name(),
+                        ty: AbiTypeDescriptor::from(&f.ty),
                     })
                     .collect(),
                 execute_output: abi_output(action),
@@ -300,9 +516,9 @@ pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Abi {
                     name: query.name.clone(),
                     kind: "state_get".into(),
                     state: state.name.clone(),
-                    key_type: "address".into(),
+                    key_type: AbiTypeDescriptor::from(&state.key_type),
                     output: AbiQueryOutput {
-                        ty: state.value_type.abi_name(),
+                        ty: AbiTypeDescriptor::from(&state.value_type),
                         nullable: true,
                     },
                 })
@@ -316,14 +532,69 @@ pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Abi {
                 name: state.name.clone(),
                 schema: state.schema.clone(),
                 kind: "map".into(),
-                key_type: "address".into(),
-                value_type: state.value_type.abi_name(),
+                key_type: AbiTypeDescriptor::from(&state.key_type),
+                value_type: AbiTypeDescriptor::from(&state.value_type),
             })
             .collect(),
     }
 }
 
-fn abi_output(action: &ActionIr) -> String {
+fn collect_abi_types(types: &mut std::collections::BTreeMap<String, AbiType>, ty: &TypeIr) {
+    let (kind, max) = abi_kind_max(ty);
+    types.entry(ty.abi_name()).or_insert_with(|| AbiType {
+        kind: kind.into(),
+        max,
+        descriptor: AbiTypeDescriptor::from(ty),
+    });
+    match ty {
+        TypeIr::FixedArray { item, .. } | TypeIr::Array { item, .. } | TypeIr::Option { item } => {
+            collect_abi_types(types, item)
+        }
+        TypeIr::Tuple { items } => items.iter().for_each(|item| collect_abi_types(types, item)),
+        TypeIr::Record { fields } => fields
+            .iter()
+            .for_each(|field| collect_abi_types(types, &field.ty)),
+        TypeIr::Enum { variants } => variants
+            .iter()
+            .for_each(|variant| collect_abi_types(types, &variant.ty)),
+        TypeIr::Result { ok, err } => {
+            collect_abi_types(types, ok);
+            collect_abi_types(types, err);
+        }
+        _ => {}
+    }
+}
+
+fn abi_kind_max(ty: &TypeIr) -> (&str, Option<u32>) {
+    match ty {
+        TypeIr::Unit => ("unit", None),
+        TypeIr::U8 => ("u8", None),
+        TypeIr::U16 => ("u16", None),
+        TypeIr::U32 => ("u32", None),
+        TypeIr::U64 => ("u64", None),
+        TypeIr::U128 => ("u128", None),
+        TypeIr::I8 => ("i8", None),
+        TypeIr::I16 => ("i16", None),
+        TypeIr::I32 => ("i32", None),
+        TypeIr::I64 => ("i64", None),
+        TypeIr::I128 => ("i128", None),
+        TypeIr::Bool => ("bool", None),
+        TypeIr::Address => ("address", Some(32)),
+        TypeIr::FixedBytes { len } => ("fixedBytes", Some(*len)),
+        TypeIr::Bytes { max } => ("bytes", Some(*max)),
+        TypeIr::String { max } => ("string", Some(*max)),
+        TypeIr::FixedArray { .. } => ("fixedArray", None),
+        TypeIr::Array { max, .. } => ("array", Some(*max)),
+        TypeIr::Option { .. } => ("option", None),
+        TypeIr::Tuple { .. } => ("tuple", None),
+        TypeIr::Record { .. } => ("record", None),
+        TypeIr::Enum { .. } => ("enum", None),
+        TypeIr::Result { .. } => ("result", None),
+        TypeIr::Unsupported(name) => (name.as_str(), None),
+    }
+}
+
+fn abi_output(action: &ActionIr) -> AbiTypeDescriptor {
     match &action.body {
         ActionBodyIr::Execute(execute) => match &execute.operation {
             ExecutionOpIr::ReturnInputField { field }
@@ -331,13 +602,13 @@ fn abi_output(action: &ActionIr) -> String {
                 .input
                 .iter()
                 .find(|f| f.name == *field)
-                .map(|f| f.ty.abi_name())
-                .unwrap_or_else(|| "unknown".into()),
+                .map(|f| AbiTypeDescriptor::from(&f.ty))
+                .unwrap_or(AbiTypeDescriptor::Unit),
             ExecutionOpIr::ReturnInteger { .. } | ExecutionOpIr::NativeBytesToU64 { .. } => {
-                "u64".into()
+                AbiTypeDescriptor::U64
             }
         },
-        ActionBodyIr::ScriptC { .. } => "u64".into(),
+        ActionBodyIr::ScriptC { .. } => AbiTypeDescriptor::U64,
     }
 }
 
@@ -377,6 +648,7 @@ mod tests {
             Some(&AbiType {
                 kind: "bytes".into(),
                 max: Some(64),
+                descriptor: AbiTypeDescriptor::Bytes { max: 64 },
             })
         );
     }

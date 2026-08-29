@@ -1,0 +1,11 @@
+[package]
+name = "jamscript-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jamscript-ir = { path = "../jamscript-ir" }
+
+[dev-dependencies]
+jam-codec = { version = "0.1.1", default-features = false }

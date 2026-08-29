@@ -128,7 +128,13 @@ fn main() -> Result<()> {
         CommandKind::New { name } => new_project(&name),
         CommandKind::Check { path } => {
             let (_, ir) = load(&path)?;
-            println!("checked {} action `{}`", path.display(), ir.actions[0].name);
+            let actions = ir
+                .actions
+                .iter()
+                .map(|action| action.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("checked {} actions [{}]", path.display(), actions);
             Ok(())
         }
         CommandKind::Abi { path } => {

@@ -1,0 +1,12 @@
+[
+  { "type": { "kind": "bytes", "max": 8 }, "value": "aabbcc", "encodedHex": "03aabbcc" },
+  { "type": { "kind": "string", "max": 8 }, "value": "猫", "encodedHex": "03e78cab" },
+  { "type": { "kind": "fixedArray", "item": { "kind": "u32" }, "len": 2 }, "value": [1, 2], "encodedHex": "0100000002000000" },
+  { "type": { "kind": "array", "item": { "kind": "u8" }, "max": 4 }, "value": [1, 2], "encodedHex": "020102" },
+  { "type": { "kind": "option", "item": { "kind": "u32" } }, "value": null, "encodedHex": "00" },
+  { "type": { "kind": "option", "item": { "kind": "u32" } }, "value": "1", "encodedHex": "0101000000" },
+  { "type": { "kind": "tuple", "items": [{ "kind": "bool" }, { "kind": "u16" }] }, "value": [true, 513], "encodedHex": "010102" },
+  { "type": { "kind": "record", "fields": [{ "name": "active", "type": { "kind": "bool" } }, { "name": "score", "type": { "kind": "u32" } }] }, "value": { "active": true, "score": 1 }, "encodedHex": "0101000000" },
+  { "type": { "kind": "enum", "variants": [{ "name": "None", "index": 0, "type": { "kind": "unit" } }, { "name": "Active", "index": 1, "type": { "kind": "u32" } }] }, "value": { "index": 1, "value": 7 }, "encodedHex": "0107000000" },
+  { "type": { "kind": "result", "ok": { "kind": "u32" }, "err": { "kind": "u8" } }, "value": { "ok": 7 }, "encodedHex": "0007000000" }
+]

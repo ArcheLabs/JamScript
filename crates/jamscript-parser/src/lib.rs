@@ -1,6 +1,6 @@
 use jamscript_ir::{
     ActionBodyIr, ActionIr, AuthKind, ExecuteIr, ExecutionOpIr, FieldIr, NativeImportIr, QueryIr,
-    ServiceIr, StateEffectIr, StateIr, StateKeyType, TypeIr, MAX_ACTION_PAYLOAD_BYTES,
+    ServiceIr, StateEffectIr, StateIr, StateKind, TypeIr, VariantIr, MAX_ACTION_PAYLOAD_BYTES,
 };
 use swc_common::{sync::Lrc, FileName, SourceMap};
 use swc_ecma_ast::*;
@@ -77,6 +77,7 @@ fn parse_service_with_language(
     let mut states = Vec::new();
     let mut queries = Vec::new();
     let mut native_imports = Vec::new();
+    let mut aliases = std::collections::BTreeMap::new();
     for item in module.body {
         match item {
             ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
@@ -114,10 +115,13 @@ fn parse_service_with_language(
                             binding.id.sym.as_ref(),
                             &init,
                             &native_imports,
+                            &aliases,
                         )?),
-                        Some("action") => {
-                            actions.push(parse_scriptc_action(binding.id.sym.as_ref(), &init)?)
-                        }
+                        Some("action") => actions.push(parse_scriptc_action(
+                            binding.id.sym.as_ref(),
+                            &init,
+                            &aliases,
+                        )?),
                         Some("query") => queries.push(parse_query(binding.id.sym.as_ref(), &init)?),
                         _ => return Err(diag("1002", "exports must be action(...) or query(...)")),
                     }
@@ -131,7 +135,11 @@ fn parse_service_with_language(
                     let Some(init) = declarator.init else {
                         return Err(diag("1031", "state declaration needs an initializer"));
                     };
-                    states.push(parse_state(binding.id.sym.as_ref(), &init)?);
+                    if is_type_constructor(&init) {
+                        aliases.insert(binding.id.sym.to_string(), parse_type(&init, &aliases)?);
+                    } else {
+                        states.push(parse_state(binding.id.sym.as_ref(), &init, &aliases)?);
+                    }
                 }
             }
             ModuleItem::Stmt(Stmt::Decl(Decl::Fn(_))) if language == "0.2" => {
@@ -148,7 +156,7 @@ fn parse_service_with_language(
             }
         }
     }
-    if actions.len() != 1 {
+    if language == "0.1" && actions.len() != 1 {
         return Err(diag(
             "1006",
             "the v0.1 vertical slice requires exactly one exported action",
@@ -239,9 +247,30 @@ fn collect_import(
             "action"
                 | "wallet"
                 | "publicAction"
+                | "unit"
+                | "bool"
+                | "u8"
+                | "u16"
+                | "u32"
                 | "u64"
+                | "u128"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
                 | "bytes"
+                | "string"
+                | "fixedBytes"
+                | "fixedArray"
+                | "array"
+                | "option"
+                | "tuple"
+                | "record"
+                | "enumType"
+                | "result"
                 | "address"
+                | "state"
                 | "stateMap"
                 | "query"
         ) {
@@ -258,6 +287,7 @@ fn parse_action(
     name: &str,
     init: &Expr,
     native_imports: &[NativeImportIr],
+    aliases: &std::collections::BTreeMap<String, TypeIr>,
 ) -> Result<ActionIr, ParseError> {
     let config = call_object(init, "action", "1011")?;
     let mut auth = None;
@@ -272,7 +302,7 @@ fn parse_action(
                 auth = Some(parse_auth(&kv.value)?)
             }
             Prop::KeyValue(kv) if key_name(&kv.key).as_deref() == Some("input") => {
-                input = Some(parse_input(&kv.value)?)
+                input = Some(parse_input(&kv.value, aliases)?)
             }
             Prop::Method(method) if key_name(&method.key).as_deref() == Some("execute") => {
                 execute = Some(parse_execute(&method.function.body, native_imports)?);
@@ -320,7 +350,11 @@ fn parse_action(
     })
 }
 
-fn parse_scriptc_action(name: &str, init: &Expr) -> Result<ActionIr, ParseError> {
+fn parse_scriptc_action(
+    name: &str,
+    init: &Expr,
+    aliases: &std::collections::BTreeMap<String, TypeIr>,
+) -> Result<ActionIr, ParseError> {
     let config = call_object(init, "action", "1110")?;
     let mut auth = None;
     let mut input = None;
@@ -334,7 +368,7 @@ fn parse_scriptc_action(name: &str, init: &Expr) -> Result<ActionIr, ParseError>
                 auth = Some(parse_auth(&kv.value)?);
             }
             Prop::KeyValue(kv) if key_name(&kv.key).as_deref() == Some("input") => {
-                input = Some(parse_input(&kv.value)?);
+                input = Some(parse_input(&kv.value, aliases)?);
             }
             Prop::Method(method) if key_name(&method.key).as_deref() == Some("execute") => {
                 has_execute = true;
@@ -351,12 +385,6 @@ fn parse_scriptc_action(name: &str, init: &Expr) -> Result<ActionIr, ParseError>
     }
     let input = input.ok_or_else(|| diag("1114", "action must declare an input object"))?;
     validate_input(&input)?;
-    if input.len() != 1 || input[0].ty != TypeIr::U64 {
-        return Err(diag(
-            "1119",
-            "ScriptC M1 compute requires exactly one u64 input field",
-        ));
-    }
     if !has_execute {
         return Err(diag("1115", "action must declare execute(ctx, input)"));
     }
@@ -388,7 +416,10 @@ fn parse_auth(expr: &Expr) -> Result<AuthKind, ParseError> {
     }
 }
 
-fn parse_input(expr: &Expr) -> Result<Vec<FieldIr>, ParseError> {
+fn parse_input(
+    expr: &Expr,
+    aliases: &std::collections::BTreeMap<String, TypeIr>,
+) -> Result<Vec<FieldIr>, ParseError> {
     let Expr::Object(object) = expr else {
         return Err(diag("1020", "input must be an object schema"));
     };
@@ -406,41 +437,145 @@ fn parse_input(expr: &Expr) -> Result<Vec<FieldIr>, ParseError> {
                 .ok_or_else(|| diag("1022", "input field names must be identifiers"))?;
             Ok(FieldIr {
                 name,
-                ty: parse_type(&kv.value)?,
+                ty: parse_type(&kv.value, aliases)?,
             })
         })
         .collect()
 }
 
-fn parse_type(expr: &Expr) -> Result<TypeIr, ParseError> {
+fn parse_type(
+    expr: &Expr,
+    aliases: &std::collections::BTreeMap<String, TypeIr>,
+) -> Result<TypeIr, ParseError> {
     if let Expr::Ident(name) = expr {
+        if let Some(alias) = aliases.get(name.sym.as_ref()) {
+            return Ok(alias.clone());
+        }
         return match name.sym.as_ref() {
+            "unit" => Ok(TypeIr::Unit),
+            "bool" => Ok(TypeIr::Bool),
+            "u8" => Ok(TypeIr::U8),
+            "u16" => Ok(TypeIr::U16),
             "u64" => Ok(TypeIr::U64),
+            "u32" => Ok(TypeIr::U32),
+            "u128" => Ok(TypeIr::U128),
+            "i8" => Ok(TypeIr::I8),
+            "i16" => Ok(TypeIr::I16),
+            "i32" => Ok(TypeIr::I32),
+            "i64" => Ok(TypeIr::I64),
+            "i128" => Ok(TypeIr::I128),
             "address" => Ok(TypeIr::Address),
-            other => Err(diag(
-                "1023",
-                format!("unsupported v0.1 input type `{other}`"),
-            )),
+            other => Err(diag("1023", format!("unsupported ABI type `{other}`"))),
         };
     }
     let Expr::Call(call) = expr else {
-        return Err(diag("1023", "type must be u64, address, or bytes(N)"));
+        return Err(diag("1023", "unsupported ABI type expression"));
     };
     let Callee::Expr(callee) = &call.callee else {
-        return Err(diag("1023", "type must be u64, address, or bytes(N)"));
+        return Err(diag("1023", "unsupported ABI type expression"));
     };
     let Expr::Ident(name) = &**callee else {
-        return Err(diag("1023", "type must be u64, address, or bytes(N)"));
+        return Err(diag("1023", "unsupported ABI type expression"));
     };
-    if name.sym != *"bytes" || call.args.len() != 1 {
-        return Err(diag("1023", "type must be u64, address, or bytes(N)"));
+    let name = name.sym.as_ref();
+    let bound = |index: usize, label: &str| -> Result<u32, ParseError> {
+        let value = call
+            .args
+            .get(index)
+            .and_then(|arg| integer_literal(&arg.expr).ok().flatten())
+            .ok_or_else(|| diag("1023", format!("{label} requires an integer bound")))?;
+        if value == 0 || value > MAX_ACTION_PAYLOAD_BYTES as u128 {
+            return Err(diag(
+                "1036",
+                format!("{label} bound must be between 1 and {MAX_ACTION_PAYLOAD_BYTES}"),
+            ));
+        }
+        Ok(value as u32)
+    };
+    match name {
+        "fixedBytes" if call.args.len() == 1 => Ok(TypeIr::FixedBytes {
+            len: bound(0, "fixedBytes(N)")?,
+        }),
+        "bytes" if call.args.len() == 1 => Ok(TypeIr::Bytes {
+            max: bound(0, "bytes(N)")?,
+        }),
+        "string" if call.args.len() == 1 => Ok(TypeIr::String {
+            max: bound(0, "string(N)")?,
+        }),
+        "fixedArray" if call.args.len() == 2 => Ok(TypeIr::FixedArray {
+            item: Box::new(parse_type(&call.args[0].expr, aliases)?),
+            len: bound(1, "fixedArray(T,N)")?,
+        }),
+        "array" if call.args.len() == 2 => Ok(TypeIr::Array {
+            item: Box::new(parse_type(&call.args[0].expr, aliases)?),
+            max: bound(1, "array(T,N)")?,
+        }),
+        "option" if call.args.len() == 1 => Ok(TypeIr::Option {
+            item: Box::new(parse_type(&call.args[0].expr, aliases)?),
+        }),
+        "tuple" => Ok(TypeIr::Tuple {
+            items: call
+                .args
+                .iter()
+                .map(|arg| parse_type(&arg.expr, aliases))
+                .collect::<Result<_, _>>()?,
+        }),
+        "record" if call.args.len() == 1 => Ok(TypeIr::Record {
+            fields: parse_input(&call.args[0].expr, aliases)?,
+        }),
+        "enumType" if call.args.len() == 1 => parse_enum(&call.args[0].expr, aliases),
+        "result" if call.args.len() == 2 => Ok(TypeIr::Result {
+            ok: Box::new(parse_type(&call.args[0].expr, aliases)?),
+            err: Box::new(parse_type(&call.args[1].expr, aliases)?),
+        }),
+        _ => Err(diag("1023", "unsupported ABI type expression")),
     }
-    let max = integer_literal(&call.args[0].expr)?
-        .ok_or_else(|| diag("1023", "bytes(N) requires an integer bound"))?;
-    if !(1..=MAX_ACTION_PAYLOAD_BYTES as u128).contains(&max) {
-        return Err(diag("1036", "bytes(N) must satisfy 1 <= N <= 1000000"));
+}
+
+fn parse_enum(
+    expr: &Expr,
+    aliases: &std::collections::BTreeMap<String, TypeIr>,
+) -> Result<TypeIr, ParseError> {
+    let Expr::Object(object) = expr else {
+        return Err(diag("1023", "enumType requires a variant object"));
+    };
+    if object.props.len() > 256 {
+        return Err(diag("1030", "enumType supports at most 256 variants"));
     }
-    Ok(TypeIr::Bytes { max: max as u32 })
+    let mut variants = Vec::new();
+    for (index, prop) in object.props.iter().enumerate() {
+        let PropOrSpread::Prop(prop) = prop else {
+            return Err(diag("1023", "enum variants do not support spreads"));
+        };
+        let Prop::KeyValue(kv) = &**prop else {
+            return Err(diag("1023", "enum variants must be name: Type entries"));
+        };
+        variants.push(VariantIr {
+            name: key_name(&kv.key)
+                .ok_or_else(|| diag("1023", "enum variant names must be identifiers"))?,
+            index: index as u8,
+            ty: parse_type(&kv.value, aliases)?,
+        });
+    }
+    Ok(TypeIr::Enum { variants })
+}
+
+fn is_type_constructor(expr: &Expr) -> bool {
+    matches!(
+        call_name(expr).as_deref(),
+        Some(
+            "fixedBytes"
+                | "bytes"
+                | "string"
+                | "fixedArray"
+                | "array"
+                | "option"
+                | "tuple"
+                | "record"
+                | "enumType"
+                | "result"
+        )
+    )
 }
 
 fn parse_execute(
@@ -627,8 +762,17 @@ fn parse_commit_expression(expr: &Expr) -> Result<StateEffectIr, ParseError> {
     }
 }
 
-fn parse_state(name: &str, init: &Expr) -> Result<StateIr, ParseError> {
-    let object = call_object(init, "stateMap", "1041")?;
+fn parse_state(
+    name: &str,
+    init: &Expr,
+    aliases: &std::collections::BTreeMap<String, TypeIr>,
+) -> Result<StateIr, ParseError> {
+    let call =
+        call_name(init).ok_or_else(|| diag("1041", "state must be state(...) or stateMap(...)"))?;
+    if call != "state" && call != "stateMap" {
+        return Err(diag("1041", "state must be state(...) or stateMap(...)"));
+    }
+    let object = call_object(init, &call, "1041")?;
     let mut schema = None;
     let mut key_type = None;
     let mut value_type = None;
@@ -641,14 +785,9 @@ fn parse_state(name: &str, init: &Expr) -> Result<StateIr, ParseError> {
         };
         match key_name(&kv.key).as_deref() {
             Some("schema") => schema = Some(string_literal(&kv.value)?),
-            Some("key") => key_type = Some(parse_type(&kv.value)?),
-            Some("value") => value_type = Some(parse_type(&kv.value)?),
-            _ => {
-                return Err(diag(
-                    "1043",
-                    "stateMap supports schema, key, and value only",
-                ))
-            }
+            Some("key") => key_type = Some(parse_type(&kv.value, aliases)?),
+            Some("value") => value_type = Some(parse_type(&kv.value, aliases)?),
+            _ => return Err(diag("1043", "state supports schema, key, and value only")),
         }
     }
     let schema = schema.ok_or_else(|| diag("1044", "stateMap requires schema"))?;
@@ -658,18 +797,27 @@ fn parse_state(name: &str, init: &Expr) -> Result<StateIr, ParseError> {
             "state schema must be non-empty ASCII of at most 64 bytes",
         ));
     }
-    let key_type = key_type.ok_or_else(|| diag("1046", "stateMap requires key"))?;
-    let value_type = value_type.ok_or_else(|| diag("1047", "stateMap requires value"))?;
-    if key_type != TypeIr::Address || value_type != TypeIr::U64 {
-        return Err(diag(
-            "1048",
-            "M4 stateMap only supports address keys and u64 values",
-        ));
-    }
+    let value_type = value_type.ok_or_else(|| diag("1047", "state requires value"))?;
+    let key_type = if call == "state" {
+        if key_type.is_some() {
+            return Err(diag("1046", "scalar state does not accept a key"));
+        }
+        TypeIr::Unit
+    } else {
+        key_type.ok_or_else(|| diag("1046", "stateMap requires key"))?
+    };
+    value_type
+        .max_encoded_len()
+        .map_err(|error| diag("1055", error))?;
     Ok(StateIr {
         name: name.into(),
         schema,
-        key_type: StateKeyType::Address,
+        kind: if call == "state" {
+            StateKind::Scalar
+        } else {
+            StateKind::Map
+        },
+        key_type,
         value_type,
     })
 }
@@ -711,6 +859,15 @@ fn validate_service(
     {
         return Err(diag("1052", "state schemas must be unique"));
     }
+    if actions
+        .iter()
+        .map(|action| jamscript_ir::action_selector(&action.name))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != actions.len()
+    {
+        return Err(diag("1056", "action selectors must be unique"));
+    }
     for action in actions {
         let effect = match &action.body {
             ActionBodyIr::Execute(execute) => execute.state_effect.as_ref(),
@@ -751,16 +908,12 @@ fn validate_input(input: &[FieldIr]) -> Result<(), ParseError> {
     }
     let total = input
         .iter()
-        .try_fold(0u32, |total, field| {
-            let size = match field.ty {
-                TypeIr::U64 => 8,
-                TypeIr::Bytes { max } => max.checked_add(4).ok_or(())?,
-                _ => return Err(()),
-            };
+        .try_fold(0usize, |total, field| {
+            let size = field.ty.max_encoded_len().map_err(|_| ())?;
             total.checked_add(size).ok_or(())
         })
         .map_err(|_| diag("1056", "action input exceeds the bounded payload limit"))?;
-    if total > MAX_ACTION_PAYLOAD_BYTES {
+    if total > MAX_ACTION_PAYLOAD_BYTES as usize {
         return Err(diag(
             "1056",
             "action input exceeds the bounded payload limit",
@@ -905,6 +1058,27 @@ mod tests {
     fn rejects_unbounded_bytes() {
         let source = r#"import { action, wallet, bytes } from "jam"; export const add = action({ auth: wallet(), input: { value: bytes(0) }, execute(ctx, input) { return input.value; } });"#;
         assert!(parse_service(source, "x", "0.1.0").is_err());
+    }
+
+    #[test]
+    fn parses_release_jns_metadata_with_multiple_actions_and_queries() {
+        let source = r#"
+            import { action, wallet, stateMap, query, string, address, record, u32 } from "jam";
+            const Name = string(32);
+            const JnsRecord = record({ owner: address, serviceId: u32 });
+            const names = stateMap({ schema: "jns.names/v1", key: Name, value: JnsRecord });
+            const reverse = stateMap({ schema: "jns.reverse/v1", key: address, value: Name });
+            export const claim = action({ auth: wallet(), input: { name: Name, serviceId: u32 }, execute(ctx, input) {} });
+            export const bind = action({ auth: wallet(), input: { name: Name, serviceId: u32 }, execute(ctx, input) {} });
+            export const resolve = query(names);
+            export const reverseLookup = query(reverse);
+        "#;
+        let ir = parse_service_v02(source, "jns", "1.0.0", &[]).unwrap();
+        assert_eq!(ir.actions.len(), 2);
+        assert_eq!(ir.queries.len(), 2);
+        assert_eq!(ir.states[0].kind, jamscript_ir::StateKind::Map);
+        assert_eq!(ir.states[0].key_type, TypeIr::String { max: 32 });
+        assert!(matches!(ir.states[0].value_type, TypeIr::Record { .. }));
     }
 
     #[test]

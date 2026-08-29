@@ -334,9 +334,13 @@ impl<'a> PayloadReader<'a> {{
         self.offset = end; Ok(value)
     }}
     fn u32(&mut self) -> Result<u32, ()> {{ Ok(u32::from_le_bytes(self.take(4)?.try_into().map_err(|_| ())?)) }}
+    fn u8(&mut self) -> Result<u8, ()> {{ Ok(self.take(1)?[0]) }}
+    fn u16(&mut self) -> Result<u16, ()> {{ Ok(u16::from_le_bytes(self.take(2)?.try_into().map_err(|_| ())?)) }}
     #[allow(dead_code)]
     fn u64(&mut self) -> Result<u64, ()> {{ Ok(u64::from_le_bytes(self.take(8)?.try_into().map_err(|_| ())?)) }}
-    fn bounded_bytes(&mut self, max: usize) -> Result<&'a [u8], ()> {{ let length = self.u32()? as usize; if length > max {{ return Err(()); }} self.take(length) }}
+    fn natural(&mut self) -> Result<u64, ()> {{ let first = *self.input.get(self.offset).ok_or(())?; self.offset += 1; if first < 0x80 {{ return Ok(first as u64); }} let length = first.leading_ones() as usize; if length == 0 || length > 8 {{ return Err(()); }} let mut low = 0u64; for index in 0..length {{ low |= (*self.input.get(self.offset + index).ok_or(())? as u64) << (8 * index); }} self.offset += length; if length == 8 {{ return Ok(low); }} Ok(low | (((first as u64) & (0x7f >> length)) << (8 * length))) }}
+    fn bounded_bytes(&mut self, max: usize) -> Result<&'a [u8], ()> {{ let length = self.natural()? as usize; if length > max {{ return Err(()); }} self.take(length) }}
+    fn fixed_bytes(&mut self, length: usize) -> Result<&'a [u8], ()> {{ self.take(length) }}
 }}
 
 {decoder}
@@ -371,11 +375,21 @@ fn payload_decoder(action: &ActionIr) -> Result<String, String> {
     for (index, field) in action.input.iter().enumerate() {
         let variable = format!("field_{index}");
         fields.push(variable.clone());
-        match field.ty {
+        match &field.ty {
+            TypeIr::Unit => reads.push(String::new()),
+            TypeIr::U8 | TypeIr::Bool => reads.push(format!("let {variable} = reader.u8()?;")),
+            TypeIr::U16 => reads.push(format!("let {variable} = reader.u16()?;")),
+            TypeIr::U32 => reads.push(format!("let {variable} = reader.u32()?;")),
             TypeIr::U64 => reads.push(format!("let {variable} = reader.u64()?;")),
-            TypeIr::Bytes { max } => reads.push(format!(
+            TypeIr::Bytes { max } | TypeIr::String { max } => reads.push(format!(
                 "let {variable} = reader.bounded_bytes({max}usize)?;"
             )),
+            TypeIr::FixedBytes { len } => {
+                reads.push(format!("let {variable} = reader.fixed_bytes({len}usize)?;"))
+            }
+            TypeIr::Address => {
+                reads.push(format!("let {variable} = reader.fixed_bytes(32usize)?;"))
+            }
             _ => {
                 return Err(format!(
                     "unsupported action input type for `{}`",
@@ -387,9 +401,16 @@ fn payload_decoder(action: &ActionIr) -> Result<String, String> {
     let tuple_types = action
         .input
         .iter()
-        .map(|field| match field.ty {
+        .map(|field| match &field.ty {
+            TypeIr::Unit => "()",
+            TypeIr::U8 | TypeIr::Bool => "u8",
+            TypeIr::U16 => "u16",
+            TypeIr::U32 => "u32",
             TypeIr::U64 => "u64",
-            TypeIr::Bytes { .. } => "&[u8]",
+            TypeIr::Bytes { .. }
+            | TypeIr::String { .. }
+            | TypeIr::FixedBytes { .. }
+            | TypeIr::Address => "&[u8]",
             _ => "()",
         })
         .collect::<Vec<_>>()
@@ -630,7 +651,8 @@ mod tests {
                 states: vec![jamscript_ir::StateIr {
                     name: "counter".into(),
                     schema: "counter/v1".into(),
-                    key_type: jamscript_ir::StateKeyType::Address,
+                    kind: jamscript_ir::StateKind::Map,
+                    key_type: TypeIr::Address,
                     value_type: TypeIr::U64,
                 }],
                 queries: Vec::new(),
@@ -707,7 +729,8 @@ mod tests {
             states: vec![jamscript_ir::StateIr {
                 name: "score".into(),
                 schema: "score/v1".into(),
-                key_type: jamscript_ir::StateKeyType::Address,
+                kind: jamscript_ir::StateKind::Map,
+                key_type: TypeIr::Address,
                 value_type: TypeIr::U64,
             }],
             queries: Vec::new(),
