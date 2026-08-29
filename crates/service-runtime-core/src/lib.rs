@@ -10,6 +10,8 @@ pub type StateRoot = [u8; 32];
 pub const MANAGED_STATE_PROTOCOL_VERSION: u8 = 1;
 pub const MANAGED_STATE_LAYOUT_VERSION: u8 = 1;
 pub const RECOVERY_FORMAT_VERSION: u8 = 1;
+pub const STATE_VIEW_VERSION: u8 = 1;
+pub const SCRIPT_ACTION_RESULT_VERSION: u8 = 1;
 pub const EMPTY_STATE_ROOT_V1: StateRoot = [
     0x03, 0x17, 0x0a, 0x2e, 0x75, 0x97, 0xb7, 0xb7, 0xe3, 0xd8, 0x4c, 0x05, 0x39, 0x1d, 0x13, 0x9a,
     0x62, 0xb1, 0x57, 0xe7, 0x87, 0x86, 0xd8, 0xc0, 0x82, 0xf2, 0x9d, 0xcf, 0x4c, 0x11, 0x13, 0x14,
@@ -30,6 +32,9 @@ pub const MAX_RECOVERY_CHANGES: usize = 4096;
 pub const MAX_RECOVERY_BYTES: usize = 1024 * 1024;
 pub const MAX_STATE_KEY_BYTES: usize = 4096;
 pub const MAX_STATE_VALUE_BYTES: usize = 64 * 1024;
+pub const MAX_STATE_VIEW_ENTRIES: usize = MAX_RECOVERY_CHANGES;
+pub const MAX_STATE_VIEW_BYTES: usize = 1024 * 1024;
+pub const MAX_SCRIPT_ACTION_RESULT_BYTES: usize = MAX_RECOVERY_BYTES;
 pub const MAX_WITNESS_NODES: usize = 4096;
 pub const MAX_WITNESS_NODE_BYTES: usize = 64 * 1024;
 pub const MAX_WITNESS_BYTES: usize = 1024 * 1024;
@@ -123,6 +128,215 @@ pub enum WireError {
     UnsortedKeys,
     TooManyItems,
     ReservedKey,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateViewEntryV1 {
+    pub key: Vec<u8>,
+    /// `None` means the key was proven absent. An omitted key is not part of
+    /// the view at all and must be reported by the application runtime as
+    /// `NeedState`.
+    pub value: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct StateViewV1 {
+    pub entries: Vec<StateViewEntryV1>,
+}
+
+impl StateViewV1 {
+    pub fn from_entries<I>(entries: I) -> Result<Self, WireError>
+    where
+        I: IntoIterator<Item = StateViewEntryV1>,
+    {
+        let mut entries = entries.into_iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.key.cmp(&right.key));
+        let view = Self { entries };
+        view.validate_canonical()?;
+        Ok(view)
+    }
+
+    pub fn get(&self, key: &[u8]) -> Option<&Option<Vec<u8>>> {
+        self.entries
+            .binary_search_by(|entry| entry.key.as_slice().cmp(key))
+            .ok()
+            .map(|index| &self.entries[index].value)
+    }
+
+    fn validate_canonical(&self) -> Result<(), WireError> {
+        if self.entries.len() > MAX_STATE_VIEW_ENTRIES {
+            return Err(WireError::TooManyItems);
+        }
+        for entry in &self.entries {
+            if entry.key.len() > MAX_STATE_KEY_BYTES
+                || entry
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| value.len() > MAX_STATE_VALUE_BYTES)
+            {
+                return Err(WireError::TooManyItems);
+            }
+        }
+        for pair in self.entries.windows(2) {
+            if pair[0].key == pair[1].key {
+                return Err(WireError::DuplicateKey);
+            }
+            if pair[0].key > pair[1].key {
+                return Err(WireError::UnsortedKeys);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        self.validate_canonical()?;
+        let mut writer = Writer::new();
+        writer.u8(STATE_VIEW_VERSION);
+        writer.u32(u32::try_from(self.entries.len()).map_err(|_| WireError::LengthOverflow)?);
+        for entry in &self.entries {
+            writer.bytes_u32(&entry.key)?;
+            match &entry.value {
+                None => writer.u8(0),
+                Some(value) => {
+                    writer.u8(1);
+                    writer.bytes_u32(value)?;
+                }
+            }
+        }
+        let encoded = writer.finish();
+        if encoded.len() > MAX_STATE_VIEW_BYTES {
+            return Err(WireError::TooManyItems);
+        }
+        Ok(encoded)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() > MAX_STATE_VIEW_BYTES {
+            return Err(WireError::TooManyItems);
+        }
+        let mut reader = Reader::new(bytes);
+        if reader.u8()? != STATE_VIEW_VERSION {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let count = reader.u32()? as usize;
+        if count > MAX_STATE_VIEW_ENTRIES {
+            return Err(WireError::TooManyItems);
+        }
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let key = reader.bytes_limited(MAX_STATE_KEY_BYTES)?;
+            let value = match reader.u8()? {
+                0 => None,
+                1 => Some(reader.bytes_limited(MAX_STATE_VALUE_BYTES)?),
+                _ => return Err(WireError::InvalidEncoding),
+            };
+            entries.push(StateViewEntryV1 { key, value });
+        }
+        if reader.remaining() != 0 {
+            return Err(WireError::InvalidEncoding);
+        }
+        let view = Self { entries };
+        view.validate_canonical()?;
+        Ok(view)
+    }
+}
+
+pub const SCRIPT_ACTION_KIND_APPLIED: u8 = 0;
+pub const SCRIPT_ACTION_KIND_ABORT: u8 = 1;
+pub const SCRIPT_ACTION_KIND_NEED_STATE: u8 = 2;
+pub const SCRIPT_ACTION_KIND_FATAL: u8 = 3;
+pub const MAX_APPLICATION_ABORT_CODE: u32 = 0x00ff_ffff;
+pub const MIN_FATAL_ERROR_CODE: u32 = 0x8000_0000;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScriptActionResultV1 {
+    Applied(StateDiffV1),
+    Abort(u32),
+    NeedState(Vec<u8>),
+    Fatal(u32),
+}
+
+impl ScriptActionResultV1 {
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        let mut writer = Writer::new();
+        writer.u8(SCRIPT_ACTION_RESULT_VERSION);
+        match self {
+            Self::Applied(diff) => {
+                validate_application_diff(diff)?;
+                writer.u8(SCRIPT_ACTION_KIND_APPLIED);
+                writer.bytes_u32(&diff.encode()?)?;
+            }
+            Self::Abort(code) if (1..=MAX_APPLICATION_ABORT_CODE).contains(code) => {
+                writer.u8(SCRIPT_ACTION_KIND_ABORT);
+                writer.u32(*code);
+            }
+            Self::NeedState(key) if key.len() <= MAX_STATE_KEY_BYTES => {
+                writer.u8(SCRIPT_ACTION_KIND_NEED_STATE);
+                writer.bytes_u32(key)?;
+            }
+            Self::Fatal(code) if *code >= MIN_FATAL_ERROR_CODE => {
+                writer.u8(SCRIPT_ACTION_KIND_FATAL);
+                writer.u32(*code);
+            }
+            _ => return Err(WireError::InvalidEncoding),
+        }
+        let encoded = writer.finish();
+        if encoded.len() > MAX_SCRIPT_ACTION_RESULT_BYTES {
+            return Err(WireError::TooManyItems);
+        }
+        Ok(encoded)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() > MAX_SCRIPT_ACTION_RESULT_BYTES {
+            return Err(WireError::TooManyItems);
+        }
+        let mut reader = Reader::new(bytes);
+        if reader.u8()? != SCRIPT_ACTION_RESULT_VERSION {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let result = match reader.u8()? {
+            SCRIPT_ACTION_KIND_APPLIED => {
+                let diff = StateDiffV1::decode(&reader.bytes_limited(MAX_RECOVERY_BYTES)?)?;
+                validate_application_diff(&diff)?;
+                Self::Applied(diff)
+            }
+            SCRIPT_ACTION_KIND_ABORT => {
+                let code = reader.u32()?;
+                if !(1..=MAX_APPLICATION_ABORT_CODE).contains(&code) {
+                    return Err(WireError::InvalidEncoding);
+                }
+                Self::Abort(code)
+            }
+            SCRIPT_ACTION_KIND_NEED_STATE => {
+                Self::NeedState(reader.bytes_limited(MAX_STATE_KEY_BYTES)?)
+            }
+            SCRIPT_ACTION_KIND_FATAL => {
+                let code = reader.u32()?;
+                if code < MIN_FATAL_ERROR_CODE {
+                    return Err(WireError::InvalidEncoding);
+                }
+                Self::Fatal(code)
+            }
+            _ => return Err(WireError::InvalidEncoding),
+        };
+        if reader.remaining() != 0 {
+            return Err(WireError::InvalidEncoding);
+        }
+        Ok(result)
+    }
+}
+
+fn validate_application_diff(diff: &StateDiffV1) -> Result<(), WireError> {
+    diff.validate_canonical()?;
+    if diff
+        .changes
+        .iter()
+        .any(|change| change.key.first() != Some(&APPLICATION_KEY_CLASS_V1))
+    {
+        return Err(WireError::ReservedKey);
+    }
+    Ok(())
 }
 
 pub fn application_key_v1(
@@ -1348,6 +1562,87 @@ mod tests {
         assert_eq!(
             StateRecoveryV1::new(oversized),
             Err(WireError::TooManyItems)
+        );
+    }
+
+    #[test]
+    fn state_view_distinguishes_absence_from_omission_and_is_canonical() {
+        let view = StateViewV1::from_entries([
+            StateViewEntryV1 {
+                key: vec![2],
+                value: Some(vec![9]),
+            },
+            StateViewEntryV1 {
+                key: vec![1],
+                value: None,
+            },
+        ])
+        .unwrap();
+        assert_eq!(view.get(&[1]), Some(&None));
+        assert_eq!(view.get(&[2]), Some(&Some(vec![9])));
+        assert_eq!(view.get(&[3]), None);
+        assert_eq!(StateViewV1::decode(&view.encode().unwrap()), Ok(view));
+
+        let duplicate = StateViewV1 {
+            entries: vec![
+                StateViewEntryV1 {
+                    key: vec![1],
+                    value: None,
+                },
+                StateViewEntryV1 {
+                    key: vec![1],
+                    value: Some(vec![2]),
+                },
+            ],
+        };
+        assert_eq!(duplicate.encode(), Err(WireError::DuplicateKey));
+
+        let mut trailing = StateViewV1::default().encode().unwrap();
+        trailing.push(0);
+        assert_eq!(
+            StateViewV1::decode(&trailing),
+            Err(WireError::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn script_action_results_are_strict_and_application_scoped() {
+        let application_key = application_key_v1(b"test/v1", b"key").unwrap();
+        let cases = [
+            ScriptActionResultV1::Applied(StateDiffV1 {
+                changes: vec![StateChangeV1 {
+                    key: application_key,
+                    value: Some(vec![7]),
+                }],
+            }),
+            ScriptActionResultV1::Abort(4),
+            ScriptActionResultV1::NeedState(vec![1, 2, 3]),
+            ScriptActionResultV1::Fatal(MIN_FATAL_ERROR_CODE + 1),
+        ];
+        for case in cases {
+            assert_eq!(
+                ScriptActionResultV1::decode(&case.encode().unwrap()),
+                Ok(case)
+            );
+        }
+
+        assert_eq!(
+            ScriptActionResultV1::Abort(0).encode(),
+            Err(WireError::InvalidEncoding)
+        );
+        assert_eq!(
+            ScriptActionResultV1::Fatal(MAX_APPLICATION_ABORT_CODE).encode(),
+            Err(WireError::InvalidEncoding)
+        );
+        assert_eq!(
+            ScriptActionResultV1::Applied(StateDiffV1 {
+                changes: vec![StateChangeV1 {
+                    key: wallet_nonce_key_v1(&[1; 32]),
+                    value: Some(vec![1]),
+                }],
+            })
+            .encode(),
+            Err(WireError::ReservedKey)
         );
     }
 
