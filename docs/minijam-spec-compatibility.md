@@ -11,7 +11,7 @@ SignedActionV2, or Managed State formats.
 | --- | --- |
 | JamScript baseline | `52dd4d18436b6f889083e45c0c4eeb2e68c1e60a` |
 | MiniJAM locked SHA | `d4cecd4cce277ccaa334b24d18013288dbd6a66b` |
-| MiniJAM Jambda gitlink | `788bc054223f81282e4d88a83f05f2fe9e94c121` |
+| MiniJAM Jambda gitlink | `fe67ecf5ccbe16b3490d73cc4d8b1e48eb7bea86` |
 | MiniJAM SDK ABI | `MINIJAM_ABI_VERSION = 1` |
 | PolkaVM linker / derive | `0.30.0 / 0.30.0` |
 | target adapter | `minijam-0.2` |
