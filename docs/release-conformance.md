@@ -47,6 +47,7 @@ pass.
 - Live MiniJAM conformance: BLOCKED; it requires typed ScriptC execution and a
   live node.
 
-The `examples/jns` and `examples/typed-state` directories currently serve as
-language/ABI conformance fixtures. They are accepted by parser and ABI checks,
-but full execution requires the upcoming ScriptC typed runtime/state bridge.
+JamScript uses repository-local generic fixtures, such as `examples/typed-state`,
+for compiler and runtime conformance. Real applications live in downstream
+application repositories. The canonical JNS implementation is maintained by
+ArcheLabs/jam-os and is not a JamScript release dependency.

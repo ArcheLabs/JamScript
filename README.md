@@ -49,6 +49,10 @@ Managed-state architecture details are in
 The public type and codec references are in [`docs/type-system.md`](docs/type-system.md)
 and [`docs/codec.md`](docs/codec.md).
 
+Real applications built with JamScript are maintained in their product
+repositories. JAM OS's canonical JNS service is one downstream consumer;
+JamScript's own release gates use generic compiler and runtime fixtures.
+
 The v0 testnet release boundary and operator workflow are documented in
 [`docs/releasing.md`](docs/releasing.md).
 

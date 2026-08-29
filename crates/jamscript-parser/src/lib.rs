@@ -1103,23 +1103,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_release_jns_metadata_with_multiple_actions_and_queries() {
+    fn parses_multi_action_typed_state_metadata() {
         let source = r#"
-            import { action, wallet, stateMap, query, string, address, record, u32 } from "jam";
-            const Name = string(32);
-            const JnsRecord = record({ owner: address, serviceId: u32 });
-            const names = stateMap({ schema: "jns.names/v1", key: Name, value: JnsRecord });
-            const reverse = stateMap({ schema: "jns.reverse/v1", key: address, value: Name });
-            export const claim = action({ auth: wallet(), input: { name: Name, serviceId: u32 }, execute(ctx, input) {} });
-            export const bind = action({ auth: wallet(), input: { name: Name, serviceId: u32 }, execute(ctx, input) {} });
-            export const resolve = query(names);
-            export const reverseLookup = query(reverse);
+            import { action, wallet, stateMap, query, bytes, address, record, u32 } from "jam";
+            const Key = bytes(32);
+            const Entry = record({ owner: address, value: u32 });
+            const entries = stateMap({ schema: "test.entries/v1", key: Key, value: Entry });
+            export const create = action({ auth: wallet(), input: { key: Key, value: u32 }, execute(ctx, input) {} });
+            export const update = action({ auth: wallet(), input: { key: Key, value: u32 }, execute(ctx, input) {} });
+            export const getEntry = query(entries);
         "#;
-        let ir = parse_service_v02(source, "jns", "1.0.0", &[]).unwrap();
+        let ir = parse_service_v02(source, "typed-state-fixture", "1.0.0", &[]).unwrap();
         assert_eq!(ir.actions.len(), 2);
-        assert_eq!(ir.queries.len(), 2);
+        assert_eq!(ir.queries.len(), 1);
         assert_eq!(ir.states[0].kind, jamscript_ir::StateKind::Map);
-        assert_eq!(ir.states[0].key_type, TypeIr::String { max: 32 });
+        assert_eq!(ir.states[0].key_type, TypeIr::Bytes { max: 32 });
         assert!(matches!(ir.states[0].value_type, TypeIr::Record { .. }));
     }
 
