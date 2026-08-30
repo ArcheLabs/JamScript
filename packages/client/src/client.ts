@@ -15,6 +15,11 @@ import { asWorkRpc, RpcError, type FinalizedContext, type RpcTransport, type Sub
 import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
+import {
+  RpcStateProvider,
+  StateProviderError,
+  type StateProvider,
+} from "./state-provider.js";
 
 const EMPTY_STATE_ROOT_V1 = "0x03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314";
 
@@ -26,6 +31,7 @@ export type QueryResult = {
 
 export type JamScriptClientOptions = {
   legacyServiceKvFallback?: boolean;
+  stateProvider?: StateProvider;
 };
 
 export class JamScriptClient {
@@ -40,7 +46,10 @@ export class JamScriptClient {
       throw new Error("unsupported JamScript ABI version");
     }
     this.rpc = asWorkRpc(transport);
+    this.stateProvider = options.stateProvider ?? new RpcStateProvider(transport);
   }
+
+  private readonly stateProvider: StateProvider;
 
   async validateDeployment(): Promise<void> {
     const genesis = await this.rpc.genesisHash();
@@ -168,24 +177,24 @@ export class JamScriptClient {
     key: Uint8Array,
   ): Promise<Uint8Array | null> {
     try {
-      const response = await this.rpc.managedStateAt(
-        this.deployment.serviceId,
-        toHex(root),
-        toBase64(key),
-      );
+      const response = await this.stateProvider.get({
+        serviceId: this.deployment.serviceId,
+        serviceKey: this.deployment.serviceKey,
+        stateRoot: toHex(root),
+        key,
+      });
       if (
         response.serviceId !== this.deployment.serviceId
         || response.stateRoot.toLowerCase() !== toHex(root).toLowerCase()
-        || response.keyBase64 !== toBase64(key)
+        || !sameBytes(response.key, key)
       ) {
         throw new Error("managed-state provider response does not match the requested query");
       }
-      const claimedValue = response.valueBase64 === null ? null : fromBase64(response.valueBase64);
       return verifyManagedStateProof(
         root,
         key,
-        claimedValue,
-        response.proofBase64.map(fromBase64),
+        response.value,
+        response.proof,
       );
     } catch (error) {
       if (!this.options.legacyServiceKvFallback || !isManagedStateUnavailable(error)) throw error;
@@ -242,6 +251,10 @@ function fromBase64(value: string): Uint8Array {
   return output;
 }
 
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
 function sameHex(left: string, right: string): boolean {
   return left.toLowerCase().replace(/^0x/, "") === right.toLowerCase().replace(/^0x/, "");
 }
@@ -251,5 +264,6 @@ function isStaleContext(error: unknown): boolean {
 }
 
 function isManagedStateUnavailable(error: unknown): boolean {
-  return error instanceof RpcError && (error.code === -32601 || error.code === -32030);
+  return (error instanceof RpcError && (error.code === -32601 || error.code === -32030))
+    || (error instanceof StateProviderError && error.kind === "RootUnavailable");
 }
