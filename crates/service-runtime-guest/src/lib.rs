@@ -6,8 +6,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use service_runtime_core::StateDiffV1;
 use service_runtime_core::{
-    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, RuntimeRefineInputV1,
-    RuntimeRefineOutputV1, RuntimeRefineOutputV2, ServiceApplication, StateAccessError,
+    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ManagedStateAccess,
+    RuntimeRefineInputV1, RuntimeRefineInputV2, RuntimeRefineOutputV1, RuntimeRefineOutputV2,
+    ServiceApplication, StateAccessError,
 };
 use service_runtime_state::ProofState;
 
@@ -507,6 +508,144 @@ where
     .map_err(|_| GuestError::State)
 }
 
+pub fn refine_input_v2<A>(
+    application: &A,
+    input: &RuntimeRefineInputV2,
+) -> Result<RuntimeRefineOutputV2, GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
+    let (parent_root, new_root, receipts, diff, transition_valid_until) =
+        refine_internal_input_v2(application, input)?;
+    RuntimeRefineOutputV2::from_diff_with_validity(
+        parent_root,
+        new_root,
+        receipts,
+        diff,
+        transition_valid_until,
+    )
+    .map_err(|_| GuestError::State)
+}
+
+pub fn refine_input_v2_owned<A>(
+    application: &A,
+    input: RuntimeRefineInputV2,
+) -> Result<RuntimeRefineOutputV2, GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
+    refine_input_v2(application, &input)
+}
+
+fn refine_internal_input_v2<A>(
+    application: &A,
+    input: &RuntimeRefineInputV2,
+) -> Result<RefineTransition, GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
+    if input.version != RuntimeRefineInputV2::VERSION
+        || input.managed_state.version != service_runtime_core::ManagedStateWitnessV2::VERSION
+    {
+        return Err(GuestError::InvalidInput);
+    }
+    let mut state = ProofState::from_witness(
+        input.managed_state.parent_root,
+        &input.managed_state.storage_proof,
+    )
+    .map_err(|_| GuestError::State)?;
+    for key in &input.managed_state.access_plan.keys {
+        state.get(key).map_err(|_| GuestError::State)?;
+    }
+    let parent_root = state.parent_root();
+    let mut receipts = Vec::with_capacity(input.actions.len());
+    let mut transition_valid_until = None;
+    for action in &input.actions {
+        let action_hash = blake2_256(action);
+        state.begin_transaction();
+        let (result, action_valid_until) = {
+            let mut context = ExecutionContext::with_access_plan(
+                &mut state,
+                None,
+                &input.managed_state.access_plan,
+            );
+            let result = application
+                .execute(&mut context, action)
+                .map_err(Into::into);
+            (result, context.transition_valid_until())
+        };
+        match result {
+            Ok(()) => {
+                state.commit_transaction().map_err(|_| GuestError::State)?;
+                merge_validity(&mut transition_valid_until, action_valid_until);
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Applied,
+                    error_code: None,
+                });
+            }
+            Err(StateAccessError::MissingWitness | StateAccessError::InvalidProof) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                return Err(GuestError::State);
+            }
+            Err(StateAccessError::NeedState(_)) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                return Err(GuestError::State);
+            }
+            Err(StateAccessError::ApplicationFailed(error_code)) => {
+                if error_code & 0x8000_0000 != 0 {
+                    state
+                        .rollback_transaction()
+                        .map_err(|_| GuestError::State)?;
+                } else {
+                    state.commit_transaction().map_err(|_| GuestError::State)?;
+                    merge_validity(&mut transition_valid_until, action_valid_until);
+                }
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Failed,
+                    error_code: Some(error_code),
+                });
+            }
+            Err(StateAccessError::Rejected(error_code)) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Rejected,
+                    error_code: Some(error_code),
+                });
+            }
+            Err(_) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Failed,
+                    error_code: Some(0x8000_0001),
+                });
+            }
+        }
+    }
+    let (new_root, diff) = state.finish().map_err(|_| GuestError::State)?;
+    Ok((
+        parent_root,
+        new_root,
+        receipts,
+        diff,
+        transition_valid_until,
+    ))
+}
+
 pub fn refine_v2_owned<A>(
     application: &A,
     input: RuntimeRefineInputV1,
@@ -608,6 +747,16 @@ where
                 receipts.push(ActionReceiptV1 {
                     action_hash,
                     status: ActionStatusV1::Failed,
+                    error_code: Some(error_code),
+                });
+            }
+            Err(StateAccessError::Rejected(error_code)) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Rejected,
                     error_code: Some(error_code),
                 });
             }
@@ -715,6 +864,16 @@ where
                 receipts.push(ActionReceiptV1 {
                     action_hash,
                     status: ActionStatusV1::Failed,
+                    error_code: Some(error_code),
+                });
+            }
+            Err(StateAccessError::Rejected(error_code)) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Rejected,
                     error_code: Some(error_code),
                 });
             }

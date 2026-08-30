@@ -1,10 +1,11 @@
 use service_runtime_core::{
-    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ManagedStateCommitmentV1,
-    RuntimeRefineInputV1, RuntimeRefineOutputV2, ServiceApplication, ServiceKeyV1,
-    StateAccessError, StateAccessPlanV1, StateDiffV1, StateQueryResponseV1, StateRecoveryV1,
-    StateRoot, EMPTY_STATE_ROOT_V1, MANAGED_STATE_COMMITMENT_KEY_V1,
+    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ManagedStateAccess,
+    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineInputV2, RuntimeRefineOutputV2,
+    ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1, StateDiffV1,
+    StateQueryResponseV1, StateRecoveryV1, StateRoot, EMPTY_STATE_ROOT_V1,
+    MANAGED_STATE_COMMITMENT_KEY_V1,
 };
-use service_runtime_guest::refine_v2;
+use service_runtime_guest::{refine_input_v2, refine_v2};
 use service_runtime_state::{FullState, StateError, StateTransaction};
 use sp_trie::StorageProof;
 use std::collections::BTreeMap;
@@ -14,6 +15,7 @@ pub enum ProviderError {
     State(StateError),
     UnavailableRoot,
     InvalidRecovery,
+    MalformedResponse,
 }
 
 impl From<StateError> for ProviderError {
@@ -107,14 +109,316 @@ pub struct BuiltManagedWorkV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuiltManagedWorkV2 {
+    pub context: FinalizedContextV1,
+    pub service: ServiceKeyV1,
+    pub parent_root: StateRoot,
+    pub refine_input: RuntimeRefineInputV2,
+    pub predicted_output: RuntimeRefineOutputV2,
+}
+
+pub trait ServiceStateProvider {
+    type Error;
+
+    fn value_at(
+        &self,
+        service: ServiceKeyV1,
+        root: StateRoot,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Self::Error>;
+
+    fn build_witness(
+        &self,
+        service: ServiceKeyV1,
+        root: StateRoot,
+        plan: &StateAccessPlanV1,
+    ) -> Result<service_runtime_core::ManagedStateWitnessV2, Self::Error>;
+
+    fn get(
+        &self,
+        service: ServiceKeyV1,
+        root: StateRoot,
+        key: &[u8],
+    ) -> Result<StateQueryResponseV1, Self::Error>;
+}
+
+/// Optional capabilities for a provider that keeps materialized snapshots.
+///
+/// The execution builder only depends on [`ServiceStateProvider`].  This
+/// extension is retained for the in-memory/reference backend and for the
+/// legacy V1 producer path; remote proof providers do not need to implement
+/// it.
+pub trait MaterializedServiceStateProvider: ServiceStateProvider {
+    fn materialized_root(&self, service: ServiceKeyV1) -> Result<StateRoot, Self::Error>;
+
+    fn apply_recovery(
+        &mut self,
+        service: ServiceKeyV1,
+        output: &RuntimeRefineOutputV2,
+    ) -> Result<(), Self::Error>;
+
+    fn open(&self, service: ServiceKeyV1, root: StateRoot) -> Result<FullState, Self::Error>;
+
+    fn build_witness_v1(
+        &self,
+        service: ServiceKeyV1,
+        parent_root: StateRoot,
+        plan: &StateAccessPlanV1,
+    ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error>;
+}
+
+pub struct AuthenticatedWorkBuilder<'a, Source, Provider> {
+    source: &'a mut Source,
+    provider: &'a Provider,
+}
+
+impl<'a, Source, Provider> AuthenticatedWorkBuilder<'a, Source, Provider>
+where
+    Source: FinalizedManagedStateSource,
+    Provider: ServiceStateProvider,
+{
+    pub fn new(source: &'a mut Source, provider: &'a Provider) -> Self {
+        Self { source, provider }
+    }
+
+    pub fn build_actions<Application>(
+        &mut self,
+        service: ServiceKeyV1,
+        application: &Application,
+        actions: Vec<Vec<u8>>,
+    ) -> Result<BuiltManagedWorkV2, WorkBuilderError<Source::Error, Provider::Error>>
+    where
+        Application: ServiceApplication,
+        Application::Error: Into<StateAccessError>,
+    {
+        let context = self
+            .source
+            .finalized_context()
+            .map_err(WorkBuilderError::Source)?;
+        let commitment = self
+            .source
+            .service_storage_at(&context, service, MANAGED_STATE_COMMITMENT_KEY_V1)
+            .map_err(WorkBuilderError::Source)?;
+        let parent_root = match commitment {
+            Some(bytes) => {
+                ManagedStateCommitmentV1::decode(&bytes)
+                    .map_err(|_| WorkBuilderError::InvalidCommitment)?
+                    .root
+            }
+            None => EMPTY_STATE_ROOT_V1,
+        };
+
+        let mut keys = initial_runtime_keys(&actions);
+        let mut known = BTreeMap::new();
+        for key in &keys {
+            let value = self
+                .provider
+                .value_at(service, parent_root, key)
+                .map_err(WorkBuilderError::Provider)?;
+            known.insert(key.clone(), value);
+        }
+
+        let mut planning_result = None;
+        for _round in 0..=MAX_PLANNING_ROUNDS {
+            let plan =
+                StateAccessPlanV1::from_keys(keys.iter()).map_err(WorkBuilderError::StateWire)?;
+            let mut planning_state = PlanningState::new(known.clone());
+            let result = planning_execute(application, &mut planning_state, &plan, &actions)
+                .map_err(WorkBuilderError::Application)?;
+            match result {
+                PlanningOutcome::NeedState(key) => {
+                    if known.contains_key(&key) {
+                        return Err(WorkBuilderError::ProviderInconsistent);
+                    }
+                    let value = self
+                        .provider
+                        .value_at(service, parent_root, &key)
+                        .map_err(WorkBuilderError::Provider)?;
+                    known.insert(key.clone(), value);
+                    keys.push(key);
+                    keys.sort();
+                    keys.dedup();
+                }
+                PlanningOutcome::Complete => {
+                    planning_result = Some(());
+                    break;
+                }
+            }
+        }
+        if planning_result.is_none() {
+            return Err(WorkBuilderError::PlanningLimit);
+        }
+
+        let plan =
+            StateAccessPlanV1::from_keys(keys.iter()).map_err(WorkBuilderError::StateWire)?;
+        let witness = self
+            .provider
+            .build_witness(service, parent_root, &plan)
+            .map_err(WorkBuilderError::Provider)?;
+        let refine_input = RuntimeRefineInputV2 {
+            version: RuntimeRefineInputV2::VERSION,
+            managed_state: witness,
+            actions,
+        };
+        let predicted_output = refine_input_v2(application, &refine_input)
+            .map_err(|_| WorkBuilderError::Verification)?;
+        Ok(BuiltManagedWorkV2 {
+            context,
+            service,
+            parent_root,
+            refine_input,
+            predicted_output,
+        })
+    }
+}
+
+const MAX_PLANNING_ROUNDS: usize = 4096;
+
+fn initial_runtime_keys(actions: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut keys = Vec::new();
+    for action in actions {
+        if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v2(action) {
+            if signed.public_key.len() == 32 {
+                let mut account = [0; 32];
+                account.copy_from_slice(signed.public_key);
+                keys.push(service_runtime_core::wallet_nonce_key_v1(&account));
+            }
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+enum PlanningOutcome {
+    Complete,
+    NeedState(Vec<u8>),
+}
+
+fn planning_execute<Application>(
+    application: &Application,
+    state: &mut PlanningState,
+    plan: &StateAccessPlanV1,
+    actions: &[Vec<u8>],
+) -> Result<PlanningOutcome, StateAccessError>
+where
+    Application: ServiceApplication,
+    Application::Error: Into<StateAccessError>,
+{
+    for action in actions {
+        state.begin_transaction()?;
+        let result = {
+            let mut context = ExecutionContext::with_access_plan(state, None, plan);
+            application
+                .execute(&mut context, action)
+                .map_err(Into::into)
+        };
+        match result {
+            Ok(()) => state.commit_transaction()?,
+            Err(StateAccessError::NeedState(key)) => {
+                let _ = state.rollback_transaction();
+                return Ok(PlanningOutcome::NeedState(key));
+            }
+            Err(StateAccessError::ApplicationFailed(code)) if code & 0x8000_0000 == 0 => {
+                state.commit_transaction()?;
+            }
+            Err(_) => {
+                let _ = state.rollback_transaction();
+            }
+        }
+    }
+    Ok(PlanningOutcome::Complete)
+}
+
+struct PlanningState {
+    base: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    transactions: Vec<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+}
+
+impl PlanningState {
+    fn new(base: BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> Self {
+        Self {
+            base,
+            writes: BTreeMap::new(),
+            transactions: Vec::new(),
+        }
+    }
+
+    fn lookup(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
+        for transaction in self.transactions.iter().rev() {
+            if let Some(value) = transaction.get(key) {
+                return Ok(value.clone());
+            }
+        }
+        if let Some(value) = self.writes.get(key) {
+            return Ok(value.clone());
+        }
+        self.base
+            .get(key)
+            .cloned()
+            .ok_or_else(|| StateAccessError::NeedState(key.to_vec()))
+    }
+}
+
+impl ManagedStateAccess for PlanningState {
+    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
+        self.lookup(key)
+    }
+
+    fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), StateAccessError> {
+        let _ = self.lookup(key)?;
+        let target = self
+            .transactions
+            .last_mut()
+            .ok_or(StateAccessError::Backend)?;
+        target.insert(key.to_vec(), Some(value.to_vec()));
+        Ok(())
+    }
+
+    fn delete(&mut self, key: &[u8]) -> Result<(), StateAccessError> {
+        let _ = self.lookup(key)?;
+        let target = self
+            .transactions
+            .last_mut()
+            .ok_or(StateAccessError::Backend)?;
+        target.insert(key.to_vec(), None);
+        Ok(())
+    }
+
+    fn begin_transaction(&mut self) -> Result<(), StateAccessError> {
+        self.transactions.push(BTreeMap::new());
+        Ok(())
+    }
+
+    fn commit_transaction(&mut self) -> Result<(), StateAccessError> {
+        let changes = self.transactions.pop().ok_or(StateAccessError::Backend)?;
+        if let Some(parent) = self.transactions.last_mut() {
+            parent.extend(changes);
+        } else {
+            self.writes.extend(changes);
+        }
+        Ok(())
+    }
+
+    fn rollback_transaction(&mut self) -> Result<(), StateAccessError> {
+        self.transactions.pop().ok_or(StateAccessError::Backend)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkBuilderError<SourceError, ProviderError> {
     Source(SourceError),
     Provider(ProviderError),
     InvalidCommitment,
     State(StateError),
     Application(StateAccessError),
+    StateWire(service_runtime_core::WireError),
     Verification,
     ProducerVerifierMismatch,
+    ProviderInconsistent,
+    PlanningLimit,
 }
 
 pub struct ManagedStateWorkBuilder<'a, Source, Provider> {
@@ -125,7 +429,7 @@ pub struct ManagedStateWorkBuilder<'a, Source, Provider> {
 impl<'a, Source, Provider> ManagedStateWorkBuilder<'a, Source, Provider>
 where
     Source: FinalizedManagedStateSource,
-    Provider: ServiceStateProvider,
+    Provider: MaterializedServiceStateProvider,
 {
     pub fn new(source: &'a mut Source, provider: &'a Provider) -> Self {
         Self { source, provider }
@@ -291,32 +595,6 @@ fn merge_validity(current: &mut Option<u64>, action: Option<u64>) {
     }
 }
 
-pub trait ServiceStateProvider {
-    type Error;
-
-    /// Returns the last locally materialized root. This is an execution cursor,
-    /// not a canonicality claim; callers must obtain canonical roots from JAM.
-    fn materialized_root(&self, service: ServiceKeyV1) -> Result<StateRoot, Self::Error>;
-    fn build_witness(
-        &self,
-        service: ServiceKeyV1,
-        parent_root: StateRoot,
-        plan: &StateAccessPlanV1,
-    ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error>;
-    fn apply_recovery(
-        &mut self,
-        service: ServiceKeyV1,
-        output: &RuntimeRefineOutputV2,
-    ) -> Result<(), Self::Error>;
-    fn open(&self, service: ServiceKeyV1, root: StateRoot) -> Result<FullState, Self::Error>;
-    fn get(
-        &self,
-        service: ServiceKeyV1,
-        root: StateRoot,
-        key: &[u8],
-    ) -> Result<StateQueryResponseV1, Self::Error>;
-}
-
 #[derive(Clone, Default)]
 pub struct FullStateProvider {
     states: BTreeMap<ServiceKeyV1, BTreeMap<StateRoot, FullState>>,
@@ -350,28 +628,58 @@ pub type MemoryStateProvider = FullStateProvider;
 impl ServiceStateProvider for FullStateProvider {
     type Error = ProviderError;
 
+    fn value_at(
+        &self,
+        service: ServiceKeyV1,
+        root: StateRoot,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        Ok(self.state_at(service, root)?.get(key)?)
+    }
+
+    fn build_witness(
+        &self,
+        service: ServiceKeyV1,
+        root: StateRoot,
+        plan: &StateAccessPlanV1,
+    ) -> Result<service_runtime_core::ManagedStateWitnessV2, Self::Error> {
+        let state = self.state_at(service, root)?;
+        let keys = plan.keys.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let proof = state.proof_for(&keys)?;
+        Ok(service_runtime_core::ManagedStateWitnessV2 {
+            version: service_runtime_core::ManagedStateWitnessV2::VERSION,
+            parent_root: root,
+            access_plan: plan.clone(),
+            storage_proof: proof.into_nodes().into_iter().collect(),
+        })
+    }
+
+    fn get(
+        &self,
+        service: ServiceKeyV1,
+        root: StateRoot,
+        key: &[u8],
+    ) -> Result<StateQueryResponseV1, Self::Error> {
+        let state = self.state_at(service, root)?;
+        let value = state.get(key)?;
+        let proof = state.proof_for(&[key])?;
+        Ok(StateQueryResponseV1 {
+            service_key: service,
+            state_root: root,
+            key: key.to_vec(),
+            value,
+            proof: proof.into_nodes().into_iter().collect(),
+        })
+    }
+}
+
+impl MaterializedServiceStateProvider for FullStateProvider {
     fn materialized_root(&self, service: ServiceKeyV1) -> Result<StateRoot, Self::Error> {
         Ok(self
             .materialized
             .get(&service)
             .copied()
             .unwrap_or(EMPTY_STATE_ROOT_V1))
-    }
-
-    fn build_witness(
-        &self,
-        service: ServiceKeyV1,
-        parent_root: StateRoot,
-        plan: &StateAccessPlanV1,
-    ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error> {
-        let state = self.state_at(service, parent_root)?;
-        let keys = plan.keys.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let proof = state.proof_for(&keys)?;
-        Ok(service_runtime_core::ManagedStateWitnessV1 {
-            version: 1,
-            parent_root,
-            storage_proof: proof.into_nodes().into_iter().collect(),
-        })
     }
 
     fn apply_recovery(
@@ -405,21 +713,19 @@ impl ServiceStateProvider for FullStateProvider {
         self.state_at(service, root)
     }
 
-    fn get(
+    fn build_witness_v1(
         &self,
         service: ServiceKeyV1,
-        root: StateRoot,
-        key: &[u8],
-    ) -> Result<StateQueryResponseV1, Self::Error> {
-        let state = self.open(service, root)?;
-        let value = state.get(key)?;
-        let proof = state.proof_for(&[key])?;
-        Ok(StateQueryResponseV1 {
-            service_key: service,
-            state_root: root,
-            key: key.to_vec(),
-            value,
-            proof: proof.into_nodes().into_iter().collect(),
+        parent_root: StateRoot,
+        plan: &StateAccessPlanV1,
+    ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error> {
+        let state = self.state_at(service, parent_root)?;
+        let keys = plan.keys.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let proof = state.proof_for(&keys)?;
+        Ok(service_runtime_core::ManagedStateWitnessV1 {
+            version: 1,
+            parent_root,
+            storage_proof: proof.into_nodes().into_iter().collect(),
         })
     }
 }
@@ -622,11 +928,40 @@ mod tests {
         impl ServiceStateProvider for MismatchedProvider {
             type Error = ProviderError;
 
+            fn value_at(
+                &self,
+                _service: ServiceKeyV1,
+                _root: StateRoot,
+                _key: &[u8],
+            ) -> Result<Option<Vec<u8>>, Self::Error> {
+                Ok(None)
+            }
+
+            fn build_witness(
+                &self,
+                _service: ServiceKeyV1,
+                _root: StateRoot,
+                _plan: &StateAccessPlanV1,
+            ) -> Result<service_runtime_core::ManagedStateWitnessV2, Self::Error> {
+                unreachable!()
+            }
+
+            fn get(
+                &self,
+                _service: ServiceKeyV1,
+                _root: StateRoot,
+                _key: &[u8],
+            ) -> Result<StateQueryResponseV1, Self::Error> {
+                unreachable!()
+            }
+        }
+
+        impl MaterializedServiceStateProvider for MismatchedProvider {
             fn materialized_root(&self, _service: ServiceKeyV1) -> Result<StateRoot, Self::Error> {
                 Ok(EMPTY_STATE_ROOT_V1)
             }
 
-            fn build_witness(
+            fn build_witness_v1(
                 &self,
                 _service: ServiceKeyV1,
                 _parent_root: StateRoot,
@@ -649,15 +984,6 @@ mod tests {
                 _root: StateRoot,
             ) -> Result<FullState, Self::Error> {
                 Ok(FullState::empty())
-            }
-
-            fn get(
-                &self,
-                _service: ServiceKeyV1,
-                _root: StateRoot,
-                _key: &[u8],
-            ) -> Result<StateQueryResponseV1, Self::Error> {
-                unreachable!()
             }
         }
 
@@ -701,6 +1027,90 @@ mod tests {
                 Vec::new(),
             ),
             Err(WorkBuilderError::ProducerVerifierMismatch)
+        );
+    }
+
+    struct PlanningProbe;
+
+    impl ServiceApplication for PlanningProbe {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            input: &[u8],
+        ) -> Result<(), Self::Error> {
+            let _ = context.state().get(input)?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn authenticated_builder_replays_until_dynamic_key_is_known() {
+        let provider = FullStateProvider::default();
+        let mut source = TestFinalizedSource::default();
+        source.push(finalized(11), None);
+        let built = AuthenticatedWorkBuilder::new(&mut source, &provider)
+            .build_actions(SERVICE, &PlanningProbe, vec![b"dynamic-key".to_vec()])
+            .unwrap();
+        assert_eq!(built.refine_input.version, RuntimeRefineInputV2::VERSION);
+        assert_eq!(
+            built.refine_input.managed_state.access_plan.keys,
+            vec![b"dynamic-key".to_vec()]
+        );
+        assert_eq!(
+            built.predicted_output.receipts[0].status,
+            ActionStatusV1::Applied
+        );
+    }
+
+    struct ChainedDynamicApplication;
+
+    impl ServiceApplication for ChainedDynamicApplication {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            input: &[u8],
+        ) -> Result<(), Self::Error> {
+            let next = context
+                .state()
+                .get(input)?
+                .ok_or(StateAccessError::Backend)?;
+            let _ = context.state().get(&next)?;
+            context.state().set(&next, b"updated")
+        }
+    }
+
+    #[test]
+    fn authenticated_builder_replays_chained_dynamic_access_and_writes() {
+        let mut provider = FullStateProvider::default();
+        let state = FullState::from_pairs([
+            (b"first".as_slice(), b"second".as_slice()),
+            (b"second".as_slice(), b"value".as_slice()),
+        ])
+        .unwrap();
+        let root = provider.insert(SERVICE, state);
+        let mut source = TestFinalizedSource::default();
+        source.push(finalized(12), Some(root));
+
+        let built = AuthenticatedWorkBuilder::new(&mut source, &provider)
+            .build_actions(SERVICE, &ChainedDynamicApplication, vec![b"first".to_vec()])
+            .unwrap();
+        assert_eq!(
+            built.refine_input.managed_state.access_plan.keys,
+            vec![b"first".to_vec(), b"second".to_vec()]
+        );
+        assert_eq!(
+            StateRecoveryV1::decode(&built.predicted_output.recovery_payload)
+                .unwrap()
+                .diff
+                .changes,
+            vec![service_runtime_core::StateChangeV1 {
+                key: b"second".to_vec(),
+                value: Some(b"updated".to_vec()),
+            }]
         );
     }
 
@@ -837,7 +1247,13 @@ mod tests {
         let parent_root = provider.materialized_root(SERVICE).unwrap();
         let plan =
             StateAccessPlanV1::from_keys([b"nonce".as_slice(), b"counter", b"a", b"b"]).unwrap();
-        let witness = provider.build_witness(SERVICE, parent_root, &plan).unwrap();
+        let witness = MaterializedServiceStateProvider::build_witness_v1(
+            provider,
+            SERVICE,
+            parent_root,
+            &plan,
+        )
+        .unwrap();
         let input = RuntimeRefineInputV1 {
             version: 1,
             managed_state: witness,
@@ -854,9 +1270,8 @@ mod tests {
             provider.materialized_root(service).unwrap(),
             EMPTY_STATE_ROOT_V1
         );
-        let response = provider
-            .get(service, EMPTY_STATE_ROOT_V1, b"missing")
-            .unwrap();
+        let response =
+            ServiceStateProvider::get(&provider, service, EMPTY_STATE_ROOT_V1, b"missing").unwrap();
         assert_eq!(response.service_key, service);
         assert_eq!(response.state_root, EMPTY_STATE_ROOT_V1);
         assert_eq!(response.value, None);
@@ -865,7 +1280,7 @@ mod tests {
 
     fn verify_query(response: &StateQueryResponseV1) -> Result<Option<Vec<u8>>, StateError> {
         let mut state = ProofState::from_witness(response.state_root, &response.proof)?;
-        state.get(&response.key)
+        ManagedState::get(&mut state, &response.key)
     }
 
     #[test]
@@ -880,27 +1295,29 @@ mod tests {
         .unwrap();
         let second_root = provider.insert(SERVICE, second);
 
-        let historical = provider.get(SERVICE, first_root, b"score").unwrap();
+        let historical =
+            ServiceStateProvider::get(&provider, SERVICE, first_root, b"score").unwrap();
         assert_eq!(historical.value, Some(b"10".to_vec()));
         assert_eq!(verify_query(&historical).unwrap(), historical.value);
 
-        let latest_materialized = provider.get(SERVICE, second_root, b"score").unwrap();
+        let latest_materialized =
+            ServiceStateProvider::get(&provider, SERVICE, second_root, b"score").unwrap();
         assert_eq!(latest_materialized.value, Some(b"20".to_vec()));
         assert_eq!(
             verify_query(&latest_materialized).unwrap(),
             latest_materialized.value
         );
 
-        let absent = provider.get(SERVICE, first_root, b"missing").unwrap();
+        let absent = ServiceStateProvider::get(&provider, SERVICE, first_root, b"missing").unwrap();
         assert_eq!(absent.value, None);
         assert_eq!(verify_query(&absent).unwrap(), None);
 
         assert_eq!(
-            provider.get(SERVICE, [99; 32], b"score"),
+            ServiceStateProvider::get(&provider, SERVICE, [99; 32], b"score"),
             Err(ProviderError::UnavailableRoot)
         );
         assert_eq!(
-            provider.get(ServiceKeyV1::new([8; 32]), first_root, b"score"),
+            ServiceStateProvider::get(&provider, ServiceKeyV1::new([8; 32]), first_root, b"score"),
             Err(ProviderError::UnavailableRoot)
         );
 
@@ -979,7 +1396,13 @@ mod tests {
             b"b".as_slice(),
         ])
         .unwrap();
-        let mut witness = provider.build_witness(SERVICE, parent_root, &plan).unwrap();
+        let mut witness = MaterializedServiceStateProvider::build_witness_v1(
+            &provider,
+            SERVICE,
+            parent_root,
+            &plan,
+        )
+        .unwrap();
         witness.storage_proof.clear();
         let invalid_input = RuntimeRefineInputV1 {
             version: 1,

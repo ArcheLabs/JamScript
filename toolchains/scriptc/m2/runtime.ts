@@ -182,6 +182,17 @@ export function stateHasRaw(key: Uint8Array): boolean {
   return stateGetRaw(key) !== null;
 }
 
+export function applicationKeyV1(namespace: Uint8Array, canonicalKey: Uint8Array): Uint8Array {
+  if (namespace.length > 65535) failStateView();
+  const output = new Uint8Array(3 + namespace.length + canonicalKey.length);
+  output[0] = 1;
+  output[1] = namespace.length & 255;
+  output[2] = (namespace.length >>> 8) & 255;
+  output.set(namespace, 3);
+  output.set(canonicalKey, 3 + namespace.length);
+  return output;
+}
+
 export function abort(code: number): never {
   if (code < 1 || code > MAX_ABORT_CODE || Math.floor(code) !== code) {
     failStateView();

@@ -30,30 +30,34 @@ pub fn generate_no_std_rust_with_context(
     ir: &ServiceIr,
     context: PortableServiceContext,
 ) -> Result<String, String> {
-    generate_no_std_rust_with_backend(ir, context, None)
+    generate_no_std_rust_with_backend(ir, context, false)
 }
 
 pub fn generate_no_std_rust_with_scriptc_context(
     ir: &ServiceIr,
     context: PortableServiceContext,
 ) -> Result<String, String> {
-    let symbol = ir
-        .actions
-        .first()
-        .and_then(|action| match &action.body {
-            ActionBodyIr::ScriptC { symbol, .. } => Some(symbol.as_str()),
-            ActionBodyIr::Execute(_) => None,
-        })
-        .ok_or_else(|| "language 0.2 service does not contain a ScriptC action".to_string())?;
-    generate_no_std_rust_with_backend(ir, context, Some(symbol))
+    if ir.actions.is_empty()
+        || ir
+            .actions
+            .iter()
+            .any(|action| !matches!(action.body, ActionBodyIr::ScriptC { .. }))
+    {
+        return Err("language 0.2 requires every action to use ScriptC".to_string());
+    }
+    generate_no_std_rust_with_backend(ir, context, true)
 }
 
 fn generate_no_std_rust_with_backend(
     ir: &ServiceIr,
     context: PortableServiceContext,
-    scriptc_symbol: Option<&str>,
+    scriptc: bool,
 ) -> Result<String, String> {
-    let application_source = generate_application_rust_with_context(ir, context, scriptc_symbol)?;
+    let application_source = if scriptc {
+        generate_scriptc_application_rust(ir, context)?
+    } else {
+        generate_application_rust_with_context(ir, context, None)?
+    };
     let stage_entry = if context.diagnostic {
         "service_runtime_guest::guest_support::diagnostic_stage(b\"jamscript:entry\");"
     } else {
@@ -84,10 +88,17 @@ fn generate_no_std_rust_with_backend(
     } else {
         ""
     };
-    let refine_call = if context.diagnostic {
+    let refine_call = if scriptc {
+        "service_runtime_guest::refine_input_v2_owned(&GeneratedApplication, runtime_input)"
+    } else if context.diagnostic {
         "{ let mut diagnostic_observer = service_runtime_guest::guest_support::DiagnosticObserver; service_runtime_guest::refine_v2_owned_with_observer(&GeneratedApplication, runtime_input, &mut diagnostic_observer) }"
     } else {
         "service_runtime_guest::refine_v2_owned(&GeneratedApplication, runtime_input)"
+    };
+    let runtime_input_type = if scriptc {
+        "RuntimeRefineInputV2"
+    } else {
+        "RuntimeRefineInputV1"
     };
     Ok(format!(
         r##"#![no_std]
@@ -96,7 +107,7 @@ fn generate_no_std_rust_with_backend(
 compile_error!("generated service must be built with the official PolkaVM target");
 
 use service_runtime_core::{{
-    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV2, StateRoot,
+    ManagedStateCommitmentV1, {runtime_input_type}, RuntimeRefineOutputV2, StateRoot,
     MANAGED_STATE_COMMITMENT_KEY_V1,
 }};
 #[repr(C)]
@@ -125,7 +136,7 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
     if status != 0 {{ return error_output(1); }}
     {stage_payload}
     let input = unsafe {{ core::slice::from_raw_parts(INPUT.as_ptr(), input_size) }};
-    let runtime_input = match RuntimeRefineInputV1::decode(input) {{
+    let runtime_input = match {runtime_input_type}::decode(input) {{
         Ok(value) => value,
         Err(_) => return error_output(1),
     }};
@@ -244,11 +255,200 @@ pub fn generate_builder_application_rust(
     mut context: PortableServiceContext,
 ) -> Result<String, String> {
     context.diagnostic = false;
-    let symbol = ir.actions.first().and_then(|action| match &action.body {
-        ActionBodyIr::ScriptC { symbol, .. } => Some(symbol.as_str()),
-        ActionBodyIr::Execute(_) => None,
-    });
-    generate_application_rust_with_context(ir, context, symbol)
+    if ir
+        .actions
+        .iter()
+        .all(|action| matches!(action.body, ActionBodyIr::ScriptC { .. }))
+    {
+        generate_scriptc_application_rust(ir, context)
+    } else {
+        generate_application_rust_with_context(ir, context, None)
+    }
+}
+
+fn generate_scriptc_application_rust(
+    ir: &ServiceIr,
+    context: PortableServiceContext,
+) -> Result<String, String> {
+    if ir.actions.is_empty() {
+        return Err("IR contains no action".to_string());
+    }
+    let wallet_only = ir
+        .actions
+        .iter()
+        .all(|action| action.auth == AuthKind::Wallet);
+    let single_public = ir.actions.len() == 1 && ir.actions[0].auth == AuthKind::Public;
+    if !wallet_only && !single_public {
+        return Err(
+            "language 0.2 currently requires either wallet-only actions or one public action"
+                .to_string(),
+        );
+    }
+
+    let declarations = ir
+        .actions
+        .iter()
+        .map(|action| {
+            format!(
+                "    fn {}(payload: *const u8, payload_len: usize, sender: *const u8, sender_len: usize, state: *const u8, state_len: usize, output: *mut *const u8, output_len: *mut usize);",
+                scriptc_entry_symbol(&action.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let known_selectors = ir
+        .actions
+        .iter()
+        .map(|action| {
+            format!(
+                "{} => (),",
+                byte_array_literal(&action_selector(&action.name))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let invoke_arms = ir
+        .actions
+        .iter()
+        .map(|action| {
+            format!(
+                "{} => unsafe {{ {}(payload.as_ptr(), payload.len(), sender.as_ptr(), sender.len(), state_view.as_ptr(), state_view.len(), &mut output, &mut output_len) }},",
+                byte_array_literal(&action_selector(&action.name)),
+                scriptc_entry_symbol(&action.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let allowed_namespaces = ir
+        .states
+        .iter()
+        .map(|state| {
+            format!(
+                "namespace == &{}",
+                byte_array_literal(state.schema.as_bytes())
+            )
+        })
+        .collect::<Vec<_>>();
+    let allowed_namespaces = if allowed_namespaces.is_empty() {
+        "false".to_string()
+    } else {
+        allowed_namespaces.join(" || ")
+    };
+    let wallet_auth = if wallet_only {
+        format!(
+            r##"
+        let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action)
+            .map_err(|error| StateAccessError::Rejected(error.code()))?;
+        match signed.action_selector {{ {known_selectors} _ => return Err(StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::UnknownAction.code())), }}
+        let selected_selector = signed.action_selector;
+        let verified = jamscript_runtime_core::verify_signed_action_v2(
+            signed, NETWORK_DOMAIN, SERVICE_KEY, selected_selector,
+        ).map_err(|error| StateAccessError::Rejected(error.code()))?;
+        let sender = verified.sender;
+        let nonce_key = jamscript_runtime_core::nonce_key(&sender);
+        let nonce_bytes = context.state().get(&nonce_key)?.unwrap_or_default();
+        let expected_nonce = match nonce_bytes.as_slice() {{
+            [] => 0u64,
+            bytes if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?),
+            _ => return Err(StateAccessError::Backend),
+        }};
+        if verified.nonce != expected_nonce {{
+            return Err(StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::NonceMismatch.code()));
+        }}
+        context.constrain_valid_until(verified.valid_until);
+        let next_nonce = expected_nonce.checked_add(1).ok_or(StateAccessError::Backend)?;
+        context.state().set(&nonce_key, &next_nonce.to_le_bytes())?;
+        execute_scriptc(context, selected_selector, verified.payload, &sender)
+"##
+        )
+    } else {
+        let selector = byte_array_literal(&action_selector(&ir.actions[0].name));
+        format!("execute_scriptc(context, {selector}, raw_action, &[])")
+    };
+
+    Ok(format!(
+        r##"mod generated_application_impl {{
+use service_runtime_core::{{ScriptActionResultV1, ServiceApplication, ServiceKeyV1, StateAccessError}};
+
+const SERVICE_KEY: ServiceKeyV1 = ServiceKeyV1::new({service_key});
+const NETWORK_DOMAIN: [u8; 32] = {network_domain};
+
+unsafe extern "C" {{
+    fn jamscript_scriptc_service_init();
+{declarations}
+}}
+
+fn application_key_allowed(key: &[u8]) -> bool {{
+    if key.len() < 3 || key[0] != service_runtime_core::APPLICATION_KEY_CLASS_V1 {{ return false; }}
+    let namespace_len = u16::from_le_bytes([key[1], key[2]]) as usize;
+    let Some(namespace) = key.get(3..3usize.saturating_add(namespace_len)) else {{ return false; }};
+    {allowed_namespaces}
+}}
+
+fn apply_script_result(
+    context: &mut service_runtime_core::ExecutionContext<'_>,
+    result: ScriptActionResultV1,
+) -> Result<(), StateAccessError> {{
+    match result {{
+        ScriptActionResultV1::Applied(diff) => {{
+            for change in diff.changes {{
+                if !application_key_allowed(&change.key) {{ return Err(StateAccessError::ReservedKey); }}
+                match change.value {{
+                    Some(value) => context.state().set(&change.key, &value)?,
+                    None => context.state().delete(&change.key)?,
+                }}
+            }}
+            Ok(())
+        }}
+        ScriptActionResultV1::Abort(code) => Err(StateAccessError::ApplicationFailed(code)),
+        ScriptActionResultV1::NeedState(key) => Err(StateAccessError::NeedState(key)),
+        ScriptActionResultV1::Fatal(code) => Err(StateAccessError::ApplicationFailed(code)),
+    }}
+}}
+
+fn execute_scriptc(
+    context: &mut service_runtime_core::ExecutionContext<'_>,
+    selector: [u8; 8],
+    payload: &[u8],
+    sender: &[u8],
+) -> Result<(), StateAccessError> {{
+    context.begin_transaction()?;
+    let business = (|| -> Result<(), StateAccessError> {{
+        let state_view = context.state_view()?.encode().map_err(|_| StateAccessError::Backend)?;
+        let mut output = core::ptr::null();
+        let mut output_len = 0usize;
+        unsafe {{ jamscript_scriptc_service_init(); }}
+        match selector {{ {invoke_arms} _ => return Err(StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::UnknownAction.code())), }}
+        if output.is_null() && output_len != 0 {{ return Err(StateAccessError::ApplicationFailed(0x8000_0002)); }}
+        if output_len > service_runtime_core::MAX_SCRIPT_ACTION_RESULT_BYTES {{ return Err(StateAccessError::ApplicationFailed(0x8000_0002)); }}
+        let bytes = if output_len == 0 {{ &[] }} else {{ unsafe {{ core::slice::from_raw_parts(output, output_len) }} }};
+        let result = ScriptActionResultV1::decode(bytes)
+            .map_err(|_| StateAccessError::ApplicationFailed(0x8000_0002))?;
+        apply_script_result(context, result)
+    }})();
+    match business {{
+        Ok(()) => context.commit_transaction(),
+        Err(error) => {{ context.rollback_transaction()?; Err(error) }}
+    }}
+}}
+
+pub struct GeneratedApplication;
+impl ServiceApplication for GeneratedApplication {{
+    type Error = StateAccessError;
+    fn execute(
+        &self,
+        context: &mut service_runtime_core::ExecutionContext<'_>,
+        raw_action: &[u8],
+    ) -> Result<(), Self::Error> {{
+        {wallet_auth}
+    }}
+}}
+}}
+pub use generated_application_impl::GeneratedApplication;
+"##,
+        service_key = byte_array_literal(&context.service_key),
+        network_domain = byte_array_literal(&context.genesis_hash),
+    ))
 }
 
 fn generate_application_rust_with_context(
@@ -576,6 +776,9 @@ fn native_symbol(module: &str, function: &str) -> String {
 fn scriptc_native_symbol(action: &str) -> String {
     format!("jamscript_scriptc_{action}_v1")
 }
+fn scriptc_entry_symbol(action: &str) -> String {
+    format!("jamscript_scriptc_{action}_entry_v2")
+}
 fn byte_array_literal(bytes: &[u8]) -> String {
     format!(
         "[{}]",
@@ -603,6 +806,47 @@ fn management_policy_literal(policy: ManagementPolicyConfig) -> String {
 mod tests {
     use super::*;
     use jamscript_ir::{ActionIr, FieldIr, NativeImportIr, TypeIr};
+
+    #[test]
+    fn scriptc_codegen_dispatches_every_action_through_runtime_input_v2() {
+        let script_body = |name: &str| ActionIr {
+            name: name.into(),
+            auth: AuthKind::Wallet,
+            input: vec![FieldIr {
+                name: "value".into(),
+                ty: TypeIr::U32,
+            }],
+            body: ActionBodyIr::ScriptC {
+                symbol: name.into(),
+                source_unit: "service.ts".into(),
+                state_effect: None,
+            },
+        };
+        let ir = ServiceIr {
+            package_name: "multi".into(),
+            package_version: "0.2.0".into(),
+            source: String::new(),
+            states: vec![jamscript_ir::StateIr {
+                name: "values".into(),
+                schema: "test.values/v1".into(),
+                kind: jamscript_ir::StateKind::Map,
+                key_type: TypeIr::Address,
+                value_type: TypeIr::U32,
+            }],
+            actions: vec![script_body("create"), script_body("update")],
+            queries: Vec::new(),
+            native_imports: Vec::new(),
+        };
+        let source =
+            generate_no_std_rust_with_scriptc_context(&ir, PortableServiceContext::default())
+                .unwrap();
+        assert!(source.contains("RuntimeRefineInputV2::decode"));
+        assert!(source.contains("refine_input_v2_owned"));
+        assert!(source.contains("jamscript_scriptc_create_entry_v2"));
+        assert!(source.contains("jamscript_scriptc_update_entry_v2"));
+        assert!(source.contains("ScriptActionResultV1::NeedState"));
+        assert!(!source.contains("ACTION_SELECTOR"));
+    }
     #[test]
     fn emits_canonical_bounded_bytes_and_native_abi() {
         let source = generate_no_std_rust(&ServiceIr {

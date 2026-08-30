@@ -210,7 +210,7 @@ impl MiniJamTarget {
     ) -> Result<BuildMetadata> {
         let toolchain_root = workspace_root().join("toolchains/scriptc");
         let compiler = ScriptcCompiler::from_toolchain(&toolchain_root)?;
-        let artifact = compiler.compile_service_action(ir, &output_dir.join("scriptc"))?;
+        let artifact = compiler.compile_service(ir, &output_dir.join("scriptc"))?;
         self.build_probe_inner(
             project_root,
             ir,
@@ -363,11 +363,13 @@ impl MiniJamTarget {
         ];
         if scriptc.is_some() {
             checksum_files.extend([
-                "scriptc/scriptc_action.ts",
-                "scriptc/scriptc_action.json",
-                "scriptc/scriptc_action.profile.json",
-                "scriptc/scriptc_action.lib.c",
-                "scriptc/scriptc_action_adapter.c",
+                "scriptc/scriptc_service.ts",
+                "scriptc/scriptc_service.json",
+                "scriptc/scriptc_service.transformed.ts",
+                "scriptc/scriptc_runtime.ts",
+                "scriptc/scriptc_service.profile.json",
+                "scriptc/scriptc_service.lib.c",
+                "scriptc/scriptc_service_adapter.c",
             ]);
         }
         let files = checksum_files

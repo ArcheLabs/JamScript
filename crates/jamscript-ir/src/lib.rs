@@ -660,7 +660,7 @@ fn abi_output(action: &ActionIr) -> Result<AbiTypeDescriptor, AbiError> {
                 Ok(AbiTypeDescriptor::U64)
             }
         },
-        ActionBodyIr::ScriptC { .. } => Ok(AbiTypeDescriptor::U64),
+        ActionBodyIr::ScriptC { .. } => Ok(AbiTypeDescriptor::Unit),
     }
 }
 

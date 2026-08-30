@@ -40,6 +40,9 @@ pub const MAX_WITNESS_NODE_BYTES: usize = 64 * 1024;
 pub const MAX_WITNESS_BYTES: usize = 1024 * 1024;
 pub const MAX_WITNESS_ENCODED_BYTES: usize =
     1 + 32 + 4 + (MAX_WITNESS_NODES * 4) + MAX_WITNESS_BYTES;
+pub const MAX_ACCESS_PLAN_ENCODED_BYTES: usize = MAX_STATE_VIEW_BYTES;
+pub const MAX_WITNESS_V2_ENCODED_BYTES: usize =
+    1 + 32 + 4 + MAX_ACCESS_PLAN_ENCODED_BYTES + 4 + (MAX_WITNESS_NODES * 4) + MAX_WITNESS_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ServiceKeyV1([u8; 32]);
@@ -738,6 +741,86 @@ impl ManagedStateWitnessV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedStateWitnessV2 {
+    pub version: u8,
+    pub parent_root: StateRoot,
+    pub access_plan: StateAccessPlanV1,
+    pub storage_proof: Vec<Vec<u8>>,
+}
+
+impl ManagedStateWitnessV2 {
+    pub const VERSION: u8 = 2;
+
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        if self.version != Self::VERSION || self.storage_proof.len() > MAX_WITNESS_NODES {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let plan = self.access_plan.encode()?;
+        if plan.len() > MAX_ACCESS_PLAN_ENCODED_BYTES {
+            return Err(WireError::TooManyItems);
+        }
+        let mut writer = Writer::new();
+        writer.u8(self.version);
+        writer.raw(&self.parent_root);
+        writer.bytes_u32(&plan)?;
+        writer.u32(u32::try_from(self.storage_proof.len()).map_err(|_| WireError::LengthOverflow)?);
+        let mut total_bytes = 0usize;
+        for node in &self.storage_proof {
+            if node.len() > MAX_WITNESS_NODE_BYTES {
+                return Err(WireError::TooManyItems);
+            }
+            total_bytes = total_bytes
+                .checked_add(node.len())
+                .ok_or(WireError::LengthOverflow)?;
+            if total_bytes > MAX_WITNESS_BYTES {
+                return Err(WireError::TooManyItems);
+            }
+            writer.bytes_u32(node)?;
+        }
+        Ok(writer.finish())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() > MAX_WITNESS_V2_ENCODED_BYTES {
+            return Err(WireError::TooManyItems);
+        }
+        let mut reader = Reader::new(bytes);
+        let version = reader.u8()?;
+        if version != Self::VERSION {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let parent_root = reader.array::<32>()?;
+        let access_plan =
+            StateAccessPlanV1::decode(&reader.bytes_limited(MAX_ACCESS_PLAN_ENCODED_BYTES)?)?;
+        let count = reader.u32()? as usize;
+        if count > MAX_WITNESS_NODES {
+            return Err(WireError::TooManyItems);
+        }
+        let mut storage_proof = Vec::with_capacity(count);
+        let mut total_bytes = 0usize;
+        for _ in 0..count {
+            let remaining = MAX_WITNESS_BYTES
+                .checked_sub(total_bytes)
+                .ok_or(WireError::TooManyItems)?;
+            let node = reader.bytes_limited(remaining.min(MAX_WITNESS_NODE_BYTES))?;
+            total_bytes = total_bytes
+                .checked_add(node.len())
+                .ok_or(WireError::LengthOverflow)?;
+            storage_proof.push(node);
+        }
+        if reader.remaining() != 0 {
+            return Err(WireError::InvalidEncoding);
+        }
+        Ok(Self {
+            version,
+            parent_root,
+            access_plan,
+            storage_proof,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeRefineInputV1 {
     pub version: u8,
     pub managed_state: ManagedStateWitnessV1,
@@ -783,6 +866,58 @@ impl RuntimeRefineInputV1 {
         Ok(Self {
             version,
             managed_state: witness,
+            actions,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRefineInputV2 {
+    pub version: u8,
+    pub managed_state: ManagedStateWitnessV2,
+    pub actions: Vec<Vec<u8>>,
+}
+
+impl RuntimeRefineInputV2 {
+    pub const VERSION: u8 = 2;
+
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        if self.version != Self::VERSION || self.actions.len() > MAX_RUNTIME_ACTIONS {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let witness = self.managed_state.encode()?;
+        let mut writer = Writer::new();
+        writer.u8(self.version);
+        writer.bytes_u32(&witness)?;
+        writer.u32(u32::try_from(self.actions.len()).map_err(|_| WireError::LengthOverflow)?);
+        for action in &self.actions {
+            writer.bytes_u32(action)?;
+        }
+        Ok(writer.finish())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut reader = Reader::new(bytes);
+        let version = reader.u8()?;
+        if version != Self::VERSION {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let managed_state =
+            ManagedStateWitnessV2::decode(&reader.bytes_limited(MAX_WITNESS_V2_ENCODED_BYTES)?)?;
+        let count = reader.u32()? as usize;
+        if count > MAX_RUNTIME_ACTIONS {
+            return Err(WireError::TooManyItems);
+        }
+        let mut actions = Vec::with_capacity(count);
+        for _ in 0..count {
+            actions.push(reader.bytes_u32()?);
+        }
+        if reader.remaining() != 0 {
+            return Err(WireError::InvalidEncoding);
+        }
+        Ok(Self {
+            version,
+            managed_state,
             actions,
         })
     }
@@ -1164,6 +1299,7 @@ pub trait ServiceApplication {
 
 pub struct ExecutionContext<'a> {
     state: &'a mut dyn ManagedStateAccess,
+    access_plan: Option<&'a StateAccessPlanV1>,
     sender: Option<[u8; 32]>,
     transition_valid_until: Option<u64>,
 }
@@ -1172,6 +1308,20 @@ impl<'a> ExecutionContext<'a> {
     pub fn new(state: &'a mut dyn ManagedStateAccess, sender: Option<[u8; 32]>) -> Self {
         Self {
             state,
+            access_plan: None,
+            sender,
+            transition_valid_until: None,
+        }
+    }
+
+    pub fn with_access_plan(
+        state: &'a mut dyn ManagedStateAccess,
+        sender: Option<[u8; 32]>,
+        access_plan: &'a StateAccessPlanV1,
+    ) -> Self {
+        Self {
+            state,
+            access_plan: Some(access_plan),
             sender,
             transition_valid_until: None,
         }
@@ -1179,6 +1329,21 @@ impl<'a> ExecutionContext<'a> {
 
     pub fn state(&mut self) -> &mut dyn ManagedStateAccess {
         self.state
+    }
+
+    pub fn state_view(&mut self) -> Result<StateViewV1, StateAccessError> {
+        let plan = self.access_plan.ok_or(StateAccessError::Backend)?;
+        let mut entries = Vec::new();
+        for key in &plan.keys {
+            if key.first() != Some(&APPLICATION_KEY_CLASS_V1) {
+                continue;
+            }
+            entries.push(StateViewEntryV1 {
+                key: key.clone(),
+                value: self.state.get(key)?,
+            });
+        }
+        StateViewV1::from_entries(entries).map_err(|_| StateAccessError::Backend)
     }
 
     pub fn sender(&self) -> Option<[u8; 32]> {
@@ -1227,12 +1392,14 @@ pub trait ManagedStateAccess {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StateAccessError {
     MissingWitness,
     InvalidProof,
     Backend,
     ReservedKey,
+    NeedState(Vec<u8>),
+    Rejected(u32),
     ApplicationFailed(u32),
 }
 
@@ -1491,6 +1658,26 @@ mod tests {
         assert_eq!(
             ManagedStateWitnessV1::decode(&witness.encode().unwrap()),
             Ok(witness)
+        );
+
+        let witness_v2 = ManagedStateWitnessV2 {
+            version: ManagedStateWitnessV2::VERSION,
+            parent_root: [4; 32],
+            access_plan: StateAccessPlanV1::from_keys([b"a".as_slice(), b"b"]).unwrap(),
+            storage_proof: vec![vec![5, 6]],
+        };
+        assert_eq!(
+            ManagedStateWitnessV2::decode(&witness_v2.encode().unwrap()),
+            Ok(witness_v2.clone())
+        );
+        let input_v2 = RuntimeRefineInputV2 {
+            version: RuntimeRefineInputV2::VERSION,
+            managed_state: witness_v2,
+            actions: vec![vec![7]],
+        };
+        assert_eq!(
+            RuntimeRefineInputV2::decode(&input_v2.encode().unwrap()),
+            Ok(input_v2)
         );
     }
 
