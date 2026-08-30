@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
   "serviceKey": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "instanceId": "0xbf688488e03e443f78925fd1d858e7d55bf0b5942c4c390fb32fdae9c944835e",
   "name": "game-replay"
 }

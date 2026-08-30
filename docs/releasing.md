@@ -1,4 +1,4 @@
-# JamScript v0 Testnet Developer Preview
+# JamScript Formal V1 Testnet Developer Preview
 
 JamScript v0 is released as a testnet developer preview. Its supported product path is:
 
@@ -13,10 +13,17 @@ JamScript source
 
 ## Release boundary
 
-The v0 release freezes `SignedActionV2`, the generated ABI/state descriptors, Polkadot
+The Formal V1 release freezes `SignedActionV1`, `RuntimeRefineInputV1`,
+`RuntimeRefineOutputV1`, `ManagedStateWitnessV1`, the generated ABI/state descriptors, Polkadot
 `LayoutV1<Blake2Hasher>`, managed-state recovery v1, and Builder artifact v1. A release bundle
 contains `protocol-v0.json` and `checksums.json`; `jamscript inspect <bundle>` verifies every
 listed artifact before displaying its metadata.
+
+MiniJamSpec compatibility is an execution-boundary property. JamScript does
+not target JAM FullSpec directly and does not embed MiniJamSpec constants. It
+targets the MiniJAM ABI and network identity. Every release must use the exact
+MiniJAM revision in `toolchains/minijam.lock`, and the generated bundle must
+record the matching MiniJAM SDK and converter revisions.
 
 The Builder/Provider process is deployed per Service. It statically compiles the generated host
 application and the same native C sources used by the PVM Service. Loading arbitrary native

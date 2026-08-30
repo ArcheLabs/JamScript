@@ -2,19 +2,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import {
-  decodeRuntimeRefineOutputV2,
-  encodeRuntimeRefineOutputV2,
+  decodeRuntimeRefineOutputV1,
+  encodeRuntimeRefineOutputV1,
   parseHex,
   toHex,
 } from "../dist/index.js";
 
 const vector = JSON.parse(
-  fs.readFileSync(new URL("../../../test-vectors/runtime-refine-output-v2.json", import.meta.url)),
+  fs.readFileSync(new URL("../../../test-vectors/runtime-refine-output-v1.json", import.meta.url)),
 );
 
-test("RuntimeRefineOutputV2 matches the Rust golden vector", () => {
+test("RuntimeRefineOutputV1 matches the Rust golden vector", () => {
   const output = {
-    version: 2,
+    version: 1,
     parentRoot: parseHex(vector.parentRoot, 32),
     newRoot: parseHex(vector.newRoot, 32),
     transitionValidUntil: BigInt(vector.transitionValidUntil),
@@ -26,10 +26,10 @@ test("RuntimeRefineOutputV2 matches the Rust golden vector", () => {
     })),
     recoveryPayload: parseHex(vector.recoveryPayload),
   };
-  assert.equal(toHex(encodeRuntimeRefineOutputV2(output)), vector.encoded);
-  assert.deepEqual(decodeRuntimeRefineOutputV2(parseHex(vector.encoded)), output);
+  assert.equal(toHex(encodeRuntimeRefineOutputV1(output)), vector.encoded);
+  assert.deepEqual(decodeRuntimeRefineOutputV1(parseHex(vector.encoded)), output);
   assert.throws(
-    () => decodeRuntimeRefineOutputV2(parseHex(vector.encoded + "00")),
-    /trailing RuntimeRefineOutputV2 bytes/,
+    () => decodeRuntimeRefineOutputV1(parseHex(vector.encoded + "00")),
+    /trailing RuntimeRefineOutputV1 bytes/,
   );
 });

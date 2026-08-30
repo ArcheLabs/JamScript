@@ -8,6 +8,7 @@ members = [
   "crates/service-runtime-host",
   "crates/jamscript-crypto",
   "crates/jamscript-ir",
+  "crates/jamscript-codec",
   "crates/jamscript-parser",
   "crates/jamscript-protocol",
   "crates/jamscript-runtime",

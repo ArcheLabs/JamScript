@@ -55,6 +55,12 @@ int isspace(int value) { return value == ' ' || (value >= '\t' && value <= '\r')
 int tolower(int value) { return value >= 'A' && value <= 'Z' ? value + ('a' - 'A') : value; }
 int toupper(int value) { return value >= 'a' && value <= 'z' ? value - ('a' - 'A') : value; }
 
+const char *strchr(const char *value, int needle) {
+  if (!value) return (const char *)0;
+  for (; *value; ++value) if ((unsigned char)*value == (unsigned char)needle) return value;
+  return needle == 0 ? value : (const char *)0;
+}
+
 char *getenv(const char *name) { (void)name; return (char *)0; }
 long strtol(const char *value, char **end, int base) {
   (void)value;
@@ -82,6 +88,57 @@ double fmod(double value, double divisor) {
   if (divisor == 0.0) return 0.0;
   return value - trunc(value / divisor) * divisor;
 }
+
+/* ScriptC's selected runtime normally supplies these from scr_number.c and
+ * scr_lib.c.  Keep the freestanding subset self-contained: dynamic state
+ * fixtures use bitwise key/tag operations, but pulling in scr_lib.c would
+ * also pull host-only directory APIs into the guest ELF. */
+static uint32_t jamscript_to_uint32(double value) {
+  if (!isfinite(value)) return 0;
+  double truncated = fmod(trunc(value), 4294967296.0);
+  if (truncated < 0.0) truncated += 4294967296.0;
+  return (uint32_t)truncated;
+}
+
+static double jamscript_bits_as_int32(uint32_t value) {
+  return value >= UINT32_C(0x80000000)
+             ? (double)(int32_t)(value - UINT32_C(0x80000000)) + (double)INT32_MIN
+             : (double)value;
+}
+
+double scr_bit_and(double a, double b) {
+  return jamscript_bits_as_int32(jamscript_to_uint32(a) & jamscript_to_uint32(b));
+}
+
+double scr_bit_or(double a, double b) {
+  return jamscript_bits_as_int32(jamscript_to_uint32(a) | jamscript_to_uint32(b));
+}
+
+double scr_bit_xor(double a, double b) {
+  return jamscript_bits_as_int32(jamscript_to_uint32(a) ^ jamscript_to_uint32(b));
+}
+
+double scr_bit_shl(double a, double b) {
+  return jamscript_bits_as_int32(jamscript_to_uint32(a) << (jamscript_to_uint32(b) & 31u));
+}
+
+double scr_bit_shr(double a, double b) {
+  uint32_t value = jamscript_to_uint32(a);
+  uint32_t shift = jamscript_to_uint32(b) & 31u;
+  uint32_t result = value >> shift;
+  if ((value & UINT32_C(0x80000000)) != 0 && shift != 0)
+    result |= ~(UINT32_C(0xffffffff) >> shift);
+  return jamscript_bits_as_int32(result);
+}
+
+double scr_bit_ushr(double a, double b) {
+  return (double)(jamscript_to_uint32(a) >> (jamscript_to_uint32(b) & 31u));
+}
+
+double scr_bit_not(double value) {
+  return jamscript_bits_as_int32(~jamscript_to_uint32(value));
+}
+
 double ldexp(double value, int exponent) {
   double factor = 1.0;
   int direction = exponent < 0 ? -1 : 1;

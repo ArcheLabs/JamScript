@@ -1,20 +1,24 @@
 import { actionByName, queryByName, stateByName, type DeploymentDescriptor } from "./abi.js";
-import { decodeStateValue, decodeValue, encodeActionPayload, type CodecValue } from "./codec.js";
+import { decodeStateValue, decodeValue, encodeActionPayload, encodeValue, type CodecValue } from "./codec.js";
 import {
   actionSelector,
-  encodeSignedActionV2,
+  encodeSignedActionV1,
   MANAGED_STATE_COMMITMENT_KEY_V1,
   nonceKey,
   parseHex,
-  signingDigestV2,
+  signingDigestV1,
   stateKey,
   toHex,
-  type SignedActionV2,
+  type SignedActionV1,
 } from "./crypto.js";
-import { asWorkRpc, RpcError, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
+import {
+  RpcStateProvider,
+  type StateProvider,
+} from "./state-provider.js";
 
 const EMPTY_STATE_ROOT_V1 = "0x03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314";
 
@@ -25,7 +29,7 @@ export type QueryResult = {
 };
 
 export type JamScriptClientOptions = {
-  legacyServiceKvFallback?: boolean;
+  stateProvider?: StateProvider;
 };
 
 export class JamScriptClient {
@@ -40,7 +44,10 @@ export class JamScriptClient {
       throw new Error("unsupported JamScript ABI version");
     }
     this.rpc = asWorkRpc(transport);
+    this.stateProvider = options.stateProvider ?? new RpcStateProvider(transport);
   }
+
+  private readonly stateProvider: StateProvider;
 
   async validateDeployment(): Promise<void> {
     const genesis = await this.rpc.genesisHash();
@@ -54,7 +61,7 @@ export class JamScriptClient {
     const finalized = context ?? (await this.rpc.finalizedContext());
     const root = await this.managedStateRoot(finalized);
     const key = nonceKey(publicKey);
-    const valueBytes = await this.readManagedValue(finalized, root, key);
+    const valueBytes = await this.readManagedValue(root, key);
     if (valueBytes === null) return 0n;
     const value = decodeValue("u64", valueBytes);
     if (typeof value !== "bigint") throw new Error("nonce storage is not u64");
@@ -80,8 +87,8 @@ export class JamScriptClient {
     const nonce = await this.readNonce(signer.publicKey, initialContext);
     const ttl = options.ttl ?? 64n;
     const validUntil = BigInt(initialContext.slot) + ttl;
-    const unsigned: Omit<SignedActionV2, "signature"> = {
-      version: 2,
+    const unsigned: Omit<SignedActionV1, "signature"> = {
+      version: 1,
       networkDomain: parseHex(this.deployment.genesisHash, 32),
       serviceKey: parseHex(this.deployment.serviceKey, 32),
       actionSelector: selector,
@@ -92,9 +99,10 @@ export class JamScriptClient {
       payloadHash: blake2(payload),
       payload,
     };
-    const signature = await signer.signRaw(signingDigestV2(unsigned));
+    const signature = await signer.signRaw(signingDigestV1(unsigned));
     if (signature.length !== 64) throw new Error("sr25519 signRaw must return a 64-byte signature");
-    const signed = encodeSignedActionV2({ ...unsigned, signature });
+    const signed = encodeSignedActionV1({ ...unsigned, signature });
+    const actionHash = toHex(blake2(signed));
     const requestBase = {
       serviceId: this.deployment.serviceId,
       serviceCodeHash: this.deployment.codeHash,
@@ -106,7 +114,7 @@ export class JamScriptClient {
     const retries = options.staleRetries ?? 1;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await this.rpc.submitWork({
+        const submitted = await this.rpc.submitWork({
           ...requestBase,
           context: {
             blockHash: context.blockHash,
@@ -114,6 +122,7 @@ export class JamScriptClient {
             slot: context.slot,
           },
         });
+        return { ...submitted, actionHash };
       } catch (error) {
         if (attempt >= retries || !isStaleContext(error)) throw error;
         context = await this.rpc.finalizedContext();
@@ -121,18 +130,18 @@ export class JamScriptClient {
     }
   }
 
-  async queryLatest(queryName: string, key: Uint8Array): Promise<QueryResult> {
+  async queryLatest(queryName: string, key?: CodecValue): Promise<QueryResult> {
     const query = queryByName(this.deployment.abi, queryName);
     const state = stateByName(this.deployment.abi, query.state);
-    if (query.keyType !== "address" || state.keyType !== "address" || key.length !== 32) {
-      throw new Error("managed-state queries require a 32-byte address key");
-    }
+    const keyBytes = isUnitType(state.keyType)
+      ? new Uint8Array()
+      : encodeValue(state.keyType, key === undefined ? null : key);
+    if (JSON.stringify(query.keyType) !== JSON.stringify(state.keyType)) throw new Error("query key type does not match state key type");
     const context = await this.rpc.finalizedContext();
     const root = await this.managedStateRoot(context);
     const valueBytes = await this.readManagedValue(
-      context,
       root,
-      stateKey(state.schema, key),
+      stateKey(state.schema, keyBytes),
     );
     return {
       value: valueBytes === null
@@ -143,7 +152,7 @@ export class JamScriptClient {
     };
   }
 
-  async query(queryName: string, key: Uint8Array): Promise<QueryResult> {
+  async query(queryName: string, key?: CodecValue): Promise<QueryResult> {
     return this.queryLatest(queryName, key);
   }
 
@@ -162,39 +171,23 @@ export class JamScriptClient {
   }
 
   private async readManagedValue(
-    context: FinalizedContext,
     root: Uint8Array,
     key: Uint8Array,
   ): Promise<Uint8Array | null> {
-    try {
-      const response = await this.rpc.managedStateAt(
-        this.deployment.serviceId,
-        toHex(root),
-        toBase64(key),
-      );
-      if (
-        response.serviceId !== this.deployment.serviceId
-        || response.stateRoot.toLowerCase() !== toHex(root).toLowerCase()
-        || response.keyBase64 !== toBase64(key)
-      ) {
-        throw new Error("managed-state provider response does not match the requested query");
-      }
-      const claimedValue = response.valueBase64 === null ? null : fromBase64(response.valueBase64);
-      return verifyManagedStateProof(
-        root,
-        key,
-        claimedValue,
-        response.proofBase64.map(fromBase64),
-      );
-    } catch (error) {
-      if (!this.options.legacyServiceKvFallback || !isManagedStateUnavailable(error)) throw error;
-      const encoded = await this.rpc.serviceStorageAt(
-        context.blockHash,
-        this.deployment.serviceId,
-        toHex(key),
-      );
-      return encoded === null ? null : decodeStateValue(parseHex(encoded));
+    const response = await this.stateProvider.get({
+      serviceId: this.deployment.serviceId,
+      serviceKey: this.deployment.serviceKey,
+      stateRoot: toHex(root),
+      key,
+    });
+    if (
+      response.serviceId !== this.deployment.serviceId
+      || response.stateRoot.toLowerCase() !== toHex(root).toLowerCase()
+      || !sameBytes(response.key, key)
+    ) {
+      throw new Error("managed-state provider response does not match the requested query");
     }
+    return verifyManagedStateProof(root, key, response.value, response.proof);
   }
 
   workStatus(packageHash: string): Promise<WorkStatusResult> {
@@ -218,6 +211,30 @@ export class JamScriptClient {
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }
+
+  async waitForAction(
+    packageHash: string,
+    actionHash?: string,
+    options: { intervalMs?: number; timeoutMs?: number } = {},
+  ): Promise<WorkStatusResult & { actionReceipt: ActionReceipt }> {
+    const work = await this.waitForWork(packageHash, options);
+    if (work.status === "failed") {
+      throw new RpcError("Work failed before an action receipt was produced", -32040, work);
+    }
+    const expected = actionHash?.toLowerCase();
+    const receipts = work.actionReceipts ?? [];
+    const receipt = expected === undefined && receipts.length === 1
+      ? receipts[0]
+      : receipts.find((item) => item.actionHash.toLowerCase() === expected);
+    if (!receipt) {
+      throw new Error("canonical action receipt is missing from the imported Work result");
+    }
+    return { ...work, actionReceipt: receipt };
+  }
+}
+
+function isUnitType(type: string | { kind: string }): boolean {
+  return typeof type === "string" ? type === "unit" : type.kind === "unit";
 }
 
 function blake2(bytes: Uint8Array): Uint8Array {
@@ -237,14 +254,14 @@ function fromBase64(value: string): Uint8Array {
   return output;
 }
 
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
 function sameHex(left: string, right: string): boolean {
   return left.toLowerCase().replace(/^0x/, "") === right.toLowerCase().replace(/^0x/, "");
 }
 
 function isStaleContext(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === -32010;
-}
-
-function isManagedStateUnavailable(error: unknown): boolean {
-  return error instanceof RpcError && (error.code === -32601 || error.code === -32030);
 }

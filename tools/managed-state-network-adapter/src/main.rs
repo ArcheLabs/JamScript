@@ -14,12 +14,12 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use service_runtime_core::{
-    ManagedStateCommitmentV1, RuntimeRefineOutputV2, ServiceKeyV1, StateRecoveryV1,
+    ManagedStateCommitmentV1, RuntimeRefineOutputV1, ServiceKeyV1, StateRecoveryV1,
     EMPTY_STATE_ROOT_V1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
 use service_runtime_host::{
-    FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider, ManagedStateWorkBuilder,
-    ServiceStateProvider,
+    AuthenticatedWorkBuilder, BuiltManagedWork, FinalizedContextV1, FinalizedManagedStateSource,
+    FullStateProvider, MaterializedServiceStateProvider, ServiceStateProvider,
 };
 
 const MAX_HTTP_BYTES: usize = 8 * 1024 * 1024;
@@ -41,8 +41,8 @@ struct Config {
 #[derive(Default)]
 struct AdapterState {
     provider: FullStateProvider,
-    pending: BTreeMap<String, RuntimeRefineOutputV2>,
-    predictions: BTreeMap<String, RuntimeRefineOutputV2>,
+    pending: BTreeMap<String, RuntimeRefineOutputV1>,
+    predictions: BTreeMap<String, RuntimeRefineOutputV1>,
     query_fault: Option<String>,
 }
 
@@ -50,6 +50,35 @@ struct AdapterState {
 struct Adapter {
     config: Config,
     state: Arc<Mutex<AdapterState>>,
+}
+
+fn build_work(
+    source: &mut NodeSource<'_>,
+    provider: &FullStateProvider,
+    service: ServiceKeyV1,
+    application: &GeneratedApplication,
+    action: Vec<u8>,
+) -> Result<BuiltManagedWork, RpcFailure> {
+    AuthenticatedWorkBuilder::new(source, provider)
+        .build_actions(service, application, vec![action])
+        .map_err(|error| RpcFailure::builder(format!("{error:?}")))
+}
+
+fn tampered_verifier_rejects(
+    work: &mut BuiltManagedWork,
+    application: &GeneratedApplication,
+) -> Result<bool, String> {
+    let node = work
+        .refine_input
+        .managed_state
+        .storage_proof
+        .first_mut()
+        .ok_or_else(|| "formal V1 witness is empty".to_owned())?;
+    let byte = node
+        .first_mut()
+        .ok_or_else(|| "formal V1 witness node is empty".to_owned())?;
+    *byte ^= 1;
+    Ok(service_runtime_guest::refine(application, &work.refine_input).is_err())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -208,22 +237,26 @@ impl Adapter {
             config: &self.config,
             context: finalized.clone(),
         };
-        let mut built = ManagedStateWorkBuilder::new(&mut source, &state.provider)
-            .build_one(self.config.service_key, &application, action)
-            .map_err(|error| RpcFailure::builder(format!("{error:?}")))?;
+        let mut built = build_work(
+            &mut source,
+            &state.provider,
+            self.config.service_key,
+            &application,
+            action,
+        )?;
+        let predicted_output = built.predicted_output.clone();
         if self.config.test_methods {
-            let recovery = StateRecoveryV1::decode(&built.predicted_output.recovery_payload)
+            let recovery = StateRecoveryV1::decode(&predicted_output.recovery_payload)
                 .map_err(|error| RpcFailure::builder(format!("recovery decode: {error:?}")))?;
             eprintln!(
                 "predicted transition parent={} new={} receipts={:?} changes={:?}",
-                hex(&built.predicted_output.parent_root),
-                hex(&built.predicted_output.new_root),
-                built.predicted_output.receipts,
+                hex(&predicted_output.parent_root),
+                hex(&predicted_output.new_root),
+                predicted_output.receipts,
                 recovery.diff.changes
             );
         }
-        if built
-            .predicted_output
+        if predicted_output
             .transition_valid_until
             .is_some_and(|valid_until| u64::from(finalized.slot) > valid_until)
         {
@@ -233,34 +266,8 @@ impl Adapter {
                 Some(json!({"finalizedSlot": finalized.slot})),
             ));
         }
-        if !tamper_witness
-            && built.predicted_output.parent_root == built.predicted_output.new_root
-            && built
-                .predicted_output
-                .receipts
-                .iter()
-                .any(|receipt| receipt.error_code.is_some())
-        {
-            let error_code = built
-                .predicted_output
-                .receipts
-                .iter()
-                .find_map(|receipt| receipt.error_code);
-            return Err(RpcFailure::new(
-                -32031,
-                "managed-state preflight rejected action",
-                Some(json!({"errorCode": error_code})),
-            ));
-        }
         if tamper_witness {
-            let node = built
-                .refine_input
-                .managed_state
-                .storage_proof
-                .first_mut()
-                .ok_or_else(|| RpcFailure::builder("witness is empty"))?;
-            node[0] ^= 1;
-            if service_runtime_guest::refine_v2(&application, &built.refine_input).is_ok() {
+            if !tampered_verifier_rejects(&mut built, &application).map_err(RpcFailure::builder)? {
                 return Err(RpcFailure::builder(
                     "tampered witness unexpectedly passed verifier execution",
                 ));
@@ -271,12 +278,9 @@ impl Adapter {
                 None,
             ));
         }
-        request.payload_base64 = STANDARD.encode(
-            built
-                .refine_input
-                .encode()
-                .map_err(|error| RpcFailure::builder(format!("encode: {error:?}")))?,
-        );
+        request.payload_base64 = STANDARD.encode(built.refine_input.encode().map_err(|error| {
+            RpcFailure::builder(format!("encode formal V1 refine input: {error:?}"))
+        })?);
         request.context = ContextParams {
             block_hash: finalized.block_hash,
             state_root: finalized.state_root,
@@ -296,16 +300,16 @@ impl Adapter {
         if !tamper_witness {
             state
                 .pending
-                .insert(package_hash.to_lowercase(), built.predicted_output.clone());
+                .insert(package_hash.to_lowercase(), predicted_output.clone());
             state
                 .predictions
-                .insert(package_hash.to_lowercase(), built.predicted_output);
+                .insert(package_hash.to_lowercase(), predicted_output);
         }
         Ok(result)
     }
 
     fn status(&self, request: StatusParams) -> RpcResult {
-        let result = rpc_call(
+        let mut result = rpc_call(
             &self.config.formal_url,
             "minijam_getWorkStatusV1",
             json!({"packageHash":request.package_hash}),
@@ -313,6 +317,18 @@ impl Adapter {
         .map_err(RpcFailure::downstream)?;
         if result.get("status").and_then(Value::as_str) == Some("imported") {
             self.materialize(&request.package_hash)?;
+            if let Some(output) = self
+                .state
+                .lock()
+                .expect("adapter state lock")
+                .predictions
+                .get(&request.package_hash.to_lowercase())
+                .cloned()
+            {
+                if let Some(object) = result.as_object_mut() {
+                    object.insert("actionReceipts".into(), action_receipts(&output));
+                }
+            }
         }
         Ok(result)
     }
@@ -450,10 +466,7 @@ impl Adapter {
             "parentRoot":hex(&output.parent_root),
             "newRoot":hex(&output.new_root),
             "validUntil":output.transition_valid_until,
-            "receipts":output.receipts.into_iter().map(|receipt| json!({
-                "status":format!("{:?}", receipt.status).to_lowercase(),
-                "errorCode":receipt.error_code
-            })).collect::<Vec<_>>()
+            "actionReceipts":action_receipts(&output)
         }))
     }
 
@@ -575,7 +588,7 @@ fn load_provider(path: Option<&Path>, service: ServiceKeyV1) -> Result<FullState
             .get(offset..offset + length)
             .ok_or("truncated Provider recovery log entry")?;
         offset += length;
-        let output = RuntimeRefineOutputV2::decode(encoded)
+        let output = RuntimeRefineOutputV1::decode(encoded)
             .map_err(|_| "invalid Provider recovery log entry")?;
         provider
             .apply_recovery(service, &output)
@@ -584,7 +597,7 @@ fn load_provider(path: Option<&Path>, service: ServiceKeyV1) -> Result<FullState
     Ok(provider)
 }
 
-fn append_recovery(path: &Path, output: &RuntimeRefineOutputV2) -> Result<(), String> {
+fn append_recovery(path: &Path, output: &RuntimeRefineOutputV1) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -601,6 +614,26 @@ fn append_recovery(path: &Path, output: &RuntimeRefineOutputV2) -> Result<(), St
         .and_then(|_| file.write_all(&encoded))
         .and_then(|_| file.sync_data())
         .map_err(|error| error.to_string())
+}
+
+fn action_receipts(output: &RuntimeRefineOutputV1) -> Value {
+    Value::Array(
+        output
+            .receipts
+            .iter()
+            .map(|receipt| {
+                json!({
+                    "actionHash": hex(&receipt.action_hash),
+                    "status": match receipt.status {
+                        service_runtime_core::ActionStatusV1::Applied => "applied",
+                        service_runtime_core::ActionStatusV1::Failed => "failed",
+                        service_runtime_core::ActionStatusV1::Rejected => "rejected",
+                    },
+                    "errorCode": receipt.error_code,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn handle_http(mut stream: TcpStream, adapter: &Adapter) -> Result<(), String> {

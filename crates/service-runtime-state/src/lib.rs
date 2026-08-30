@@ -573,6 +573,11 @@ mod tests {
             &service_runtime_core::ManagedStateWitnessV1 {
                 version: 1,
                 parent_root: base.root(),
+                access_plan: service_runtime_core::StateAccessPlanV1::from_keys([
+                    b"alice".as_slice(),
+                    b"bob".as_slice(),
+                ])
+                .unwrap(),
                 storage_proof: proof_nodes,
             }
             .encode()

@@ -33,7 +33,7 @@ const deployment = {
   abiVersion: 1,
   abi: {
     abiVersion: 1,
-    languageVersion: "0.1",
+    languageVersion: "0.2",
     package: { name: "game", version: "0.1.0" },
     actions: [
       {
@@ -170,25 +170,6 @@ test("managed-state provider unavailability does not fall back to Service KV by 
   assert.equal(storageReads, 1);
 });
 
-test("legacy Service KV fallback requires explicit opt-in", async () => {
-  let storageReads = 0;
-  const transport = {
-    async call(method) {
-      if (method === "minijam_getFinalizedContext") return initialContext;
-      if (method === "minijam_getServiceStorageAt") {
-        storageReads += 1;
-        return storageReads === 1 ? null : stateU64(99);
-      }
-      if (method === "minijam_getManagedStateV1") throw new RpcError("unavailable root", -32030);
-      throw new Error("unexpected RPC method: " + method);
-    },
-  };
-  const client = new JamScriptClient(deployment, transport, { legacyServiceKvFallback: true });
-  const result = await client.queryLatest("getScore", new Uint8Array(32).fill(1));
-  assert.equal(result.value, 99n);
-  assert.equal(storageReads, 2);
-});
-
 test("waitForWork tolerates not-finalized package lookup and stops at Imported", async () => {
   let reads = 0;
   const transport = {
@@ -206,4 +187,29 @@ test("waitForWork tolerates not-finalized package lookup and stops at Imported",
   const result = await client.waitForWork("0x" + "77".repeat(32), { intervalMs: 0, timeoutMs: 1000 });
   assert.equal(result.status, "imported");
   assert.equal(reads, 3);
+});
+
+test("waitForAction distinguishes an imported failed application receipt", async () => {
+  const transport = {
+    async call(method) {
+      if (method !== "minijam_getWorkStatusV1") throw new Error("unexpected RPC method");
+      return {
+        packageHash: "0x" + "77".repeat(32),
+        workId: 3,
+        status: "imported",
+        executionReceipt: "0x" + "99".repeat(32),
+        actionReceipts: [{ actionHash: "0x" + "aa".repeat(32), status: "failed", errorCode: 2 }],
+        context: initialContext,
+      };
+    },
+  };
+  const client = new JamScriptClient(deployment, transport);
+  const result = await client.waitForAction(
+    "0x" + "77".repeat(32),
+    "0x" + "aa".repeat(32),
+    { intervalMs: 0, timeoutMs: 1000 },
+  );
+  assert.equal(result.status, "imported");
+  assert.equal(result.actionReceipt.status, "failed");
+  assert.equal(result.actionReceipt.errorCode, 2);
 });

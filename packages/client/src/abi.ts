@@ -1,25 +1,37 @@
-export type AbiType = { kind: string; max: number | null };
-export type AbiField = { name: string; type: string };
+export type AbiTypeDescriptor =
+  | { kind: "unit" | "bool" | "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128" | "address" }
+  | { kind: "fixedBytes"; len: number }
+  | { kind: "bytes" | "string"; max: number }
+  | { kind: "fixedArray"; item: AbiTypeDescriptor; len: number }
+  | { kind: "array"; item: AbiTypeDescriptor; max: number }
+  | { kind: "option"; item: AbiTypeDescriptor }
+  | { kind: "tuple"; items: AbiTypeDescriptor[] }
+  | { kind: "record"; fields: Array<{ name: string; type: AbiTypeDescriptor }> }
+  | { kind: "enum"; variants: Array<{ name: string; index: number; type: AbiTypeDescriptor }> }
+  | { kind: "result"; ok: AbiTypeDescriptor; err: AbiTypeDescriptor };
+export type AbiTypeRef = string | AbiTypeDescriptor;
+export type AbiType = { kind: string; max: number | null; descriptor?: AbiTypeDescriptor };
+export type AbiField = { name: string; type: AbiTypeRef };
 export type AbiAction = {
   name: string;
   selector: string;
   auth: string;
   input: AbiField[];
-  executeOutput: string;
+  executeOutput: AbiTypeRef;
 };
 export type AbiState = {
   name: string;
   schema: string;
   kind: string;
-  keyType: string;
-  valueType: string;
+  keyType: AbiTypeRef;
+  valueType: AbiTypeRef;
 };
 export type AbiQuery = {
   name: string;
   kind: string;
   state: string;
-  keyType: string;
-  output: { type: string; nullable: boolean };
+  keyType: AbiTypeRef;
+  output: { type: AbiTypeRef; nullable: boolean };
 };
 export type JamScriptAbi = {
   abiVersion: number;

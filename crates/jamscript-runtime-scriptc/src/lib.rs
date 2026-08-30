@@ -8,10 +8,13 @@ pub fn selected_runtime_units() -> &'static [&'static str] {
         "scr_string.c",
         "scr_array.c",
         "scr_bytes.c",
+        "scr_closure.c",
         "scr_cycle.c",
         "scr_error.c",
         "scr_exception.c",
+        "scr_json.c",
         "scr_object.c",
+        "scr_union.c",
         "scr_lib_cleanup.c",
         "freestanding.c",
     ]

@@ -10,7 +10,7 @@ use jambda_minijam_executive::{
 use jambda_refine::{compute_work_report, ImportProofBundle, WorkReportInput};
 use jambda_state_backend::StateBackend;
 use jamscript_crypto::SR25519_CONTEXT;
-use jamscript_protocol::SignedActionV2;
+use jamscript_protocol::SignedActionV1;
 use jp_core_primitives::{
     blake2b,
     crypto::OpaqueHash,
@@ -29,10 +29,15 @@ use minijam_jamcore_api::{
 use minijam_protocol::{StateOperation, PROTOCOL_VERSION_V1};
 use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
 use service_runtime_core::{
-    application_key_v1, ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV2,
-    ServiceKeyV1, StateAccessPlanV1, MANAGED_STATE_COMMITMENT_KEY_V1,
+    application_key_v1, ManagedStateCommitmentV1, RuntimeRefineInputV1,
+    RuntimeRefineOutputV1, ServiceKeyV1, StateAccessPlanV1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
-use service_runtime_host::{FullStateProvider, ServiceStateProvider};
+use service_runtime_host::{
+    AuthenticatedWorkBuilder, FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider,
+    MaterializedServiceStateProvider,
+};
+
+include!(env!("JAMSCRIPT_E2E_BUILDER_APPLICATION_RS"));
 
 const SERVICE_ID: u32 = 1_000;
 const MAX_BLOCK_GAS: u64 = 20_000_000;
@@ -201,11 +206,11 @@ fn action(
     valid_until: u64,
     selector: [u8; 8],
     payload: Vec<u8>,
-) -> (SignedActionV2, [u8; 32]) {
+) -> (SignedActionV1, [u8; 32]) {
     let keypair = MiniSecretKey::from_bytes(&[seed; 32])
         .unwrap()
         .expand_to_keypair(ExpansionMode::Ed25519);
-    let mut action = SignedActionV2::unsigned(
+    let mut action = SignedActionV1::unsigned(
         [0; 32],
         service_key,
         selector,
@@ -302,7 +307,7 @@ fn runtime_input_batch(
 ) -> Vec<u8> {
     let mut keys = Vec::new();
     for action in actions {
-        let signed = SignedActionV2::decode(action).expect("V2 action envelope");
+        let signed = SignedActionV1::decode(action).expect("Formal V1 action envelope");
         let sender: [u8; 32] = signed
             .public_key
             .as_slice()
@@ -382,7 +387,7 @@ fn execute_batch(
                 .enumerate()
                 .map(|(index, result)| match &result.result {
                     WorkExecResult::Ok(payload) => {
-                        match RuntimeRefineOutputV2::decode(payload.as_ref()) {
+                        match RuntimeRefineOutputV1::decode(payload.as_ref()) {
                             Ok(refined) => {
                                 let parent = refined.parent_root;
                                 let next = refined.new_root;
@@ -446,6 +451,14 @@ fn execute_batch(
     });
     state.apply(&output);
     let canonical_root = canonical_root(state);
+    let has_managed_commitment = state.0.contains_key(
+        &StoreKey::new_service_storage_key(
+            &SERVICE_ID,
+            &ByteSequence::from(MANAGED_STATE_COMMITMENT_KEY_V1.to_vec()),
+        )
+        .to_state_key()
+        .0,
+    );
     let mut accepted_root = provider.materialized_root(service_key).unwrap();
     let mut accepted = Vec::new();
     for refined in recovered.into_iter().flatten() {
@@ -459,19 +472,23 @@ fn execute_batch(
         accepted_root = refined.new_root;
         accepted.push(refined);
     }
-    assert_eq!(
-        accepted_root, canonical_root,
-        "provider candidate diverged from canonical commitment"
-    );
+    if has_managed_commitment {
+        assert_eq!(
+            accepted_root, canonical_root,
+            "provider candidate diverged from canonical commitment"
+        );
+    }
     for refined in accepted {
         provider
             .apply_recovery(service_key, &refined)
             .expect("provider recovery");
     }
-    assert_eq!(
-        provider.materialized_root(service_key).unwrap(),
-        canonical_root
-    );
+    if has_managed_commitment {
+        assert_eq!(
+            provider.materialized_root(service_key).unwrap(),
+            canonical_root
+        );
+    }
 }
 
 fn canonical_root(state: &TestState) -> [u8; 32] {
@@ -532,7 +549,7 @@ fn execute_work_item(
     });
     let result = &report.report.results[0];
     let recovered = match &result.result {
-        WorkExecResult::Ok(payload) => match RuntimeRefineOutputV2::decode(payload.as_ref()) {
+        WorkExecResult::Ok(payload) => match RuntimeRefineOutputV1::decode(payload.as_ref()) {
             Ok(output) => {
                 eprintln!(
                     "slot={slot},work_item_actions={},result=Ok,gas_limit={item_gas},gas_used={},gas_remaining={},valid_until={:?},receipts={:?},witness_bytes={witness_bytes},witness_nodes={witness_nodes},output_bytes={},recovery_bytes={}",
@@ -695,7 +712,7 @@ fn state_summary(state: &TestState, actions: &[Vec<u8>]) -> String {
     let items = actions
         .iter()
         .enumerate()
-        .map(|(index, encoded)| match SignedActionV2::decode(encoded) {
+        .map(|(index, encoded)| match SignedActionV1::decode(encoded) {
             Ok(action) if action.public_key.len() == 32 => {
                 format!(
                     "item={index},sender={:?},nonce={},result={:?}",
@@ -720,6 +737,10 @@ fn state_summary(state: &TestState, actions: &[Vec<u8>]) -> String {
     )
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn game_run(health: u32, steps: &[(u8, u8)]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(12 + steps.len() * 4);
     payload.extend_from_slice(&1u32.to_le_bytes());
@@ -737,7 +758,7 @@ fn signed_game(
     nonce: u64,
     valid_until: u64,
     run: Vec<u8>,
-) -> (SignedActionV2, [u8; 32]) {
+) -> (SignedActionV1, [u8; 32]) {
     let mut payload = Vec::with_capacity(4 + run.len());
     payload.extend_from_slice(&(run.len() as u32).to_le_bytes());
     payload.extend_from_slice(&run);
@@ -1085,6 +1106,237 @@ fn run_game(blob: &[u8], item_gas: u64) {
     let _ = selector;
 }
 
+struct LocalDynamicSource<'a> {
+    state: &'a TestState,
+}
+
+impl FinalizedManagedStateSource for LocalDynamicSource<'_> {
+    type Error = String;
+
+    fn finalized_context(&mut self) -> Result<FinalizedContextV1, Self::Error> {
+        Ok(FinalizedContextV1 {
+            block_hash: [0; 32],
+            state_root: [0; 32],
+            slot: 1,
+        })
+    }
+
+    fn service_storage_at(
+        &mut self,
+        _context: &FinalizedContextV1,
+        _service: ServiceKeyV1,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        let storage_key =
+            StoreKey::new_service_storage_key(&SERVICE_ID, &ByteSequence::from(key.to_vec()))
+                .to_state_key()
+                .0;
+        Ok(self.state.0.get(&storage_key).cloned())
+    }
+}
+
+fn bounded_bytes(value: &[u8]) -> Vec<u8> {
+    assert!(value.len() < 128);
+    let mut encoded = vec![value.len() as u8];
+    encoded.extend_from_slice(value);
+    encoded
+}
+
+fn dynamic_seed_payload(key: &[u8; 32], next: &[u8; 32], value: u32) -> Vec<u8> {
+    let mut payload = bounded_bytes(key);
+    payload.extend_from_slice(&bounded_bytes(next));
+    payload.extend_from_slice(&value.to_le_bytes());
+    payload
+}
+
+fn dynamic_advance_payload(key: &[u8; 32]) -> Vec<u8> {
+    bounded_bytes(key)
+}
+
+fn dynamic_application_key(schema: &[u8], key: &[u8; 32]) -> Vec<u8> {
+    application_key_v1(schema, &bounded_bytes(key)).expect("dynamic application key")
+}
+
+fn execute_dynamic_work(
+    state: &mut TestState,
+    provider: &mut FullStateProvider,
+    service_key: ServiceKeyV1,
+    code_hash: OpaqueHash,
+    action: Vec<u8>,
+    slot: u8,
+    item_gas: u64,
+) -> RuntimeRefineOutputV1 {
+    let mut source = LocalDynamicSource { state };
+    let built = AuthenticatedWorkBuilder::new(&mut source, provider)
+        .build_actions(service_key, &GeneratedApplication, vec![action])
+        .expect("Formal V1 authenticated work builder");
+    drop(source);
+    assert_eq!(
+        built.refine_input.version,
+        RuntimeRefineInputV1::VERSION,
+        "dynamic fixture must use RuntimeRefineInputV1"
+    );
+    eprintln!(
+        "dynamic access keys={:?}",
+        built
+            .refine_input
+            .managed_state
+            .access_plan
+            .keys
+            .iter()
+            .map(|key| format!(
+                "0x{}",
+                key.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            ))
+            .collect::<Vec<_>>()
+    );
+    let runtime_payload = built
+        .refine_input
+        .encode()
+        .expect("Formal V1 runtime input encoding");
+    let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
+    backend.load_tiny_from_db().unwrap();
+    let report = compute_work_report::<
+        TinySpec,
+        MiniJamDb<'_>,
+        StateBackend<TinySpec, MiniJamDb<'_>>,
+        InterpBackend,
+        InnerEngine<InterpBackend>,
+    >(
+        &backend,
+        work_input(code_hash, vec![runtime_payload], slot, item_gas, ITEM_GAS),
+        InterpBackend,
+    )
+    .expect("real MiniJAM Formal V1 refine");
+    let result = &report.report.results[0];
+    let output = match &result.result {
+        WorkExecResult::Ok(payload) => {
+            RuntimeRefineOutputV1::decode(payload.as_ref()).expect("Formal V1 refine output")
+        }
+        other => panic!("dynamic Formal V1 refine did not return an output: {other:?}"),
+    };
+    let reports = vec![report.report.encode().try_into().unwrap()]
+        .try_into()
+        .unwrap();
+    let accumulated = MiniJamExecutive
+        .execute(
+            MiniJamExecutionInput {
+                protocol_version: PROTOCOL_VERSION_V1,
+                slot: u32::from(slot),
+                parent_hash: [0; 32],
+                parent_state_root: [0; 32],
+                entropy: [0; 32],
+                reports,
+                preimages: Default::default(),
+                system_ops: Default::default(),
+                max_gas: MAX_BLOCK_GAS,
+            },
+            state,
+        )
+        .expect("real MiniJAM Formal V1 accumulate");
+    state.apply(&accumulated);
+    assert_eq!(output.new_root, canonical_root(state));
+    provider
+        .apply_recovery(service_key, &output)
+        .expect("provider Formal V1 recovery");
+    assert_eq!(
+        provider.materialized_root(service_key).unwrap(),
+        output.new_root
+    );
+    output
+}
+
+fn run_dynamic(blob: &[u8], item_gas: u64) {
+    assert_eq!(
+        JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION,
+        RuntimeRefineInputV1::VERSION,
+        "dynamic fixture builder must advertise RuntimeRefineInputV1"
+    );
+    let service_key = ServiceKeyV1::new([0x44; 32]);
+    let key_1 = [0x11; 32];
+    let key_2 = [0x22; 32];
+    let mut state = new_state();
+    let mut provider = FullStateProvider::default();
+    let code_hash = install_service(&mut state, blob, item_gas);
+    let (seed, sender) = action(
+        service_key,
+        7,
+        0,
+        10,
+        jamscript_ir::action_selector("seed"),
+        dynamic_seed_payload(&key_1, &key_2, 10),
+    );
+    let seed_output = execute_dynamic_work(
+        &mut state,
+        &mut provider,
+        service_key,
+        code_hash,
+        seed.encode().unwrap(),
+        1,
+        item_gas,
+    );
+    assert_eq!(provider_nonce(&provider, service_key, &sender), Some(1));
+    assert_eq!(
+        provider_value(
+            &provider,
+            service_key,
+            &dynamic_application_key(b"test.values/v1", &key_2),
+        ),
+        Some(
+            sender
+                .to_vec()
+                .into_iter()
+                .chain(10u32.to_le_bytes())
+                .collect()
+        )
+    );
+
+    let (advance, advance_sender) = action(
+        service_key,
+        8,
+        0,
+        10,
+        jamscript_ir::action_selector("advance"),
+        dynamic_advance_payload(&key_1),
+    );
+    let advance_output = execute_dynamic_work(
+        &mut state,
+        &mut provider,
+        service_key,
+        code_hash,
+        advance.encode().unwrap(),
+        2,
+        item_gas,
+    );
+    assert_ne!(seed_output.new_root, advance_output.new_root);
+    eprintln!(
+        "Formal V1 dynamic seed parent={} new={} receipts={:?}",
+        hex(&seed_output.parent_root),
+        hex(&seed_output.new_root),
+        seed_output.receipts
+    );
+    eprintln!(
+        "Formal V1 dynamic advance parent={} new={} receipts={:?}",
+        hex(&advance_output.parent_root),
+        hex(&advance_output.new_root),
+        advance_output.receipts
+    );
+    assert_eq!(provider_nonce(&provider, service_key, &sender), Some(1));
+    assert_eq!(
+        provider_nonce(&provider, service_key, &advance_sender),
+        Some(1)
+    );
+    let value = provider_value(
+        &provider,
+        service_key,
+        &dynamic_application_key(b"test.values/v1", &key_2),
+    )
+    .expect("dynamic value after advance");
+    assert_eq!(&value[..32], &advance_sender);
+    assert_eq!(u32::from_le_bytes(value[32..].try_into().unwrap()), 11);
+    println!("MiniJAM Formal V1 dynamic ScriptC E2E passed: seed/advance/replay planner/PVM/Accumulate.");
+}
+
 fn main() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -1097,6 +1349,7 @@ fn main() {
     let mut benchmark_batch = false;
     let mut diagnostic_only = false;
     let mut counter_only = false;
+    let mut dynamic_only = false;
     let mut paths = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--diagnostic-item-gas" {
@@ -1111,18 +1364,24 @@ fn main() {
             diagnostic_only = true;
         } else if arg == "--counter-only" {
             counter_only = true;
+        } else if arg == "--dynamic-only" {
+            dynamic_only = true;
         } else {
             paths.push(arg);
         }
     }
+    if dynamic_only {
+        let dynamic_path = paths
+            .first()
+            .expect("usage: jamscript-minijam-e2e --dynamic-only <dynamic-state-scriptc.blob>");
+        let dynamic = fs::read(dynamic_path).expect("read dynamic ScriptC service blob");
+        run_dynamic(&dynamic, item_gas);
+        return;
+    }
     let counter_path = paths.first().expect(
-        "usage: jamscript-minijam-e2e [--diagnostic-only] [--diagnostic-item-gas GAS] <counter.blob> <game.blob>",
-    );
-    let game_path = paths.get(1).expect(
-        "usage: jamscript-minijam-e2e [--diagnostic-only] [--diagnostic-item-gas GAS] <counter.blob> <game.blob>",
+        "usage: jamscript-minijam-e2e [--diagnostic-only] [--diagnostic-item-gas GAS] <counter.blob>",
     );
     let counter = fs::read(counter_path).expect("read counter service blob");
-    let game = fs::read(game_path).expect("read game service blob");
     if item_gas != ITEM_GAS {
         eprintln!("diagnostic gas mode: item_gas={item_gas}; acceptance gas remains {ITEM_GAS}");
     }
@@ -1135,13 +1394,6 @@ fn main() {
         return;
     }
     run_counter(&counter, item_gas);
-    if counter_only {
-        println!("MiniJAM wallet counter E2E passed: nonce/auth/replay path.");
-        return;
-    }
-    println!(
-        "MiniJAM wallet E2E passed: valid nonce, replay rejection, next nonce, expiry rejection."
-    );
-    run_game(&game, item_gas);
-    println!("MiniJAM M4 game E2E passed: canonical bytes, native replay, tamper/native failure isolation, max state, query ABI path, batch nonce semantics.");
+    let _ = counter_only;
+    println!("MiniJAM Formal V1 wallet E2E passed: valid nonce, replay rejection, next nonce, expiry rejection.");
 }

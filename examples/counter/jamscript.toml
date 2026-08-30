@@ -1,9 +1,14 @@
 [package]
 name = "counter"
-version = "0.1.0"
+version = "0.2.0"
 entry = "src/service.ts"
-language = "0.1"
+language = "0.2"
+
+[compiler]
+backend = "scriptc"
 
 [target.minijam]
+# Legacy deployment/routing field only; SignedActionV1 uses ServiceKey.
 service_id = 1000
+# Legacy manifest spelling for the network domain.
 genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"

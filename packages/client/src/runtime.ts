@@ -1,6 +1,6 @@
 import { blake2AsU8a } from "@polkadot/util-crypto";
 
-export const RUNTIME_REFINEMENT_VERSION = 2;
+export const RUNTIME_REFINEMENT_VERSION = 1;
 export const MAX_RUNTIME_ACTIONS = 1024;
 export const MAX_RECOVERY_BYTES = 1024 * 1024;
 export const MAX_RECOVERY_CHANGES = 4096;
@@ -13,8 +13,8 @@ export type ActionReceiptV1 = {
   errorCode: number | null;
 };
 
-export type RuntimeRefineOutputV2 = {
-  version: 2;
+export type RuntimeRefineOutputV1 = {
+  version: 1;
   parentRoot: Uint8Array;
   newRoot: Uint8Array;
   transitionValidUntil: bigint | null;
@@ -109,7 +109,7 @@ function compareBytes(left: Uint8Array, right: Uint8Array): number {
   return left.length - right.length;
 }
 
-export function encodeRuntimeRefineOutputV2(output: RuntimeRefineOutputV2): Uint8Array {
+export function encodeRuntimeRefineOutputV1(output: RuntimeRefineOutputV1): Uint8Array {
   if (output.version !== RUNTIME_REFINEMENT_VERSION) throw new Error("unsupported runtime output version");
   ensureBytes(output.parentRoot, 32, "parentRoot");
   ensureBytes(output.newRoot, 32, "newRoot");
@@ -141,11 +141,11 @@ export function encodeRuntimeRefineOutputV2(output: RuntimeRefineOutputV2): Uint
   );
 }
 
-export function decodeRuntimeRefineOutputV2(bytes: Uint8Array): RuntimeRefineOutputV2 {
+export function decodeRuntimeRefineOutputV1(bytes: Uint8Array): RuntimeRefineOutputV1 {
   let offset = 0;
   const take = (length: number): Uint8Array => {
     const end = offset + length;
-    if (end > bytes.length) throw new Error("truncated RuntimeRefineOutputV2");
+    if (end > bytes.length) throw new Error("truncated RuntimeRefineOutputV1");
     const value = bytes.slice(offset, end);
     offset = end;
     return value;
@@ -174,9 +174,9 @@ export function decodeRuntimeRefineOutputV2(bytes: Uint8Array): RuntimeRefineOut
   const recoveryLength = readU32();
   if (recoveryLength > MAX_RECOVERY_BYTES) throw new Error("recovery payload is too large");
   const recoveryPayload = take(recoveryLength);
-  if (offset !== bytes.length) throw new Error("trailing RuntimeRefineOutputV2 bytes");
+  if (offset !== bytes.length) throw new Error("trailing RuntimeRefineOutputV1 bytes");
   validateRecoveryPayload(recoveryPayload);
   const expectedCommitment = blake2AsU8a(recoveryPayload, 256);
   if (compareBytes(expectedCommitment, recoveryCommitment) !== 0) throw new Error("recovery commitment mismatch");
-  return { version: 2, parentRoot, newRoot, transitionValidUntil, recoveryCommitment, receipts, recoveryPayload };
+  return { version: 1, parentRoot, newRoot, transitionValidUntil, recoveryCommitment, receipts, recoveryPayload };
 }

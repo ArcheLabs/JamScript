@@ -5,9 +5,10 @@ JAMSCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 MINIJAM_ROOT="${JAMSCRIPT_MINIJAM_SDK:-${JAMSCRIPT_ROOT}/../minijam-client}"
 MINIJAM_ROOT="$(cd -- "${MINIJAM_ROOT}" && pwd -P)"
 E2E_RUNTIME="${MINIJAM_ROOT}/.local/jamscript-network-e2e"
-E2E_PROJECT="${E2E_RUNTIME}/game-replay"
+E2E_PROJECT="${E2E_RUNTIME}/dynamic-state-scriptc"
 ARTIFACTS="${E2E_PROJECT}/dist"
 LOCK_FILE="${JAMSCRIPT_ROOT}/toolchains/minijam.lock"
+minijam_result=FAIL
 
 export JAMSCRIPT_MINIJAM_SDK="${MINIJAM_ROOT}"
 export MINIJAM_ENABLE_FORMAL_RPC=true
@@ -41,6 +42,7 @@ cleanup() {
   elif [[ "${JAMSCRIPT_E2E_KEEP_DATA:-0}" != "1" ]]; then
     rm -rf "${E2E_RUNTIME}/data" "${E2E_RUNTIME}/run"
   fi
+  echo "REAL_MINIJAM_E2E=${minijam_result}"
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
@@ -63,6 +65,12 @@ if [[ "${actual_revision}" != "${locked_revision}" ]]; then
   fi
   echo "warning: MiniJAM checkout ${actual_revision} does not match locked revision ${locked_revision}" >&2
 fi
+
+[[ -x "${MINIJAM_ROOT}/scripts/check-minijam-boundary.sh" ]] || {
+  echo "MiniJAM boundary check is unavailable in ${MINIJAM_ROOT}" >&2
+  exit 1
+}
+(cd "${MINIJAM_ROOT}" && "${MINIJAM_ROOT}/scripts/check-minijam-boundary.sh")
 
 mkdir -p "${E2E_RUNTIME}/logs"
 rm -f "${E2E_RUNTIME}"/logs/*.log
@@ -118,7 +126,7 @@ echo "[provision] placeholder service created: ${service_id}"
 
 rm -rf "${E2E_PROJECT}"
 mkdir -p "${E2E_RUNTIME}"
-cp -R "${JAMSCRIPT_ROOT}/examples/game-replay" "${E2E_PROJECT}"
+cp -R "${JAMSCRIPT_ROOT}/examples/dynamic-state-scriptc" "${E2E_PROJECT}"
 sed -i \
   -e "s/^service_id = .*/service_id = ${service_id}/" \
   -e "s/^genesis_hash = .*/genesis_hash = \"${genesis_hash}\"/" \
@@ -190,3 +198,4 @@ JAMSCRIPT_E2E_CODE_HASH="${code_hash}" \
 JAMSCRIPT_E2E_GENESIS_HASH="${genesis_hash}" \
 JAMSCRIPT_E2E_LOG_DIR="${E2E_RUNTIME}/logs" \
 npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run test:network
+minijam_result=PASS

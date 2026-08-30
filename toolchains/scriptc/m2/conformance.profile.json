@@ -1,0 +1,20 @@
+{
+  "profile_format": 1,
+  "name": "jamscript-scriptc-m2-conformance",
+  "entry": "conformance.ts",
+  "emission": "c",
+  "optimization": "dev",
+  "abi": {
+    "prefix": "jamscript_m2_conformance_",
+    "init_symbol": "jamscript_m2_conformance_init",
+    "sink_register_symbol": "jamscript_m2_conformance_set_panic_sink",
+    "collect_symbol": null,
+    "result_reset_symbol": null
+  },
+  "exports": [{
+    "export": "execute",
+    "symbol": "jamscript_m2_conformance_execute",
+    "params": ["bytes", "bytes", "bytes"],
+    "returns": "bytes"
+  }]
+}

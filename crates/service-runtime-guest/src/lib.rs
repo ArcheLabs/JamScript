@@ -6,8 +6,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use service_runtime_core::StateDiffV1;
 use service_runtime_core::{
-    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, RuntimeRefineInputV1,
-    RuntimeRefineOutputV1, RuntimeRefineOutputV2, ServiceApplication, StateAccessError,
+    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ManagedStateAccess,
+    RuntimeRefineInputV1, RuntimeRefineOutputV1, ServiceApplication, StateAccessError,
 };
 use service_runtime_state::ProofState;
 
@@ -444,12 +444,6 @@ pub trait RefineObserver {
     fn stage(&mut self, stage: u8);
 }
 
-struct NoopObserver;
-
-impl RefineObserver for NoopObserver {
-    fn stage(&mut self, _stage: u8) {}
-}
-
 pub const STAGE_PROOF_STATE: u8 = 1;
 pub const STAGE_FIRST_TRIE_GET: u8 = 2;
 pub const STAGE_PROOF_READY: u8 = 3;
@@ -477,27 +471,9 @@ where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
 {
-    let (parent_root, new_root, receipts, _, _) = refine_internal(application, input)?;
-    Ok(RuntimeRefineOutputV1 {
-        version: 1,
-        parent_root,
-        new_root,
-        receipts,
-        recovery_commitment: None,
-    })
-}
-
-pub fn refine_v2<A>(
-    application: &A,
-    input: &RuntimeRefineInputV1,
-) -> Result<RuntimeRefineOutputV2, GuestError>
-where
-    A: ServiceApplication,
-    A::Error: Into<StateAccessError>,
-{
     let (parent_root, new_root, receipts, diff, transition_valid_until) =
         refine_internal(application, input)?;
-    RuntimeRefineOutputV2::from_diff_with_validity(
+    RuntimeRefineOutputV1::from_diff_with_validity(
         parent_root,
         new_root,
         receipts,
@@ -507,46 +483,15 @@ where
     .map_err(|_| GuestError::State)
 }
 
-pub fn refine_v2_owned<A>(
+pub fn refine_owned<A>(
     application: &A,
     input: RuntimeRefineInputV1,
-) -> Result<RuntimeRefineOutputV2, GuestError>
+) -> Result<RuntimeRefineOutputV1, GuestError>
 where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
 {
-    let (parent_root, new_root, receipts, diff, transition_valid_until) =
-        refine_internal_owned(application, input)?;
-    RuntimeRefineOutputV2::from_diff_with_validity(
-        parent_root,
-        new_root,
-        receipts,
-        diff,
-        transition_valid_until,
-    )
-    .map_err(|_| GuestError::State)
-}
-
-pub fn refine_v2_owned_with_observer<A, O>(
-    application: &A,
-    input: RuntimeRefineInputV1,
-    observer: &mut O,
-) -> Result<RuntimeRefineOutputV2, GuestError>
-where
-    A: ServiceApplication,
-    A::Error: Into<StateAccessError>,
-    O: RefineObserver,
-{
-    let (parent_root, new_root, receipts, diff, transition_valid_until) =
-        refine_internal_owned_with_observer(application, input, observer)?;
-    RuntimeRefineOutputV2::from_diff_with_validity(
-        parent_root,
-        new_root,
-        receipts,
-        diff,
-        transition_valid_until,
-    )
-    .map_err(|_| GuestError::State)
+    refine(application, &input)
 }
 
 fn refine_internal<A>(
@@ -557,7 +502,9 @@ where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
 {
-    if input.version != 1 || input.managed_state.version != 1 {
+    if input.version != RuntimeRefineInputV1::VERSION
+        || input.managed_state.version != service_runtime_core::ManagedStateWitnessV1::VERSION
+    {
         return Err(GuestError::InvalidInput);
     }
     let mut state = ProofState::from_witness(
@@ -565,6 +512,9 @@ where
         &input.managed_state.storage_proof,
     )
     .map_err(|_| GuestError::State)?;
+    for key in &input.managed_state.access_plan.keys {
+        state.get(key).map_err(|_| GuestError::State)?;
+    }
     let parent_root = state.parent_root();
     let mut receipts = Vec::with_capacity(input.actions.len());
     let mut transition_valid_until = None;
@@ -572,7 +522,11 @@ where
         let action_hash = blake2_256(action);
         state.begin_transaction();
         let (result, action_valid_until) = {
-            let mut context = ExecutionContext::new(&mut state, None);
+            let mut context = ExecutionContext::with_access_plan(
+                &mut state,
+                None,
+                &input.managed_state.access_plan,
+            );
             let result = application
                 .execute(&mut context, action)
                 .map_err(Into::into);
@@ -594,14 +548,18 @@ where
                     .map_err(|_| GuestError::State)?;
                 return Err(GuestError::State);
             }
+            Err(StateAccessError::NeedState(_)) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                return Err(GuestError::State);
+            }
             Err(StateAccessError::ApplicationFailed(error_code)) => {
                 if error_code & 0x8000_0000 != 0 {
-                    guest_support::diagnostic_stage(b"jamscript:application-failed-native");
                     state
                         .rollback_transaction()
                         .map_err(|_| GuestError::State)?;
                 } else {
-                    guest_support::diagnostic_stage(b"jamscript:application-failed-low");
                     state.commit_transaction().map_err(|_| GuestError::State)?;
                     merge_validity(&mut transition_valid_until, action_valid_until);
                 }
@@ -611,15 +569,24 @@ where
                     error_code: Some(error_code),
                 });
             }
+            Err(StateAccessError::Rejected(error_code)) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Rejected,
+                    error_code: Some(error_code),
+                });
+            }
             Err(_) => {
-                guest_support::diagnostic_stage(b"jamscript:application-generic-error");
                 state
                     .rollback_transaction()
                     .map_err(|_| GuestError::State)?;
                 receipts.push(ActionReceiptV1 {
                     action_hash,
                     status: ActionStatusV1::Failed,
-                    error_code: Some(1),
+                    error_code: Some(0x8000_0001),
                 });
             }
         }
@@ -634,16 +601,26 @@ where
     ))
 }
 
-fn refine_internal_owned<A>(
+pub fn refine_owned_with_observer<A, O>(
     application: &A,
     input: RuntimeRefineInputV1,
-) -> Result<RefineTransition, GuestError>
+    observer: &mut O,
+) -> Result<RuntimeRefineOutputV1, GuestError>
 where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
+    O: RefineObserver,
 {
-    let mut observer = NoopObserver;
-    refine_internal_owned_with_observer(application, input, &mut observer)
+    let (parent_root, new_root, receipts, diff, transition_valid_until) =
+        refine_internal_owned_with_observer(application, input, observer)?;
+    RuntimeRefineOutputV1::from_diff_with_validity(
+        parent_root,
+        new_root,
+        receipts,
+        diff,
+        transition_valid_until,
+    )
+    .map_err(|_| GuestError::State)
 }
 
 fn refine_internal_owned_with_observer<A, O>(
@@ -665,6 +642,9 @@ where
         |stage| observer.stage(stage),
     )
     .map_err(|_| GuestError::State)?;
+    for key in &input.managed_state.access_plan.keys {
+        state.get(key).map_err(|_| GuestError::State)?;
+    }
     let parent_root = state.parent_root();
     let mut receipts = Vec::with_capacity(input.actions.len());
     let mut transition_valid_until = None;
@@ -673,7 +653,11 @@ where
         state.begin_transaction();
         observer.stage(STAGE_APPLICATION);
         let (result, action_valid_until) = {
-            let mut context = ExecutionContext::new(&mut state, None);
+            let mut context = ExecutionContext::with_access_plan(
+                &mut state,
+                None,
+                &input.managed_state.access_plan,
+            );
             let result = application
                 .execute(&mut context, action)
                 .map_err(Into::into);
@@ -718,6 +702,16 @@ where
                     error_code: Some(error_code),
                 });
             }
+            Err(StateAccessError::Rejected(error_code)) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                receipts.push(ActionReceiptV1 {
+                    action_hash,
+                    status: ActionStatusV1::Rejected,
+                    error_code: Some(error_code),
+                });
+            }
             Err(_) => {
                 guest_support::diagnostic_stage(b"jamscript:application-generic-error");
                 state
@@ -753,7 +747,9 @@ fn merge_validity(current: &mut Option<u64>, action: Option<u64>) {
 mod tests {
     use super::*;
     use alloc::vec;
-    use service_runtime_core::{ManagedStateWitnessV1, StateChangeV1, StateDiffV1};
+    use service_runtime_core::{
+        ManagedStateWitnessV1, StateAccessPlanV1, StateChangeV1, StateDiffV1,
+    };
     use service_runtime_state::FullState;
 
     struct FailingApplication;
@@ -846,6 +842,7 @@ mod tests {
             managed_state: ManagedStateWitnessV1 {
                 version: 1,
                 parent_root: base.root(),
+                access_plan: StateAccessPlanV1::from_keys([b"a".as_slice(), b"b"]).unwrap(),
                 storage_proof: base
                     .proof_for(&[b"a", b"b"])
                     .unwrap()
@@ -867,6 +864,7 @@ mod tests {
             managed_state: ManagedStateWitnessV1 {
                 version: 1,
                 parent_root,
+                access_plan: StateAccessPlanV1::from_keys([b"a".as_slice(), b"b"]).unwrap(),
                 storage_proof: proof.into_nodes().into_iter().collect(),
             },
             actions: vec![b"fail".to_vec()],
@@ -905,6 +903,12 @@ mod tests {
             managed_state: ManagedStateWitnessV1 {
                 version: 1,
                 parent_root,
+                access_plan: StateAccessPlanV1::from_keys([
+                    b"nonce".as_slice(),
+                    b"a".as_slice(),
+                    b"b".as_slice(),
+                ])
+                .unwrap(),
                 storage_proof: proof.into_nodes().into_iter().collect(),
             },
             actions: vec![b"fail-business".to_vec()],
@@ -937,6 +941,11 @@ mod tests {
             managed_state: ManagedStateWitnessV1 {
                 version: 1,
                 parent_root,
+                access_plan: StateAccessPlanV1::from_keys([
+                    b"nonce".as_slice(),
+                    b"business".as_slice(),
+                ])
+                .unwrap(),
                 storage_proof: proof.into_nodes().into_iter().collect(),
             },
             actions: vec![b"native-fail".to_vec()],
@@ -959,18 +968,18 @@ mod tests {
         assert_eq!(output.receipts[0].status, ActionStatusV1::Applied);
         assert_eq!(output.receipts[1].status, ActionStatusV1::Failed);
         assert_eq!(output.receipts[2].error_code, Some(9));
-        let output_v2 = refine_v2(
+        let output_v1 = refine(
             &ValidityApplication,
             &witness_input(&base, vec![vec![0], vec![1], vec![2]]),
         )
         .unwrap();
-        assert_eq!(output_v2.transition_valid_until, Some(30));
+        assert_eq!(output_v1.transition_valid_until, Some(30));
     }
 
     #[test]
     fn validity_from_rolled_back_action_is_not_committed() {
         let base = FullState::empty();
-        let output = refine_v2(
+        let output = refine(
             &ValidityApplication,
             &witness_input(&base, vec![vec![0], vec![3]]),
         )

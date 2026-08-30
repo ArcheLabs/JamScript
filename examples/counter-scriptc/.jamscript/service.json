@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
   "serviceKey": "0x3333333333333333333333333333333333333333333333333333333333333333",
+  "instanceId": "0x2792d119e06dacb344bc70916766f42e9db5b59a4e68db42b7a6a6c6d5d247a2",
   "name": "counter-scriptc"
 }

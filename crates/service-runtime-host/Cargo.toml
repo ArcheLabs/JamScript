@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+jamscript-runtime-core = { path = "../jamscript-runtime-core" }
 service-runtime-core = { path = "../service-runtime-core" }
 service-runtime-guest = { path = "../service-runtime-guest" }
 service-runtime-state = { path = "../service-runtime-state" }

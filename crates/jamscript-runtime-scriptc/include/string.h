@@ -8,4 +8,5 @@ int memcmp(const void *, const void *, size_t);
 size_t strlen(const char *);
 int strcmp(const char *, const char *);
 char *stpcpy(char *, const char *);
+const char *strchr(const char *, int);
 #endif

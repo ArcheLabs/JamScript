@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use blake2b_simd::Params;
-use jamscript_ir::{ActionBodyIr, ServiceIr};
+use jamscript_ir::{action_selector, ActionBodyIr, ServiceIr};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -9,11 +9,10 @@ use std::{
     process::Command,
 };
 
-pub const BACKEND_VERSION: &str = "scriptc-m1";
+pub const BACKEND_VERSION: &str = "scriptc-m2";
 pub const RUNTIME_PROFILE_VERSION: &str = "scriptc-deterministic-v1";
 pub const SCRIPT_C_VERSION: &str = "0.0.34";
 pub const TYPESCRIPT_VERSION: &str = "7.0.2";
-pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ScriptcBuildMetadata {
@@ -25,7 +24,18 @@ pub struct ScriptcBuildMetadata {
     pub surface_manifest_hash: String,
     pub package_lock_hash: String,
     pub runtime_profile_version: String,
-    pub generated_symbol: String,
+    pub generated_actions: Vec<ScriptcGeneratedAction>,
+    #[serde(rename = "typedRuntimeVersion")]
+    pub typed_runtime_version: u8,
+    #[serde(rename = "stateViewVersion")]
+    pub state_view_version: u8,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScriptcGeneratedAction {
+    pub name: String,
+    pub selector: String,
+    pub symbol: String,
 }
 
 #[derive(Clone, Debug)]
@@ -52,7 +62,7 @@ impl ScriptcCompiler {
         let actual_node = version.trim().trim_start_matches('v');
         if actual_node != pinned_node {
             bail!(
-                "ScriptC M1 requires pinned Node {}, got {}",
+                "ScriptC M2 requires pinned Node {}, got {}",
                 pinned_node,
                 version.trim()
             );
@@ -64,64 +74,60 @@ impl ScriptcCompiler {
         })
     }
 
-    pub fn compile_service_action(
-        &self,
-        ir: &ServiceIr,
-        output_dir: &Path,
-    ) -> Result<ScriptcArtifact> {
-        let action = ir
-            .actions
-            .first()
-            .context("ScriptC service has no action")?;
-        let ActionBodyIr::ScriptC {
-            symbol,
-            source_unit,
-            ..
-        } = &action.body
-        else {
-            bail!("ScriptC backend requires a ScriptC action body");
-        };
-        if source_unit != "service.ts" {
-            bail!("unsupported ScriptC source unit `{source_unit}`");
+    pub fn compile_service(&self, ir: &ServiceIr, output_dir: &Path) -> Result<ScriptcArtifact> {
+        if ir.actions.is_empty() {
+            bail!("ScriptC service has no action");
+        }
+        for action in &ir.actions {
+            let ActionBodyIr::ScriptC { source_unit, .. } = &action.body else {
+                bail!("ScriptC backend requires every action to have a ScriptC body");
+            };
+            if source_unit != "service.ts" {
+                bail!("unsupported ScriptC source unit `{source_unit}`");
+            }
         }
         fs::create_dir_all(output_dir)?;
         let output_dir = fs::canonicalize(output_dir)
             .with_context(|| format!("canonicalizing {}", output_dir.display()))?;
-        let source_path = output_dir.join("scriptc_action.ts");
-        let spec_path = output_dir.join("scriptc_action.json");
+        let source_path = output_dir.join("scriptc_service.ts");
+        let spec_path = output_dir.join("scriptc_service.json");
         fs::write(&source_path, &ir.source)?;
         fs::write(
             &spec_path,
             serde_json::json!({
                 "source": source_path,
-                "action": symbol,
-                "input_fields": action.input.iter().map(|field| {
-                    serde_json::json!({ "name": field.name, "type": field.ty.abi_name() })
-                }).collect::<Vec<_>>(),
+                "package_name": ir.package_name,
+                "states": ir.states,
+                "actions": ir.actions.iter().map(|action| serde_json::json!({
+                    "name": action.name,
+                    "auth": action.auth,
+                    "input": action.input,
+                })).collect::<Vec<_>>(),
+                "queries": ir.queries,
                 "output": output_dir,
             })
             .to_string(),
         )?;
         verify_surface_manifest(&self.toolchain_root)?;
-        let script = self.toolchain_root.join("m1/compile-action.mjs");
+        let script = self.toolchain_root.join("m2/compile-service.mjs");
         let status = Command::new(&self.node)
             .current_dir(&self.toolchain_root)
             .arg(script)
             .arg(&spec_path)
             .status()
-            .context("starting ScriptC M1 compiler")?;
+            .context("starting ScriptC M2 compiler")?;
         if !status.success() {
-            bail!("ScriptC failed to compile action `{symbol}`");
+            bail!("ScriptC failed to compile service `{}`", ir.package_name);
         }
         let generated_c = [
-            output_dir.join("scriptc_action.lib.c"),
-            output_dir.join("scriptc_action.transformed.lib.c"),
+            output_dir.join("scriptc_service.lib.c"),
+            output_dir.join("scriptc_service.transformed.lib.c"),
         ]
         .into_iter()
         .find(|path| path.is_file())
-        .with_context(|| format!("ScriptC did not emit C for action `{symbol}`"))?;
-        if generated_c.file_name().and_then(|name| name.to_str()) != Some("scriptc_action.lib.c") {
-            fs::copy(&generated_c, output_dir.join("scriptc_action.lib.c"))?;
+        .with_context(|| format!("ScriptC did not emit C for service `{}`", ir.package_name))?;
+        if generated_c.file_name().and_then(|name| name.to_str()) != Some("scriptc_service.lib.c") {
+            fs::copy(&generated_c, output_dir.join("scriptc_service.lib.c"))?;
         }
         let compiler_version = read_json_string(
             &self
@@ -149,13 +155,26 @@ impl ScriptcCompiler {
                 typescript_version
             );
         }
-        let adapter_c = output_dir.join("scriptc_action_adapter.c");
-        let entry_symbol = format!("jamscript_scriptc_{symbol}_entry");
-        let stable_symbol = format!("jamscript_scriptc_{symbol}_v1");
+        let adapter_c = output_dir.join("scriptc_service_adapter.c");
         fs::write(
             &adapter_c,
-            adapter_source(symbol, &entry_symbol, &stable_symbol),
+            "/* ScriptC M2 exports its canonical bytes ABI directly. */\n",
         )?;
+        let generated_actions = ir
+            .actions
+            .iter()
+            .map(|action| ScriptcGeneratedAction {
+                name: action.name.clone(),
+                selector: format!(
+                    "0x{}",
+                    action_selector(&action.name)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                ),
+                symbol: format!("jamscript_scriptc_{}_entry_v1", action.name),
+            })
+            .collect();
         let metadata = ScriptcBuildMetadata {
             backend: BACKEND_VERSION.into(),
             scriptc_version: SCRIPT_C_VERSION.into(),
@@ -169,7 +188,9 @@ impl ScriptcCompiler {
             )?,
             package_lock_hash: hash_file(&self.toolchain_root.join("package-lock.json"))?,
             runtime_profile_version: RUNTIME_PROFILE_VERSION.into(),
-            generated_symbol: stable_symbol,
+            generated_actions,
+            typed_runtime_version: 1,
+            state_view_version: 1,
         };
         Ok(ScriptcArtifact {
             generated_c,
@@ -177,12 +198,6 @@ impl ScriptcCompiler {
             metadata,
         })
     }
-}
-
-fn adapter_source(symbol: &str, entry_symbol: &str, stable_symbol: &str) -> String {
-    format!(
-        "#include <stdint.h>\n#include <stddef.h>\nextern void jamscript_scriptc_{symbol}_init(void);\nextern double {entry_symbol}(double);\nuint32_t {stable_symbol}(const uint8_t *input, uint32_t input_len, uint64_t *output) {{ if (input_len != 8 || input == NULL || output == NULL) return 5; uint64_t raw = 0; for (uint32_t i = 0; i < 8; i++) raw |= ((uint64_t)input[i]) << (8 * i); if (raw > {MAX_SAFE_INTEGER}ULL) return 6; jamscript_scriptc_{symbol}_init(); double value = {entry_symbol}((double)raw); if (!(value >= 0.0) || value > {MAX_SAFE_INTEGER}.0) return 7; *output = (uint64_t)value; return 0; }}\n"
-    )
 }
 
 fn command_output(command: &Path, args: &[&str], cwd: &Path) -> Result<String> {
@@ -267,31 +282,4 @@ fn verify_surface_manifest(toolchain_root: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod boundary_tests {
-    use super::{adapter_source, MAX_SAFE_INTEGER};
-
-    #[test]
-    fn u64_adapter_accepts_only_exact_safe_integer_domain() {
-        for value in [0, 1, 1u64 << 32, MAX_SAFE_INTEGER] {
-            assert!(value <= MAX_SAFE_INTEGER);
-        }
-        for value in [MAX_SAFE_INTEGER + 1, u64::MAX] {
-            assert!(value > MAX_SAFE_INTEGER);
-        }
-    }
-
-    #[test]
-    fn generated_adapter_contains_safe_integer_guards() {
-        let source = adapter_source(
-            "increment",
-            "jamscript_scriptc_increment_entry",
-            "jamscript_scriptc_increment_v1",
-        );
-        assert!(source.contains("raw > 9007199254740991ULL"));
-        assert!(source.contains("value > 9007199254740991.0"));
-        assert!(source.contains("input_len != 8"));
-    }
 }

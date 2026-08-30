@@ -25,9 +25,8 @@ Refine receives a historical witness and produces a transition; Accumulate
 only performs the commitment compare-and-swap. Runtime state is not a second
 cross-service time model and does not replace JAM lookup-anchor semantics.
 
-The current `jamscript-runtime` and `jamscript-runtime-core` crates remain as
-compatibility surfaces while generated services move to the new foundation.
-They no longer include the ServiceId in managed application keys.
+The `jamscript-runtime` and `jamscript-runtime-core` crates expose the Formal V1
+foundation. They do not include the ServiceId in managed application keys.
 
 ## Reserved JAM storage
 
