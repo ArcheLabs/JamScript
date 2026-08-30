@@ -1,11 +1,10 @@
 use service_runtime_core::{
-    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ManagedStateAccess,
-    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineInputV2, RuntimeRefineOutputV2,
-    ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1, StateDiffV1,
-    StateQueryResponseV1, StateRecoveryV1, StateRoot, EMPTY_STATE_ROOT_V1,
+    ExecutionContext, ManagedStateAccess, ManagedStateCommitmentV1, RuntimeRefineInputV1,
+    RuntimeRefineOutputV1, ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1,
+    StateDiffV1, StateQueryResponseV1, StateRecoveryV1, StateRoot, EMPTY_STATE_ROOT_V1,
     MANAGED_STATE_COMMITMENT_KEY_V1,
 };
-use service_runtime_guest::{refine_input_v2, refine_v2};
+use service_runtime_guest::refine;
 use service_runtime_state::{FullState, StateError, StateTransaction};
 use sp_trie::StorageProof;
 use std::collections::BTreeMap;
@@ -100,21 +99,12 @@ pub trait FinalizedManagedStateSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BuiltManagedWorkV1 {
+pub struct BuiltManagedWork {
     pub context: FinalizedContextV1,
     pub service: ServiceKeyV1,
     pub parent_root: StateRoot,
     pub refine_input: RuntimeRefineInputV1,
-    pub predicted_output: RuntimeRefineOutputV2,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BuiltManagedWorkV2 {
-    pub context: FinalizedContextV1,
-    pub service: ServiceKeyV1,
-    pub parent_root: StateRoot,
-    pub refine_input: RuntimeRefineInputV2,
-    pub predicted_output: RuntimeRefineOutputV2,
+    pub predicted_output: RuntimeRefineOutputV1,
 }
 
 pub trait ServiceStateProvider {
@@ -132,7 +122,7 @@ pub trait ServiceStateProvider {
         service: ServiceKeyV1,
         root: StateRoot,
         plan: &StateAccessPlanV1,
-    ) -> Result<service_runtime_core::ManagedStateWitnessV2, Self::Error>;
+    ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error>;
 
     fn get(
         &self,
@@ -145,26 +135,16 @@ pub trait ServiceStateProvider {
 /// Optional capabilities for a provider that keeps materialized snapshots.
 ///
 /// The execution builder only depends on [`ServiceStateProvider`].  This
-/// extension is retained for the in-memory/reference backend and for the
-/// legacy V1 producer path; remote proof providers do not need to implement
-/// it.
+/// extension is retained for the in-memory/reference backend; remote proof
+/// providers do not need to implement it.
 pub trait MaterializedServiceStateProvider: ServiceStateProvider {
     fn materialized_root(&self, service: ServiceKeyV1) -> Result<StateRoot, Self::Error>;
 
     fn apply_recovery(
         &mut self,
         service: ServiceKeyV1,
-        output: &RuntimeRefineOutputV2,
+        output: &RuntimeRefineOutputV1,
     ) -> Result<(), Self::Error>;
-
-    fn open(&self, service: ServiceKeyV1, root: StateRoot) -> Result<FullState, Self::Error>;
-
-    fn build_witness_v1(
-        &self,
-        service: ServiceKeyV1,
-        parent_root: StateRoot,
-        plan: &StateAccessPlanV1,
-    ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error>;
 }
 
 pub struct AuthenticatedWorkBuilder<'a, Source, Provider> {
@@ -186,7 +166,7 @@ where
         service: ServiceKeyV1,
         application: &Application,
         actions: Vec<Vec<u8>>,
-    ) -> Result<BuiltManagedWorkV2, WorkBuilderError<Source::Error, Provider::Error>>
+    ) -> Result<BuiltManagedWork, WorkBuilderError<Source::Error, Provider::Error>>
     where
         Application: ServiceApplication,
         Application::Error: Into<StateAccessError>,
@@ -255,14 +235,14 @@ where
             .provider
             .build_witness(service, parent_root, &plan)
             .map_err(WorkBuilderError::Provider)?;
-        let refine_input = RuntimeRefineInputV2 {
-            version: RuntimeRefineInputV2::VERSION,
+        let refine_input = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
             managed_state: witness,
             actions,
         };
-        let predicted_output = refine_input_v2(application, &refine_input)
-            .map_err(|_| WorkBuilderError::Verification)?;
-        Ok(BuiltManagedWorkV2 {
+        let predicted_output =
+            refine(application, &refine_input).map_err(|_| WorkBuilderError::Verification)?;
+        Ok(BuiltManagedWork {
             context,
             service,
             parent_root,
@@ -277,7 +257,7 @@ const MAX_PLANNING_ROUNDS: usize = 4096;
 fn initial_runtime_keys(actions: &[Vec<u8>]) -> Vec<Vec<u8>> {
     let mut keys = Vec::new();
     for action in actions {
-        if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v2(action) {
+        if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v1(action) {
             if signed.public_key.len() == 32 {
                 let mut account = [0; 32];
                 account.copy_from_slice(signed.public_key);
@@ -416,183 +396,8 @@ pub enum WorkBuilderError<SourceError, ProviderError> {
     Application(StateAccessError),
     StateWire(service_runtime_core::WireError),
     Verification,
-    ProducerVerifierMismatch,
     ProviderInconsistent,
     PlanningLimit,
-}
-
-pub struct ManagedStateWorkBuilder<'a, Source, Provider> {
-    source: &'a mut Source,
-    provider: &'a Provider,
-}
-
-impl<'a, Source, Provider> ManagedStateWorkBuilder<'a, Source, Provider>
-where
-    Source: FinalizedManagedStateSource,
-    Provider: MaterializedServiceStateProvider,
-{
-    pub fn new(source: &'a mut Source, provider: &'a Provider) -> Self {
-        Self { source, provider }
-    }
-
-    pub fn build_one<Application>(
-        &mut self,
-        service: ServiceKeyV1,
-        application: &Application,
-        action: Vec<u8>,
-    ) -> Result<BuiltManagedWorkV1, WorkBuilderError<Source::Error, Provider::Error>>
-    where
-        Application: ServiceApplication,
-        Application::Error: Into<StateAccessError>,
-    {
-        self.build_actions(service, application, vec![action])
-    }
-
-    pub fn build_actions<Application>(
-        &mut self,
-        service: ServiceKeyV1,
-        application: &Application,
-        actions: Vec<Vec<u8>>,
-    ) -> Result<BuiltManagedWorkV1, WorkBuilderError<Source::Error, Provider::Error>>
-    where
-        Application: ServiceApplication,
-        Application::Error: Into<StateAccessError>,
-    {
-        let context = self
-            .source
-            .finalized_context()
-            .map_err(WorkBuilderError::Source)?;
-        let commitment = self
-            .source
-            .service_storage_at(&context, service, MANAGED_STATE_COMMITMENT_KEY_V1)
-            .map_err(WorkBuilderError::Source)?;
-        let parent_root = match commitment {
-            Some(bytes) => {
-                ManagedStateCommitmentV1::decode(&bytes)
-                    .map_err(|_| WorkBuilderError::InvalidCommitment)?
-                    .root
-            }
-            None => EMPTY_STATE_ROOT_V1,
-        };
-        let state = self
-            .provider
-            .open(service, parent_root)
-            .map_err(WorkBuilderError::Provider)?;
-        if state.root() != parent_root {
-            return Err(WorkBuilderError::State(StateError::InvalidRoot));
-        }
-
-        let (predicted_output, proof) = producer_execute(application, state, &actions)?;
-        let refine_input = RuntimeRefineInputV1 {
-            version: 1,
-            managed_state: service_runtime_core::ManagedStateWitnessV1 {
-                version: 1,
-                parent_root,
-                storage_proof: proof.into_nodes().into_iter().collect(),
-            },
-            actions,
-        };
-        let verified_output =
-            refine_v2(application, &refine_input).map_err(|_| WorkBuilderError::Verification)?;
-        if verified_output != predicted_output {
-            return Err(WorkBuilderError::ProducerVerifierMismatch);
-        }
-        Ok(BuiltManagedWorkV1 {
-            context,
-            service,
-            parent_root,
-            refine_input,
-            predicted_output,
-        })
-    }
-}
-
-fn producer_execute<Application, SourceError, ProviderError>(
-    application: &Application,
-    state: FullState,
-    actions: &[Vec<u8>],
-) -> Result<(RuntimeRefineOutputV2, StorageProof), WorkBuilderError<SourceError, ProviderError>>
-where
-    Application: ServiceApplication,
-    Application::Error: Into<StateAccessError>,
-{
-    let parent_root = state.root();
-    let mut state = StateTransaction::new(state);
-    let mut receipts = Vec::with_capacity(actions.len());
-    let mut transition_valid_until = None;
-    for action in actions {
-        let action_hash = blake2_256(action);
-        state.begin_transaction();
-        let (result, action_valid_until) = {
-            let mut context = ExecutionContext::new(&mut state, None);
-            let result = application
-                .execute(&mut context, action)
-                .map_err(Into::into);
-            (result, context.transition_valid_until())
-        };
-        match result {
-            Ok(()) => {
-                state
-                    .commit_transaction()
-                    .map_err(WorkBuilderError::State)?;
-                merge_validity(&mut transition_valid_until, action_valid_until);
-                receipts.push(ActionReceiptV1 {
-                    action_hash,
-                    status: ActionStatusV1::Applied,
-                    error_code: None,
-                });
-            }
-            Err(StateAccessError::ApplicationFailed(error_code)) => {
-                if error_code & 0x8000_0000 != 0 {
-                    state
-                        .rollback_transaction()
-                        .map_err(WorkBuilderError::State)?;
-                } else {
-                    state
-                        .commit_transaction()
-                        .map_err(WorkBuilderError::State)?;
-                    merge_validity(&mut transition_valid_until, action_valid_until);
-                }
-                receipts.push(ActionReceiptV1 {
-                    action_hash,
-                    status: ActionStatusV1::Failed,
-                    error_code: Some(error_code),
-                });
-            }
-            Err(error @ (StateAccessError::MissingWitness | StateAccessError::InvalidProof)) => {
-                state
-                    .rollback_transaction()
-                    .map_err(WorkBuilderError::State)?;
-                return Err(WorkBuilderError::Application(error));
-            }
-            Err(_) => {
-                state
-                    .rollback_transaction()
-                    .map_err(WorkBuilderError::State)?;
-                receipts.push(ActionReceiptV1 {
-                    action_hash,
-                    status: ActionStatusV1::Failed,
-                    error_code: Some(1),
-                });
-            }
-        }
-    }
-    let (next, diff, proof) = state.finish_with_proof().map_err(WorkBuilderError::State)?;
-    let output = RuntimeRefineOutputV2::from_diff_with_validity(
-        parent_root,
-        next.root(),
-        receipts,
-        diff,
-        transition_valid_until,
-    )
-    .map_err(|_| WorkBuilderError::Verification)?;
-    Ok((output, proof))
-}
-
-fn merge_validity(current: &mut Option<u64>, action: Option<u64>) {
-    if let Some(action) = action {
-        *current = Some(current.map_or(action, |existing| existing.min(action)));
-    }
 }
 
 #[derive(Clone, Default)]
@@ -602,6 +407,10 @@ pub struct FullStateProvider {
 }
 
 impl FullStateProvider {
+    pub fn open(&self, service: ServiceKeyV1, root: StateRoot) -> Result<FullState, ProviderError> {
+        self.state_at(service, root)
+    }
+
     /// Materializes a snapshot identified only by `(service, state root)`.
     /// Insertion does not make the snapshot canonical.
     pub fn insert(&mut self, service: ServiceKeyV1, state: FullState) -> StateRoot {
@@ -642,12 +451,12 @@ impl ServiceStateProvider for FullStateProvider {
         service: ServiceKeyV1,
         root: StateRoot,
         plan: &StateAccessPlanV1,
-    ) -> Result<service_runtime_core::ManagedStateWitnessV2, Self::Error> {
+    ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error> {
         let state = self.state_at(service, root)?;
         let keys = plan.keys.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let proof = state.proof_for(&keys)?;
-        Ok(service_runtime_core::ManagedStateWitnessV2 {
-            version: service_runtime_core::ManagedStateWitnessV2::VERSION,
+        Ok(service_runtime_core::ManagedStateWitnessV1 {
+            version: service_runtime_core::ManagedStateWitnessV1::VERSION,
             parent_root: root,
             access_plan: plan.clone(),
             storage_proof: proof.into_nodes().into_iter().collect(),
@@ -685,7 +494,7 @@ impl MaterializedServiceStateProvider for FullStateProvider {
     fn apply_recovery(
         &mut self,
         service: ServiceKeyV1,
-        output: &RuntimeRefineOutputV2,
+        output: &RuntimeRefineOutputV1,
     ) -> Result<(), Self::Error> {
         let recovery = StateRecoveryV1::decode(&output.recovery_payload)
             .map_err(|_| ProviderError::InvalidRecovery)?;
@@ -708,37 +517,17 @@ impl MaterializedServiceStateProvider for FullStateProvider {
         self.materialized.insert(service, output.new_root);
         Ok(())
     }
-
-    fn open(&self, service: ServiceKeyV1, root: StateRoot) -> Result<FullState, Self::Error> {
-        self.state_at(service, root)
-    }
-
-    fn build_witness_v1(
-        &self,
-        service: ServiceKeyV1,
-        parent_root: StateRoot,
-        plan: &StateAccessPlanV1,
-    ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error> {
-        let state = self.state_at(service, parent_root)?;
-        let keys = plan.keys.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let proof = state.proof_for(&keys)?;
-        Ok(service_runtime_core::ManagedStateWitnessV1 {
-            version: 1,
-            parent_root,
-            storage_proof: proof.into_nodes().into_iter().collect(),
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use jamscript_crypto::SR25519_CONTEXT;
-    use jamscript_protocol::SignedActionV2;
+    use jamscript_protocol::SignedActionV1;
     use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
-    use service_runtime_guest::refine_v2;
+    use service_runtime_core::ActionStatusV1;
+    use service_runtime_guest::refine;
     use service_runtime_state::{ManagedState, ProofState};
-    use std::cell::Cell;
     use std::collections::VecDeque;
 
     const SERVICE: ServiceKeyV1 = ServiceKeyV1::new([7; 32]);
@@ -838,198 +627,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn builder_discovers_dynamic_keys_and_verifies_empty_existing_and_historical_roots() {
-        let mut provider = FullStateProvider::default();
-        let historical = FullState::from_pairs([(b"alice".as_slice(), [4])]).unwrap();
-        let historical_root = provider.insert(SERVICE, historical);
-        let materialized = FullState::from_pairs([(b"alice".as_slice(), [99])]).unwrap();
-        let materialized_root = provider.insert(SERVICE, materialized);
-        assert_ne!(historical_root, materialized_root);
-
-        let mut source = TestFinalizedSource::default();
-        source.push(finalized(1), Some(historical_root));
-        let built = ManagedStateWorkBuilder::new(&mut source, &provider)
-            .build_actions(
-                SERVICE,
-                &DynamicApplication,
-                vec![b"alice".to_vec(), b"bob".to_vec()],
-            )
-            .unwrap();
-
-        assert_eq!(built.parent_root, historical_root);
-        assert_eq!(
-            built.refine_input.managed_state.parent_root,
-            historical_root
-        );
-        assert!(!built.refine_input.managed_state.storage_proof.is_empty());
-        assert_eq!(built.predicted_output.parent_root, historical_root);
-        assert_ne!(built.predicted_output.new_root, historical_root);
-        assert_eq!(built.predicted_output.receipts.len(), 2);
-        assert_eq!(
-            provider.materialized_root(SERVICE).unwrap(),
-            materialized_root
-        );
-
-        let recovery = StateRecoveryV1::decode(&built.predicted_output.recovery_payload).unwrap();
-        let keys = recovery
-            .diff
-            .changes
-            .iter()
-            .map(|change| change.key.as_slice())
-            .collect::<Vec<_>>();
-        assert!(keys.contains(&b"alice".as_slice()));
-        assert!(keys.contains(&b"bob".as_slice()));
-        assert!(keys.contains(&b"secondary/alice".as_slice()));
-        assert!(keys.contains(&b"secondary/bob".as_slice()));
-
-        let mut tampered_input = built.refine_input.clone();
-        tampered_input.managed_state.storage_proof[0][0] ^= 1;
-        assert!(refine_v2(&DynamicApplication, &tampered_input).is_err());
-
-        let mut empty_source = TestFinalizedSource::default();
-        empty_source.push(finalized(2), None);
-        let empty = ManagedStateWorkBuilder::new(&mut empty_source, &provider)
-            .build_one(SERVICE, &DynamicApplication, b"new".to_vec())
-            .unwrap();
-        assert_eq!(empty.parent_root, EMPTY_STATE_ROOT_V1);
-    }
-
-    #[test]
-    fn builder_rejects_unavailable_or_tampered_canonical_roots() {
-        let provider = FullStateProvider::default();
-        let mut unavailable = TestFinalizedSource::default();
-        unavailable.push(finalized(3), Some([9; 32]));
-        assert_eq!(
-            ManagedStateWorkBuilder::new(&mut unavailable, &provider).build_one(
-                SERVICE,
-                &DynamicApplication,
-                b"key".to_vec()
-            ),
-            Err(WorkBuilderError::Provider(ProviderError::UnavailableRoot))
-        );
-
-        let mut invalid = TestFinalizedSource::default();
-        let context = finalized(4);
-        invalid.contexts.push_back(context);
-        invalid
-            .commitments
-            .insert(context.block_hash, Some(vec![1, 1]));
-        assert_eq!(
-            ManagedStateWorkBuilder::new(&mut invalid, &provider).build_one(
-                SERVICE,
-                &DynamicApplication,
-                b"key".to_vec()
-            ),
-            Err(WorkBuilderError::InvalidCommitment)
-        );
-
-        struct MismatchedProvider;
-        impl ServiceStateProvider for MismatchedProvider {
-            type Error = ProviderError;
-
-            fn value_at(
-                &self,
-                _service: ServiceKeyV1,
-                _root: StateRoot,
-                _key: &[u8],
-            ) -> Result<Option<Vec<u8>>, Self::Error> {
-                Ok(None)
-            }
-
-            fn build_witness(
-                &self,
-                _service: ServiceKeyV1,
-                _root: StateRoot,
-                _plan: &StateAccessPlanV1,
-            ) -> Result<service_runtime_core::ManagedStateWitnessV2, Self::Error> {
-                unreachable!()
-            }
-
-            fn get(
-                &self,
-                _service: ServiceKeyV1,
-                _root: StateRoot,
-                _key: &[u8],
-            ) -> Result<StateQueryResponseV1, Self::Error> {
-                unreachable!()
-            }
-        }
-
-        impl MaterializedServiceStateProvider for MismatchedProvider {
-            fn materialized_root(&self, _service: ServiceKeyV1) -> Result<StateRoot, Self::Error> {
-                Ok(EMPTY_STATE_ROOT_V1)
-            }
-
-            fn build_witness_v1(
-                &self,
-                _service: ServiceKeyV1,
-                _parent_root: StateRoot,
-                _plan: &StateAccessPlanV1,
-            ) -> Result<service_runtime_core::ManagedStateWitnessV1, Self::Error> {
-                unreachable!()
-            }
-
-            fn apply_recovery(
-                &mut self,
-                _service: ServiceKeyV1,
-                _output: &RuntimeRefineOutputV2,
-            ) -> Result<(), Self::Error> {
-                unreachable!()
-            }
-
-            fn open(
-                &self,
-                _service: ServiceKeyV1,
-                _root: StateRoot,
-            ) -> Result<FullState, Self::Error> {
-                Ok(FullState::empty())
-            }
-        }
-
-        let mut tampered = TestFinalizedSource::default();
-        tampered.push(finalized(10), Some([10; 32]));
-        assert_eq!(
-            ManagedStateWorkBuilder::new(&mut tampered, &MismatchedProvider).build_one(
-                SERVICE,
-                &DynamicApplication,
-                b"key".to_vec(),
-            ),
-            Err(WorkBuilderError::State(StateError::InvalidRoot))
-        );
-    }
-
-    struct DivergingApplication(Cell<u8>);
-
-    impl ServiceApplication for DivergingApplication {
-        type Error = StateAccessError;
-
-        fn execute(
-            &self,
-            context: &mut ExecutionContext<'_>,
-            _input: &[u8],
-        ) -> Result<(), Self::Error> {
-            let next = self.0.get().saturating_add(1);
-            self.0.set(next);
-            context.state().set(b"value", &[next])
-        }
-    }
-
-    #[test]
-    fn builder_rejects_producer_verifier_divergence() {
-        let provider = FullStateProvider::default();
-        let mut source = TestFinalizedSource::default();
-        source.push(finalized(5), None);
-        assert_eq!(
-            ManagedStateWorkBuilder::new(&mut source, &provider).build_one(
-                SERVICE,
-                &DivergingApplication(Cell::new(0)),
-                Vec::new(),
-            ),
-            Err(WorkBuilderError::ProducerVerifierMismatch)
-        );
-    }
-
     struct PlanningProbe;
 
     impl ServiceApplication for PlanningProbe {
@@ -1053,7 +650,7 @@ mod tests {
         let built = AuthenticatedWorkBuilder::new(&mut source, &provider)
             .build_actions(SERVICE, &PlanningProbe, vec![b"dynamic-key".to_vec()])
             .unwrap();
-        assert_eq!(built.refine_input.version, RuntimeRefineInputV2::VERSION);
+        assert_eq!(built.refine_input.version, RuntimeRefineInputV1::VERSION);
         assert_eq!(
             built.refine_input.managed_state.access_plan.keys,
             vec![b"dynamic-key".to_vec()]
@@ -1127,10 +724,10 @@ mod tests {
             context: &mut ExecutionContext<'_>,
             raw_action: &[u8],
         ) -> Result<(), Self::Error> {
-            let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action)
+            let signed = jamscript_runtime_core::decode_signed_action_v1(raw_action)
                 .map_err(|_| StateAccessError::Backend)?;
             let verified =
-                jamscript_runtime_core::verify_signed_action_v2(signed, NETWORK, SERVICE, SELECTOR)
+                jamscript_runtime_core::verify_signed_action_v1(signed, NETWORK, SERVICE, SELECTOR)
                     .map_err(|_| StateAccessError::Backend)?;
             let nonce_key = service_runtime_core::wallet_nonce_key_v1(&verified.sender);
             let nonce = context.state().get(&nonce_key)?.unwrap_or_default();
@@ -1176,7 +773,7 @@ mod tests {
         let keypair = MiniSecretKey::from_bytes(&[seed; 32])
             .unwrap()
             .expand_to_keypair(ExpansionMode::Ed25519);
-        let mut action = SignedActionV2::unsigned(
+        let mut action = SignedActionV1::unsigned(
             NETWORK,
             SERVICE,
             SELECTOR,
@@ -1194,12 +791,16 @@ mod tests {
     }
 
     #[test]
-    fn builder_runs_real_signed_action_v2_nonce_and_business_state_across_roots() {
+    fn builder_runs_real_formal_signed_action_nonce_and_business_state_across_roots() {
         let mut provider = FullStateProvider::default();
         let mut source = TestFinalizedSource::default();
         source.push(finalized(6), None);
-        let first = ManagedStateWorkBuilder::new(&mut source, &provider)
-            .build_one(SERVICE, &SignedCounter, signed_counter_action(7, 0, 3))
+        let first = AuthenticatedWorkBuilder::new(&mut source, &provider)
+            .build_actions(
+                SERVICE,
+                &SignedCounter,
+                vec![signed_counter_action(7, 0, 3)],
+            )
             .unwrap();
         assert_eq!(
             first.predicted_output.receipts[0].status,
@@ -1210,8 +811,12 @@ mod tests {
             .unwrap();
 
         source.push(finalized(7), Some(first.predicted_output.new_root));
-        let second = ManagedStateWorkBuilder::new(&mut source, &provider)
-            .build_one(SERVICE, &SignedCounter, signed_counter_action(7, 1, 4))
+        let second = AuthenticatedWorkBuilder::new(&mut source, &provider)
+            .build_actions(
+                SERVICE,
+                &SignedCounter,
+                vec![signed_counter_action(7, 1, 4)],
+            )
             .unwrap();
         assert_eq!(second.parent_root, first.predicted_output.new_root);
         assert_ne!(second.predicted_output.new_root, second.parent_root);
@@ -1229,11 +834,11 @@ mod tests {
         source.push(finalized(8), Some(first_root));
         source.push(finalized(9), Some(second_root));
 
-        let first = ManagedStateWorkBuilder::new(&mut source, &provider)
-            .build_one(SERVICE, &DynamicApplication, b"key".to_vec())
+        let first = AuthenticatedWorkBuilder::new(&mut source, &provider)
+            .build_actions(SERVICE, &DynamicApplication, vec![b"key".to_vec()])
             .unwrap();
-        let refreshed = ManagedStateWorkBuilder::new(&mut source, &provider)
-            .build_one(SERVICE, &DynamicApplication, b"key".to_vec())
+        let refreshed = AuthenticatedWorkBuilder::new(&mut source, &provider)
+            .build_actions(SERVICE, &DynamicApplication, vec![b"key".to_vec()])
             .unwrap();
         assert_eq!(first.parent_root, first_root);
         assert_eq!(refreshed.parent_root, second_root);
@@ -1243,23 +848,17 @@ mod tests {
         );
     }
 
-    fn run(provider: &FullStateProvider, actions: Vec<&[u8]>) -> RuntimeRefineOutputV2 {
+    fn run(provider: &FullStateProvider, actions: Vec<&[u8]>) -> RuntimeRefineOutputV1 {
         let parent_root = provider.materialized_root(SERVICE).unwrap();
         let plan =
             StateAccessPlanV1::from_keys([b"nonce".as_slice(), b"counter", b"a", b"b"]).unwrap();
-        let witness = MaterializedServiceStateProvider::build_witness_v1(
-            provider,
-            SERVICE,
-            parent_root,
-            &plan,
-        )
-        .unwrap();
+        let witness = provider.build_witness(SERVICE, parent_root, &plan).unwrap();
         let input = RuntimeRefineInputV1 {
             version: 1,
             managed_state: witness,
             actions: actions.into_iter().map(|action| action.to_vec()).collect(),
         };
-        refine_v2(&Counter, &input).unwrap()
+        refine(&Counter, &input).unwrap()
     }
 
     #[test]
@@ -1396,20 +995,14 @@ mod tests {
             b"b".as_slice(),
         ])
         .unwrap();
-        let mut witness = MaterializedServiceStateProvider::build_witness_v1(
-            &provider,
-            SERVICE,
-            parent_root,
-            &plan,
-        )
-        .unwrap();
+        let mut witness = provider.build_witness(SERVICE, parent_root, &plan).unwrap();
         witness.storage_proof.clear();
         let invalid_input = RuntimeRefineInputV1 {
             version: 1,
             managed_state: witness,
             actions: vec![b"inc".to_vec()],
         };
-        assert!(refine_v2(&Counter, &invalid_input).is_err());
+        assert!(refine(&Counter, &invalid_input).is_err());
 
         let output = run(&provider, vec![b"inc"]);
         let mut stale = output.clone();

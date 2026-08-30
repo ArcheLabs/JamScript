@@ -2,14 +2,14 @@ import { actionByName, queryByName, stateByName, type DeploymentDescriptor } fro
 import { decodeStateValue, decodeValue, encodeActionPayload, encodeValue, type CodecValue } from "./codec.js";
 import {
   actionSelector,
-  encodeSignedActionV2,
+  encodeSignedActionV1,
   MANAGED_STATE_COMMITMENT_KEY_V1,
   nonceKey,
   parseHex,
-  signingDigestV2,
+  signingDigestV1,
   stateKey,
   toHex,
-  type SignedActionV2,
+  type SignedActionV1,
 } from "./crypto.js";
 import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
@@ -17,7 +17,6 @@ import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
 import {
   RpcStateProvider,
-  StateProviderError,
   type StateProvider,
 } from "./state-provider.js";
 
@@ -30,7 +29,6 @@ export type QueryResult = {
 };
 
 export type JamScriptClientOptions = {
-  legacyServiceKvFallback?: boolean;
   stateProvider?: StateProvider;
 };
 
@@ -63,7 +61,7 @@ export class JamScriptClient {
     const finalized = context ?? (await this.rpc.finalizedContext());
     const root = await this.managedStateRoot(finalized);
     const key = nonceKey(publicKey);
-    const valueBytes = await this.readManagedValue(finalized, root, key);
+    const valueBytes = await this.readManagedValue(root, key);
     if (valueBytes === null) return 0n;
     const value = decodeValue("u64", valueBytes);
     if (typeof value !== "bigint") throw new Error("nonce storage is not u64");
@@ -89,8 +87,8 @@ export class JamScriptClient {
     const nonce = await this.readNonce(signer.publicKey, initialContext);
     const ttl = options.ttl ?? 64n;
     const validUntil = BigInt(initialContext.slot) + ttl;
-    const unsigned: Omit<SignedActionV2, "signature"> = {
-      version: 2,
+    const unsigned: Omit<SignedActionV1, "signature"> = {
+      version: 1,
       networkDomain: parseHex(this.deployment.genesisHash, 32),
       serviceKey: parseHex(this.deployment.serviceKey, 32),
       actionSelector: selector,
@@ -101,9 +99,9 @@ export class JamScriptClient {
       payloadHash: blake2(payload),
       payload,
     };
-    const signature = await signer.signRaw(signingDigestV2(unsigned));
+    const signature = await signer.signRaw(signingDigestV1(unsigned));
     if (signature.length !== 64) throw new Error("sr25519 signRaw must return a 64-byte signature");
-    const signed = encodeSignedActionV2({ ...unsigned, signature });
+    const signed = encodeSignedActionV1({ ...unsigned, signature });
     const actionHash = toHex(blake2(signed));
     const requestBase = {
       serviceId: this.deployment.serviceId,
@@ -142,7 +140,6 @@ export class JamScriptClient {
     const context = await this.rpc.finalizedContext();
     const root = await this.managedStateRoot(context);
     const valueBytes = await this.readManagedValue(
-      context,
       root,
       stateKey(state.schema, keyBytes),
     );
@@ -174,39 +171,23 @@ export class JamScriptClient {
   }
 
   private async readManagedValue(
-    context: FinalizedContext,
     root: Uint8Array,
     key: Uint8Array,
   ): Promise<Uint8Array | null> {
-    try {
-      const response = await this.stateProvider.get({
-        serviceId: this.deployment.serviceId,
-        serviceKey: this.deployment.serviceKey,
-        stateRoot: toHex(root),
-        key,
-      });
-      if (
-        response.serviceId !== this.deployment.serviceId
-        || response.stateRoot.toLowerCase() !== toHex(root).toLowerCase()
-        || !sameBytes(response.key, key)
-      ) {
-        throw new Error("managed-state provider response does not match the requested query");
-      }
-      return verifyManagedStateProof(
-        root,
-        key,
-        response.value,
-        response.proof,
-      );
-    } catch (error) {
-      if (!this.options.legacyServiceKvFallback || !isManagedStateUnavailable(error)) throw error;
-      const encoded = await this.rpc.serviceStorageAt(
-        context.blockHash,
-        this.deployment.serviceId,
-        toHex(key),
-      );
-      return encoded === null ? null : decodeStateValue(parseHex(encoded));
+    const response = await this.stateProvider.get({
+      serviceId: this.deployment.serviceId,
+      serviceKey: this.deployment.serviceKey,
+      stateRoot: toHex(root),
+      key,
+    });
+    if (
+      response.serviceId !== this.deployment.serviceId
+      || response.stateRoot.toLowerCase() !== toHex(root).toLowerCase()
+      || !sameBytes(response.key, key)
+    ) {
+      throw new Error("managed-state provider response does not match the requested query");
     }
+    return verifyManagedStateProof(root, key, response.value, response.proof);
   }
 
   workStatus(packageHash: string): Promise<WorkStatusResult> {
@@ -283,9 +264,4 @@ function sameHex(left: string, right: string): boolean {
 
 function isStaleContext(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === -32010;
-}
-
-function isManagedStateUnavailable(error: unknown): boolean {
-  return (error instanceof RpcError && (error.code === -32601 || error.code === -32030))
-    || (error instanceof StateProviderError && error.kind === "RootUnavailable");
 }

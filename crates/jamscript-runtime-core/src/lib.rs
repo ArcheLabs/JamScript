@@ -10,7 +10,6 @@ pub const MAX_ACTION_BYTES: usize = 1_048_576;
 pub const MAX_RESULT_BYTES: usize = 1_048_576;
 /// Domain separator retained inside the SignedActionV1 digest.
 pub const ACTION_DOMAIN_V1: &[u8] = b"JAMSCRIPT_ACTION_V1";
-pub const ACTION_DOMAIN_V2: &[u8] = b"JAMSCRIPT_ACTION_V2";
 pub const STATE_KEY_DOMAIN_V1: &[u8] = b"jamscript/state/v1";
 pub const NONCE_SCHEMA_V1: &[u8] = b"__jamscript/runtime/auth/nonces/";
 pub const MANAGEMENT_DOMAIN_V1: &[u8] = b"jamscript/management/v1";
@@ -289,23 +288,7 @@ impl RuntimeError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SignedActionView<'a> {
-    pub version: u8,
-    pub genesis_hash: [u8; 32],
-    pub service_id: u32,
-    pub action_selector: [u8; 8],
-    pub signer_scheme: u8,
-    pub public_key: &'a [u8],
-    pub nonce: u64,
-    pub valid_until: u64,
-    pub payload_hash: [u8; 32],
-    pub signature: &'a [u8],
-    pub payload: &'a [u8],
-    pub encoded: &'a [u8],
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SignedActionV2View<'a> {
+pub struct SignedActionV1View<'a> {
     pub version: u8,
     pub network_domain: [u8; 32],
     pub service_key: ServiceKeyV1,
@@ -340,90 +323,15 @@ pub fn checked_add_u64(left: u64, right: u64) -> Option<u64> {
     left.checked_add(right)
 }
 
-pub fn decode_signed_action(bytes: &[u8]) -> Result<SignedActionView<'_>, RuntimeError> {
+pub fn decode_signed_action_v1(bytes: &[u8]) -> Result<SignedActionV1View<'_>, RuntimeError> {
     if bytes.len() > MAX_ACTION_BYTES {
         return Err(RuntimeError::PayloadTooLarge);
     }
     let mut reader = Reader { bytes, offset: 0 };
     let version = reader.u8()?;
-    let genesis_hash = reader.array::<32>()?;
-    let service_id = reader.u32()?;
-    let action_selector = reader.array::<8>()?;
-    let signer_scheme = reader.u8()?;
-    let public_key = reader.bytes_u8()?;
-    let nonce = reader.u64()?;
-    let valid_until = reader.u64()?;
-    let payload_hash = reader.array::<32>()?;
-    let signature = reader.bytes_u8()?;
-    let payload = reader.bytes_u32()?;
-    if reader.offset != bytes.len() {
-        return Err(RuntimeError::InvalidEnvelope);
-    }
-    if public_key.len() > 32 || signature.len() > 64 {
-        return Err(RuntimeError::InvalidEnvelope);
-    }
-    Ok(SignedActionView {
-        version,
-        genesis_hash,
-        service_id,
-        action_selector,
-        signer_scheme,
-        public_key,
-        nonce,
-        valid_until,
-        payload_hash,
-        signature,
-        payload,
-        encoded: bytes,
-    })
-}
-
-pub fn verify_signed_action<'a>(
-    action: SignedActionView<'a>,
-    expected_genesis_hash: [u8; 32],
-    expected_service_id: u32,
-    expected_action_selector: [u8; 8],
-) -> Result<VerifiedAction<'a>, RuntimeError> {
-    if action.version != 1 {
+    if version != 1 {
         return Err(RuntimeError::UnsupportedVersion);
     }
-    if action.genesis_hash != expected_genesis_hash {
-        return Err(RuntimeError::WrongNetwork);
-    }
-    if action.service_id != expected_service_id {
-        return Err(RuntimeError::WrongService);
-    }
-    if action.action_selector != expected_action_selector {
-        return Err(RuntimeError::UnknownAction);
-    }
-    if action.signer_scheme != 0 {
-        return Err(RuntimeError::UnsupportedSigner);
-    }
-    if action.public_key.len() != 32 || action.signature.len() != 64 {
-        return Err(RuntimeError::InvalidSignature);
-    }
-    if blake2_256(action.payload) != action.payload_hash {
-        return Err(RuntimeError::PayloadHashMismatch);
-    }
-    let digest = signing_digest(&action);
-    let sender = verify_sr25519(action.public_key, action.signature, &digest)
-        .map_err(|_| RuntimeError::InvalidSignature)?;
-    Ok(VerifiedAction {
-        sender,
-        action_hash: blake2_256(action.encoded),
-        action_selector: action.action_selector,
-        nonce: action.nonce,
-        valid_until: action.valid_until,
-        payload: action.payload,
-    })
-}
-
-pub fn decode_signed_action_v2(bytes: &[u8]) -> Result<SignedActionV2View<'_>, RuntimeError> {
-    if bytes.len() > MAX_ACTION_BYTES {
-        return Err(RuntimeError::PayloadTooLarge);
-    }
-    let mut reader = Reader { bytes, offset: 0 };
-    let version = reader.u8()?;
     let network_domain = reader.array::<32>()?;
     let service_key = ServiceKeyV1::new(reader.array::<32>()?);
     let action_selector = reader.array::<8>()?;
@@ -440,7 +348,7 @@ pub fn decode_signed_action_v2(bytes: &[u8]) -> Result<SignedActionV2View<'_>, R
     if public_key.len() > 32 || signature.len() > 64 {
         return Err(RuntimeError::InvalidEnvelope);
     }
-    Ok(SignedActionV2View {
+    Ok(SignedActionV1View {
         version,
         network_domain,
         service_key,
@@ -456,13 +364,13 @@ pub fn decode_signed_action_v2(bytes: &[u8]) -> Result<SignedActionV2View<'_>, R
     })
 }
 
-pub fn verify_signed_action_v2<'a>(
-    action: SignedActionV2View<'a>,
+pub fn verify_signed_action_v1<'a>(
+    action: SignedActionV1View<'a>,
     expected_network_domain: [u8; 32],
     expected_service_key: ServiceKeyV1,
     expected_action_selector: [u8; 8],
 ) -> Result<VerifiedAction<'a>, RuntimeError> {
-    if action.version != 2 {
+    if action.version != 1 {
         return Err(RuntimeError::UnsupportedVersion);
     }
     if action.network_domain != expected_network_domain {
@@ -483,7 +391,7 @@ pub fn verify_signed_action_v2<'a>(
     if blake2_256(action.payload) != action.payload_hash {
         return Err(RuntimeError::PayloadHashMismatch);
     }
-    let digest = signing_digest_v2(&action);
+    let digest = signing_digest_v1(&action);
     let sender = verify_sr25519(action.public_key, action.signature, &digest)
         .map_err(|_| RuntimeError::InvalidSignature)?;
     Ok(VerifiedAction {
@@ -504,34 +412,11 @@ pub fn check_expiry(valid_until: u64, authoritative_tick: u64) -> Result<(), Run
     }
 }
 
-pub fn signing_digest(action: &SignedActionView<'_>) -> [u8; 32] {
-    let mut preimage = [0u8; ACTION_DOMAIN_V1.len() + 1 + 32 + 4 + 8 + 1 + 8 + 8 + 32];
+pub fn signing_digest_v1(action: &SignedActionV1View<'_>) -> [u8; 32] {
+    let mut preimage = [0u8; ACTION_DOMAIN_V1.len() + 1 + 32 + 32 + 8 + 1 + 8 + 8 + 32];
     let mut offset = 0;
     preimage[offset..offset + ACTION_DOMAIN_V1.len()].copy_from_slice(ACTION_DOMAIN_V1);
     offset += ACTION_DOMAIN_V1.len();
-    preimage[offset] = action.version;
-    offset += 1;
-    preimage[offset..offset + 32].copy_from_slice(&action.genesis_hash);
-    offset += 32;
-    preimage[offset..offset + 4].copy_from_slice(&action.service_id.to_le_bytes());
-    offset += 4;
-    preimage[offset..offset + 8].copy_from_slice(&action.action_selector);
-    offset += 8;
-    preimage[offset] = action.signer_scheme;
-    offset += 1;
-    preimage[offset..offset + 8].copy_from_slice(&action.nonce.to_le_bytes());
-    offset += 8;
-    preimage[offset..offset + 8].copy_from_slice(&action.valid_until.to_le_bytes());
-    offset += 8;
-    preimage[offset..offset + 32].copy_from_slice(&action.payload_hash);
-    blake2_256(&preimage)
-}
-
-pub fn signing_digest_v2(action: &SignedActionV2View<'_>) -> [u8; 32] {
-    let mut preimage = [0u8; ACTION_DOMAIN_V2.len() + 1 + 32 + 32 + 8 + 1 + 8 + 8 + 32];
-    let mut offset = 0;
-    preimage[offset..offset + ACTION_DOMAIN_V2.len()].copy_from_slice(ACTION_DOMAIN_V2);
-    offset += ACTION_DOMAIN_V2.len();
     preimage[offset] = action.version;
     offset += 1;
     preimage[offset..offset + 32].copy_from_slice(&action.network_domain);
@@ -703,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn verifies_the_reference_protocol_envelope() {
+    fn verifies_the_service_key_v1_envelope() {
         use jamscript_crypto::SR25519_CONTEXT;
         use jamscript_protocol::SignedActionV1;
         use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
@@ -712,8 +597,8 @@ mod tests {
             .unwrap()
             .expand_to_keypair(ExpansionMode::Ed25519);
         let mut action = SignedActionV1::unsigned(
-            [1; 32],
-            182,
+            [3; 32],
+            service_runtime_core::ServiceKeyV1::new([4; 32]),
             [3; 8],
             keypair.public.to_bytes(),
             4,
@@ -725,28 +610,26 @@ mod tests {
             keypair.sign(signing_context(SR25519_CONTEXT).bytes(&action.signing_digest()));
         action.signature = signature.to_bytes().to_vec();
         let encoded = action.encode().unwrap();
-        let verified = verify_signed_action(
-            decode_signed_action(&encoded).unwrap(),
-            [1; 32],
-            182,
+        let verified = verify_signed_action_v1(
+            decode_signed_action_v1(&encoded).unwrap(),
+            [3; 32],
+            service_runtime_core::ServiceKeyV1::new([4; 32]),
             [3; 8],
         )
         .unwrap();
-        check_expiry(verified.valid_until, 10).unwrap();
         assert_eq!(verified.nonce, 4);
         assert_eq!(verified.payload, 7u64.to_le_bytes());
     }
 
     #[test]
-    fn verifies_the_service_key_v2_envelope() {
-        use jamscript_crypto::SR25519_CONTEXT;
-        use jamscript_protocol::SignedActionV2;
-        use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
+    fn old_v2_action_is_rejected_by_the_formal_decoder() {
+        use jamscript_protocol::SignedActionV1;
+        use schnorrkel::{ExpansionMode, MiniSecretKey};
 
         let keypair = MiniSecretKey::from_bytes(&[7; 32])
             .unwrap()
             .expand_to_keypair(ExpansionMode::Ed25519);
-        let mut action = SignedActionV2::unsigned(
+        let action = SignedActionV1::unsigned(
             [3; 32],
             service_runtime_core::ServiceKeyV1::new([4; 32]),
             [3; 8],
@@ -756,19 +639,12 @@ mod tests {
             7u64.to_le_bytes().to_vec(),
         )
         .unwrap();
-        let signature =
-            keypair.sign(signing_context(SR25519_CONTEXT).bytes(&action.signing_digest()));
-        action.signature = signature.to_bytes().to_vec();
-        let encoded = action.encode().unwrap();
-        let verified = verify_signed_action_v2(
-            decode_signed_action_v2(&encoded).unwrap(),
-            [3; 32],
-            service_runtime_core::ServiceKeyV1::new([4; 32]),
-            [3; 8],
-        )
-        .unwrap();
-        assert_eq!(verified.nonce, 4);
-        assert_eq!(verified.payload, 7u64.to_le_bytes());
+        let mut encoded = action.encode().unwrap();
+        encoded[0] = 2;
+        assert_eq!(
+            decode_signed_action_v1(&encoded),
+            Err(RuntimeError::UnsupportedVersion)
+        );
     }
 
     #[test]

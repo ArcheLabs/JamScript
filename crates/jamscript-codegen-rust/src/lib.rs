@@ -89,18 +89,14 @@ fn generate_no_std_rust_with_backend(
         ""
     };
     let refine_call = if scriptc {
-        "service_runtime_guest::refine_input_v2_owned(&GeneratedApplication, runtime_input)"
+        "service_runtime_guest::refine_owned(&GeneratedApplication, runtime_input)"
     } else if context.diagnostic {
-        "{ let mut diagnostic_observer = service_runtime_guest::guest_support::DiagnosticObserver; service_runtime_guest::refine_v2_owned_with_observer(&GeneratedApplication, runtime_input, &mut diagnostic_observer) }"
+        "{ let mut diagnostic_observer = service_runtime_guest::guest_support::DiagnosticObserver; service_runtime_guest::refine_owned_with_observer(&GeneratedApplication, runtime_input, &mut diagnostic_observer) }"
     } else {
-        "service_runtime_guest::refine_v2_owned(&GeneratedApplication, runtime_input)"
+        "service_runtime_guest::refine_owned(&GeneratedApplication, runtime_input)"
     };
-    let runtime_input_type = if scriptc {
-        "RuntimeRefineInputV2"
-    } else {
-        "RuntimeRefineInputV1"
-    };
-    let runtime_input_version = if scriptc { 2 } else { 1 };
+    let runtime_input_type = "RuntimeRefineInputV1";
+    let runtime_input_version = 1;
     Ok(format!(
         r##"#![no_std]
 #![allow(static_mut_refs)]
@@ -110,7 +106,7 @@ compile_error!("generated service must be built with the official PolkaVM target
 pub const JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = {runtime_input_version};
 
 use service_runtime_core::{{
-    ManagedStateCommitmentV1, {runtime_input_type}, RuntimeRefineOutputV2, StateRoot,
+    ManagedStateCommitmentV1, {runtime_input_type}, RuntimeRefineOutputV1, StateRoot,
     MANAGED_STATE_COMMITMENT_KEY_V1,
 }};
 #[repr(C)]
@@ -196,7 +192,7 @@ pub extern "C" fn minijam_accumulate() {{
         let mut size = 0usize;
         if unsafe {{ minijam_result(index, RESULT.as_mut_ptr(), 2097152, &mut size) }} != 0 {{ continue; }}
         let refined = unsafe {{ core::slice::from_raw_parts(RESULT.as_ptr(), size) }};
-        let Ok(header) = RuntimeRefineOutputV2::decode_transition_header(refined) else {{ continue; }};
+        let Ok(header) = RuntimeRefineOutputV1::decode_transition_header(refined) else {{ continue; }};
         if header.parent_root != current {{ continue; }}
         if header.transition_valid_until.is_some_and(|valid_until| authoritative_tick > valid_until) {{ continue; }}
         current = header.new_root;
@@ -271,8 +267,7 @@ pub fn generate_builder_application_rust(
     };
     Ok(format!(
         "pub const JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = {};\n{}",
-        if scriptc { 2 } else { 1 },
-        source
+        1, source
     ))
 }
 
@@ -347,11 +342,11 @@ fn generate_scriptc_application_rust(
     let wallet_auth = if wallet_only {
         format!(
             r##"
-        let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action)
+        let signed = jamscript_runtime_core::decode_signed_action_v1(raw_action)
             .map_err(|error| StateAccessError::Rejected(error.code()))?;
         match signed.action_selector {{ {known_selectors} _ => return Err(StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::UnknownAction.code())), }}
         let selected_selector = signed.action_selector;
-        let verified = jamscript_runtime_core::verify_signed_action_v2(
+        let verified = jamscript_runtime_core::verify_signed_action_v1(
             signed, NETWORK_DOMAIN, SERVICE_KEY, selected_selector,
         ).map_err(|error| StateAccessError::Rejected(error.code()))?;
         let sender = verified.sender;
@@ -704,10 +699,10 @@ fn application_body(
     let auth = match action.auth {
         AuthKind::Public => "let sender = [0u8; 32]; let input = raw_action;".to_string(),
         AuthKind::Wallet => [
-            "let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action).map_err(|_| StateAccessError::Backend)?;",
+            "let signed = jamscript_runtime_core::decode_signed_action_v1(raw_action).map_err(|_| StateAccessError::Backend)?;",
             &marker("application-auth-decoded"),
             &marker("application-auth-verifying"),
-            "let verified = jamscript_runtime_core::verify_signed_action_v2(signed, NETWORK_DOMAIN, SERVICE_KEY, ACTION_SELECTOR).map_err(|_| StateAccessError::Backend)?;",
+            "let verified = jamscript_runtime_core::verify_signed_action_v1(signed, NETWORK_DOMAIN, SERVICE_KEY, ACTION_SELECTOR).map_err(|_| StateAccessError::Backend)?;",
             &marker("application-auth-verified"),
             "let sender = verified.sender;",
             "let nonce_key = jamscript_runtime_core::nonce_key(&sender);",
@@ -787,7 +782,7 @@ fn scriptc_native_symbol(action: &str) -> String {
     format!("jamscript_scriptc_{action}_v1")
 }
 fn scriptc_entry_symbol(action: &str) -> String {
-    format!("jamscript_scriptc_{action}_entry_v2")
+    format!("jamscript_scriptc_{action}_entry_v1")
 }
 fn byte_array_literal(bytes: &[u8]) -> String {
     format!(
@@ -818,7 +813,7 @@ mod tests {
     use jamscript_ir::{ActionIr, FieldIr, NativeImportIr, TypeIr};
 
     #[test]
-    fn scriptc_codegen_dispatches_every_action_through_runtime_input_v2() {
+    fn scriptc_codegen_dispatches_every_action_through_formal_runtime_input() {
         let script_body = |name: &str| ActionIr {
             name: name.into(),
             auth: AuthKind::Wallet,
@@ -850,10 +845,10 @@ mod tests {
         let source =
             generate_no_std_rust_with_scriptc_context(&ir, PortableServiceContext::default())
                 .unwrap();
-        assert!(source.contains("RuntimeRefineInputV2::decode"));
-        assert!(source.contains("refine_input_v2_owned"));
-        assert!(source.contains("jamscript_scriptc_create_entry_v2"));
-        assert!(source.contains("jamscript_scriptc_update_entry_v2"));
+        assert!(source.contains("RuntimeRefineInputV1::decode"));
+        assert!(source.contains("refine_owned"));
+        assert!(source.contains("jamscript_scriptc_create_entry_v1"));
+        assert!(source.contains("jamscript_scriptc_update_entry_v1"));
         assert!(source.contains("ScriptActionResultV1::NeedState"));
         assert!(!source.contains("ACTION_SELECTOR"));
     }
@@ -1008,7 +1003,7 @@ mod tests {
         })
         .unwrap();
         assert!(source.contains("context.state().get"));
-        assert!(source.contains("RuntimeRefineOutputV2::decode_transition_header"));
+        assert!(source.contains("RuntimeRefineOutputV1::decode_transition_header"));
         assert!(source.contains("MANAGED_STATE_COMMITMENT_KEY_V1"));
         assert!(source.contains("SERVICE_KEY"));
         assert!(!source.contains("SERVICE_ID"));

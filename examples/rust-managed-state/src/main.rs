@@ -3,7 +3,7 @@ use service_runtime_core::{
     StateChangeV1, StateDiffV1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
 use service_runtime_host::{
-    FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider, ManagedStateWorkBuilder,
+    AuthenticatedWorkBuilder, FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider,
     MaterializedServiceStateProvider,
 };
 use service_runtime_state::FullState;
@@ -62,8 +62,8 @@ fn main() {
         },
         commitment: ManagedStateCommitmentV1::new(parent_root).encode().to_vec(),
     };
-    let built = ManagedStateWorkBuilder::new(&mut source, &provider)
-        .build_one(service, &Counter, b"increment".to_vec())
+    let built = AuthenticatedWorkBuilder::new(&mut source, &provider)
+        .build_actions(service, &Counter, vec![b"increment".to_vec()])
         .expect("counter Work build");
     let output = built.predicted_output;
     let expected = state

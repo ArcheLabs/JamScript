@@ -51,7 +51,7 @@ const specPath = resolve(output, "dynamic-service.json");
 await writeFile(specPath, JSON.stringify(spec));
 await run(process.execPath, [resolve(import.meta.dirname, "compile-service.mjs"), specPath]);
 const generated = await readFile(resolve(output, "scriptc_service.transformed.ts"), "utf8");
-if (!generated.includes("stateGetRaw") || !generated.includes("stateSetRaw") || !generated.includes("__jamscript_action_advance_v2")) {
+if (!generated.includes("stateGetRaw") || !generated.includes("stateSetRaw") || !generated.includes("__jamscript_action_advance_v1")) {
   throw new Error("dynamic ScriptC conformance artifact is incomplete");
 }
 const seedDecoder = generated.match(/function decode_seed_input\([^]*?\n\}/)?.[0] ?? "";

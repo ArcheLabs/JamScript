@@ -3,15 +3,15 @@
 This document records the JamScript-side execution-boundary audit for the
 MiniJAM checkout used by this workspace. Deployment profile parameters are
 deliberately not part of the JamScript language, IR, application ABI,
-SignedActionV2, or Managed State formats.
+SignedActionV1, or Managed State formats.
 
-## Frozen baseline
+## Formal V1 frozen baseline
 
 | Item | Observed value |
 | --- | --- |
-| JamScript baseline | `52dd4d18436b6f889083e45c0c4eeb2e68c1e60a` |
-| MiniJAM locked SHA | `d4cecd4cce277ccaa334b24d18013288dbd6a66b` |
-| MiniJAM Jambda gitlink | `fe67ecf5ccbe16b3490d73cc4d8b1e48eb7bea86` |
+| JamScript baseline | Formal V1 release commit |
+| MiniJAM locked SHA | `18de55e175abb1cb40679be2e538644e2387655f` |
+| MiniJAM Jambda gitlink | `d33e0abf8116b23bbc551c6a8d7075eacb2994ce` |
 | MiniJAM SDK ABI | `MINIJAM_ABI_VERSION = 1` |
 | PolkaVM linker / derive | `0.30.0 / 0.30.0` |
 | target adapter | `minijam-0.2` |
@@ -48,9 +48,9 @@ truncated, overlong, or trailing init input deterministically.
 
 ## Runtime semantics
 
-Refine verifies SignedActionV2 network domain, ServiceKey, selector, signature,
+Refine verifies SignedActionV1 network domain, ServiceKey, selector, signature,
 payload hash, and nonce. It carries the action's `valid_until` into
-`RuntimeRefineOutputV2`; Accumulate compares that value to the authoritative
+`RuntimeRefineOutputV1`; Accumulate compares that value to the authoritative
 tick. The comparison is inclusive: `tick < valid_until` and
 `tick == valid_until` may commit, while `tick > valid_until` does not. Parent
 root comparison is a compare-and-swap guard, and only the runtime-owned
@@ -60,7 +60,7 @@ root comparison is a compare-and-swap guard, and only the runtime-owned
 
 | Boundary | Before | After |
 | --- | --- | --- |
-| SignedAction protocol | V2 | V2 |
+| SignedAction protocol | development V2 | Formal V1 |
 | Application ABI | 1 | 1 |
 | Managed State protocol | 1 | 1 |
 | Managed State layout | 1 | 1 |

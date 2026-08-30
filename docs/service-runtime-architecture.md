@@ -25,9 +25,8 @@ Refine receives a historical witness and produces a transition; Accumulate
 only performs the commitment compare-and-swap. Runtime state is not a second
 cross-service time model and does not replace JAM lookup-anchor semantics.
 
-The current `jamscript-runtime` and `jamscript-runtime-core` crates remain as
-compatibility surfaces while generated services move to the new foundation.
-They no longer include the ServiceId in managed application keys.
+The `jamscript-runtime` and `jamscript-runtime-core` crates expose the Formal V1
+foundation. They do not include the ServiceId in managed application keys.
 
 ## Reserved JAM storage
 
@@ -53,7 +52,7 @@ The following versions are independent and are emitted in `build.json`:
 - Managed State protocol version 1;
 - Managed State layout version 1;
 - Recovery format version 1;
-- SignedActionV2 wallet protocol version; SignedActionV1 is compatibility-only.
+- SignedActionV1 wallet protocol version.
 
 Changing the SDK trie encoding requires a managed-state layout version change,
 not a silent dependency upgrade.

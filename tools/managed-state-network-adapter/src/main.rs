@@ -14,13 +14,12 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use service_runtime_core::{
-    ManagedStateCommitmentV1, RuntimeRefineOutputV2,
-    ServiceKeyV1, StateRecoveryV1, EMPTY_STATE_ROOT_V1, MANAGED_STATE_COMMITMENT_KEY_V1,
+    ManagedStateCommitmentV1, RuntimeRefineOutputV1, ServiceKeyV1, StateRecoveryV1,
+    EMPTY_STATE_ROOT_V1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
 use service_runtime_host::{
-    AuthenticatedWorkBuilder, BuiltManagedWorkV1, BuiltManagedWorkV2, FinalizedContextV1,
-    FinalizedManagedStateSource, FullStateProvider, ManagedStateWorkBuilder,
-    MaterializedServiceStateProvider, ServiceStateProvider,
+    AuthenticatedWorkBuilder, BuiltManagedWork, FinalizedContextV1, FinalizedManagedStateSource,
+    FullStateProvider, MaterializedServiceStateProvider, ServiceStateProvider,
 };
 
 const MAX_HTTP_BYTES: usize = 8 * 1024 * 1024;
@@ -42,8 +41,8 @@ struct Config {
 #[derive(Default)]
 struct AdapterState {
     provider: FullStateProvider,
-    pending: BTreeMap<String, RuntimeRefineOutputV2>,
-    predictions: BTreeMap<String, RuntimeRefineOutputV2>,
+    pending: BTreeMap<String, RuntimeRefineOutputV1>,
+    predictions: BTreeMap<String, RuntimeRefineOutputV1>,
     query_fault: Option<String>,
 }
 
@@ -53,88 +52,33 @@ struct Adapter {
     state: Arc<Mutex<AdapterState>>,
 }
 
-enum BuiltWork {
-    V1(BuiltManagedWorkV1),
-    V2(BuiltManagedWorkV2),
-}
-
-impl BuiltWork {
-    fn predicted_output(&self) -> &RuntimeRefineOutputV2 {
-        match self {
-            Self::V1(work) => &work.predicted_output,
-            Self::V2(work) => &work.predicted_output,
-        }
-    }
-
-    fn encode_refine_input(&self) -> Result<Vec<u8>, String> {
-        match self {
-            Self::V1(work) => work
-                .refine_input
-                .encode()
-                .map_err(|error| format!("encode V1 refine input: {error:?}")),
-            Self::V2(work) => work
-                .refine_input
-                .encode()
-                .map_err(|error| format!("encode V2 refine input: {error:?}")),
-        }
-    }
-
-    fn tampered_verifier_rejects(&mut self, application: &GeneratedApplication) -> Result<bool, String> {
-        match self {
-            Self::V1(work) => {
-                let node = work
-                    .refine_input
-                    .managed_state
-                    .storage_proof
-                    .first_mut()
-                    .ok_or_else(|| "V1 witness is empty".to_owned())?;
-                let byte = node
-                    .first_mut()
-                    .ok_or_else(|| "V1 witness node is empty".to_owned())?;
-                *byte ^= 1;
-                Ok(service_runtime_guest::refine(application, &work.refine_input).is_err())
-            }
-            Self::V2(work) => {
-                let node = work
-                    .refine_input
-                    .managed_state
-                    .storage_proof
-                    .first_mut()
-                    .ok_or_else(|| "V2 witness is empty".to_owned())?;
-                let byte = node
-                    .first_mut()
-                    .ok_or_else(|| "V2 witness node is empty".to_owned())?;
-                *byte ^= 1;
-                Ok(service_runtime_guest::refine_input_v2(
-                    application,
-                    &work.refine_input,
-                )
-                .is_err())
-            }
-        }
-    }
-}
-
 fn build_work(
     source: &mut NodeSource<'_>,
     provider: &FullStateProvider,
     service: ServiceKeyV1,
     application: &GeneratedApplication,
     action: Vec<u8>,
-) -> Result<BuiltWork, RpcFailure> {
-    match JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION {
-        1 => ManagedStateWorkBuilder::new(source, provider)
-            .build_one(service, application, action)
-            .map(BuiltWork::V1)
-            .map_err(|error| RpcFailure::builder(format!("{error:?}"))),
-        2 => AuthenticatedWorkBuilder::new(source, provider)
-            .build_actions(service, application, vec![action])
-            .map(BuiltWork::V2)
-            .map_err(|error| RpcFailure::builder(format!("{error:?}"))),
-        version => Err(RpcFailure::builder(format!(
-            "unsupported generated runtime refine input version {version}"
-        ))),
-    }
+) -> Result<BuiltManagedWork, RpcFailure> {
+    AuthenticatedWorkBuilder::new(source, provider)
+        .build_actions(service, application, vec![action])
+        .map_err(|error| RpcFailure::builder(format!("{error:?}")))
+}
+
+fn tampered_verifier_rejects(
+    work: &mut BuiltManagedWork,
+    application: &GeneratedApplication,
+) -> Result<bool, String> {
+    let node = work
+        .refine_input
+        .managed_state
+        .storage_proof
+        .first_mut()
+        .ok_or_else(|| "formal V1 witness is empty".to_owned())?;
+    let byte = node
+        .first_mut()
+        .ok_or_else(|| "formal V1 witness node is empty".to_owned())?;
+    *byte ^= 1;
+    Ok(service_runtime_guest::refine(application, &work.refine_input).is_err())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -300,7 +244,7 @@ impl Adapter {
             &application,
             action,
         )?;
-        let predicted_output = built.predicted_output().clone();
+        let predicted_output = built.predicted_output.clone();
         if self.config.test_methods {
             let recovery = StateRecoveryV1::decode(&predicted_output.recovery_payload)
                 .map_err(|error| RpcFailure::builder(format!("recovery decode: {error:?}")))?;
@@ -323,10 +267,7 @@ impl Adapter {
             ));
         }
         if tamper_witness {
-            if !built
-                .tampered_verifier_rejects(&application)
-                .map_err(RpcFailure::builder)?
-            {
+            if !tampered_verifier_rejects(&mut built, &application).map_err(RpcFailure::builder)? {
                 return Err(RpcFailure::builder(
                     "tampered witness unexpectedly passed verifier execution",
                 ));
@@ -337,11 +278,9 @@ impl Adapter {
                 None,
             ));
         }
-        request.payload_base64 = STANDARD.encode(
-            built
-                .encode_refine_input()
-                .map_err(RpcFailure::builder)?,
-        );
+        request.payload_base64 = STANDARD.encode(built.refine_input.encode().map_err(|error| {
+            RpcFailure::builder(format!("encode formal V1 refine input: {error:?}"))
+        })?);
         request.context = ContextParams {
             block_hash: finalized.block_hash,
             state_root: finalized.state_root,
@@ -649,7 +588,7 @@ fn load_provider(path: Option<&Path>, service: ServiceKeyV1) -> Result<FullState
             .get(offset..offset + length)
             .ok_or("truncated Provider recovery log entry")?;
         offset += length;
-        let output = RuntimeRefineOutputV2::decode(encoded)
+        let output = RuntimeRefineOutputV1::decode(encoded)
             .map_err(|_| "invalid Provider recovery log entry")?;
         provider
             .apply_recovery(service, &output)
@@ -658,7 +597,7 @@ fn load_provider(path: Option<&Path>, service: ServiceKeyV1) -> Result<FullState
     Ok(provider)
 }
 
-fn append_recovery(path: &Path, output: &RuntimeRefineOutputV2) -> Result<(), String> {
+fn append_recovery(path: &Path, output: &RuntimeRefineOutputV1) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -677,7 +616,7 @@ fn append_recovery(path: &Path, output: &RuntimeRefineOutputV2) -> Result<(), St
         .map_err(|error| error.to_string())
 }
 
-fn action_receipts(output: &RuntimeRefineOutputV2) -> Value {
+fn action_receipts(output: &RuntimeRefineOutputV1) -> Value {
     Value::Array(
         output
             .receipts

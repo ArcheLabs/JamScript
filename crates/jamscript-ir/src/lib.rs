@@ -1,7 +1,7 @@
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
 
-pub const LANGUAGE_VERSION: &str = "0.1";
+pub const LANGUAGE_VERSION: &str = "0.2";
 pub const ABI_VERSION: u32 = 1;
 pub const ACTION_DOMAIN: &[u8] = b"jamscript/action/v1:";
 pub const MAX_ACTION_PAYLOAD_BYTES: u32 = 1_000_000;

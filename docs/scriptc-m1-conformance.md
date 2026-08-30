@@ -1,7 +1,6 @@
-# ScriptC M1 conformance
+# ScriptC M2 conformance
 
-M1 adds an opt-in `ScriptC` backend for language `0.2`. Legacy language
-`0.1` remains unchanged and cannot select a compiler backend. The production
+ScriptC M2 is the supported backend for language `0.2`. The production
 path is:
 
 ```text
@@ -67,7 +66,7 @@ managed-state execution, and output encoding; the ScriptC symbol is only the
 deterministic compute call.
 
 The real generated counter was also exercised through the MiniJAM interpreter
-with a wallet-signed `SignedActionV2`: envelope decode, sr25519 verification,
+with a wallet-signed `SignedActionV1`: envelope decode, sr25519 verification,
 nonce read/update, ScriptC compute, and managed-state root finalization all
 ran under the production 5,000,000 refine-gas item limit. The first transition
 used 1,153,060 gas and produced an applied receipt with nonce `1`; the

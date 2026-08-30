@@ -7,10 +7,10 @@ use the canonical encoding rules implemented by Jambda's `jam-codec`.
 
 ## Sources of truth
 
-- Jambda revision: `fe67ecf5ccbe16b3490d73cc4d8b1e48eb7bea86`
+- Jambda revision: `d33e0abf8116b23bbc551c6a8d7075eacb2994ce`
 - `jam-codec`: `0.1.1`
 - JAM Gray Paper serialization semantics: `0.7.2`
-- MiniJAM client revision: `d4cecd4cce277ccaa334b24d18013288dbd6a66b`
+- MiniJAM client revision: `18de55e175abb1cb40679be2e538644e2387655f`
 - ABI language: `0.2`
 
 Fixed-width integers are little-endian. Booleans accept only `00` and `01`.
@@ -35,17 +35,20 @@ runtime never silently rewrites existing managed state.
 
 The Rust `jamscript-codec` crate cross-checks JAM natural encoding against
 `jam-codec 0.1.1`. The TypeScript client accepts both generated descriptors and
-legacy primitive references while encoding new values with the canonical rules.
+canonical rules.
 The release gate additionally requires the workspace tests and client tests to
 pass.
 
 ## Current conformance status
 
 - ABI foundation conformance: PASS after this hardening round.
-- Runtime execution conformance: BLOCKED by the upcoming ScriptC typed
-  ABI/state bridge.
-- Live MiniJAM conformance: BLOCKED; it requires typed ScriptC execution and a
-  live node.
+- Runtime execution conformance: defined by the Formal V1 dynamic-state
+  ScriptC fixture.
+- Live MiniJAM conformance: requires an operator-controlled live node.
+
+JamScript remains pre-stable. Development protocol generations before Formal V1
+are not compatibility contracts; Formal V1 is the first supported wire/runtime
+protocol. Language `0.2` is the sole supported source language version.
 
 JamScript uses repository-local generic fixtures, such as `examples/typed-state`,
 for compiler and runtime conformance. Real applications live in downstream

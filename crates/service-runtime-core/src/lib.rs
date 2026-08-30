@@ -41,7 +41,7 @@ pub const MAX_WITNESS_BYTES: usize = 1024 * 1024;
 pub const MAX_WITNESS_ENCODED_BYTES: usize =
     1 + 32 + 4 + (MAX_WITNESS_NODES * 4) + MAX_WITNESS_BYTES;
 pub const MAX_ACCESS_PLAN_ENCODED_BYTES: usize = MAX_STATE_VIEW_BYTES;
-pub const MAX_WITNESS_V2_ENCODED_BYTES: usize =
+pub const MAX_WITNESS_V1_ENCODED_BYTES: usize =
     1 + 32 + 4 + MAX_ACCESS_PLAN_ENCODED_BYTES + 4 + (MAX_WITNESS_NODES * 4) + MAX_WITNESS_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -693,80 +693,12 @@ impl StateTransitionV1 {
 pub struct ManagedStateWitnessV1 {
     pub version: u8,
     pub parent_root: StateRoot,
-    pub storage_proof: Vec<Vec<u8>>,
-}
-
-impl ManagedStateWitnessV1 {
-    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
-        if self.storage_proof.len() > MAX_WITNESS_NODES {
-            return Err(WireError::TooManyItems);
-        }
-        let mut writer = Writer::new();
-        writer.u8(self.version);
-        writer.raw(&self.parent_root);
-        let count =
-            u32::try_from(self.storage_proof.len()).map_err(|_| WireError::LengthOverflow)?;
-        writer.u32(count);
-        let mut total_bytes = 0usize;
-        for node in &self.storage_proof {
-            if node.len() > MAX_WITNESS_NODE_BYTES {
-                return Err(WireError::TooManyItems);
-            }
-            total_bytes = total_bytes
-                .checked_add(node.len())
-                .ok_or(WireError::LengthOverflow)?;
-            if total_bytes > MAX_WITNESS_BYTES {
-                return Err(WireError::TooManyItems);
-            }
-            writer.bytes_u32(node)?;
-        }
-        Ok(writer.finish())
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        let mut reader = Reader::new(bytes);
-        let version = reader.u8()?;
-        if version != MANAGED_STATE_PROTOCOL_VERSION {
-            return Err(WireError::UnsupportedVersion);
-        }
-        let parent_root = reader.array::<32>()?;
-        let count = reader.u32()? as usize;
-        if count > MAX_WITNESS_NODES {
-            return Err(WireError::TooManyItems);
-        }
-        let mut storage_proof = Vec::with_capacity(count);
-        let mut total_bytes = 0usize;
-        for _ in 0..count {
-            let remaining = MAX_WITNESS_BYTES
-                .checked_sub(total_bytes)
-                .ok_or(WireError::TooManyItems)?;
-            let node = reader.bytes_limited(remaining.min(MAX_WITNESS_NODE_BYTES))?;
-            total_bytes = total_bytes
-                .checked_add(node.len())
-                .ok_or(WireError::LengthOverflow)?;
-            storage_proof.push(node);
-        }
-        if reader.remaining() != 0 {
-            return Err(WireError::InvalidEncoding);
-        }
-        Ok(Self {
-            version,
-            parent_root,
-            storage_proof,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedStateWitnessV2 {
-    pub version: u8,
-    pub parent_root: StateRoot,
     pub access_plan: StateAccessPlanV1,
     pub storage_proof: Vec<Vec<u8>>,
 }
 
-impl ManagedStateWitnessV2 {
-    pub const VERSION: u8 = 2;
+impl ManagedStateWitnessV1 {
+    pub const VERSION: u8 = 1;
 
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
         if self.version != Self::VERSION || self.storage_proof.len() > MAX_WITNESS_NODES {
@@ -798,7 +730,7 @@ impl ManagedStateWitnessV2 {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        if bytes.len() > MAX_WITNESS_V2_ENCODED_BYTES {
+        if bytes.len() > MAX_WITNESS_V1_ENCODED_BYTES {
             return Err(WireError::TooManyItems);
         }
         let mut reader = Reader::new(bytes);
@@ -845,58 +777,7 @@ pub struct RuntimeRefineInputV1 {
 }
 
 impl RuntimeRefineInputV1 {
-    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
-        let mut writer = Writer::new();
-        writer.u8(self.version);
-        let witness = self.managed_state.encode()?;
-        writer.bytes_u32(&witness)?;
-        let count = u32::try_from(self.actions.len()).map_err(|_| WireError::LengthOverflow)?;
-        if self.actions.len() > MAX_RUNTIME_ACTIONS {
-            return Err(WireError::TooManyItems);
-        }
-        writer.u32(count);
-        for action in &self.actions {
-            writer.bytes_u32(action)?;
-        }
-        Ok(writer.finish())
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        let mut reader = Reader::new(bytes);
-        let version = reader.u8()?;
-        if version != MANAGED_STATE_PROTOCOL_VERSION {
-            return Err(WireError::UnsupportedVersion);
-        }
-        let witness =
-            ManagedStateWitnessV1::decode(&reader.bytes_limited(MAX_WITNESS_ENCODED_BYTES)?)?;
-        let count = reader.u32()? as usize;
-        if count > MAX_RUNTIME_ACTIONS {
-            return Err(WireError::TooManyItems);
-        }
-        let mut actions = Vec::with_capacity(count);
-        for _ in 0..count {
-            actions.push(reader.bytes_u32()?);
-        }
-        if reader.remaining() != 0 {
-            return Err(WireError::InvalidEncoding);
-        }
-        Ok(Self {
-            version,
-            managed_state: witness,
-            actions,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeRefineInputV2 {
-    pub version: u8,
-    pub managed_state: ManagedStateWitnessV2,
-    pub actions: Vec<Vec<u8>>,
-}
-
-impl RuntimeRefineInputV2 {
-    pub const VERSION: u8 = 2;
+    pub const VERSION: u8 = 1;
 
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
         if self.version != Self::VERSION || self.actions.len() > MAX_RUNTIME_ACTIONS {
@@ -920,7 +801,7 @@ impl RuntimeRefineInputV2 {
             return Err(WireError::UnsupportedVersion);
         }
         let managed_state =
-            ManagedStateWitnessV2::decode(&reader.bytes_limited(MAX_WITNESS_V2_ENCODED_BYTES)?)?;
+            ManagedStateWitnessV1::decode(&reader.bytes_limited(MAX_WITNESS_V1_ENCODED_BYTES)?)?;
         let count = reader.u32()? as usize;
         if count > MAX_RUNTIME_ACTIONS {
             return Err(WireError::TooManyItems);
@@ -960,94 +841,6 @@ pub struct RuntimeRefineOutputV1 {
     pub version: u8,
     pub parent_root: StateRoot,
     pub new_root: StateRoot,
-    pub receipts: Vec<ActionReceiptV1>,
-    pub recovery_commitment: Option<StateRoot>,
-}
-
-impl RuntimeRefineOutputV1 {
-    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
-        let mut writer = Writer::new();
-        writer.u8(self.version);
-        writer.raw(&self.parent_root);
-        writer.raw(&self.new_root);
-        let count = u32::try_from(self.receipts.len()).map_err(|_| WireError::LengthOverflow)?;
-        writer.u32(count);
-        for receipt in &self.receipts {
-            writer.raw(&receipt.action_hash);
-            writer.u8(receipt.status as u8);
-            match receipt.error_code {
-                Some(error) => {
-                    writer.u8(1);
-                    writer.u32(error);
-                }
-                None => writer.u8(0),
-            }
-        }
-        match self.recovery_commitment {
-            Some(root) => {
-                writer.u8(1);
-                writer.raw(&root);
-            }
-            None => writer.u8(0),
-        }
-        Ok(writer.finish())
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        let mut reader = Reader::new(bytes);
-        let version = reader.u8()?;
-        if version != MANAGED_STATE_PROTOCOL_VERSION {
-            return Err(WireError::UnsupportedVersion);
-        }
-        let parent_root = reader.array::<32>()?;
-        let new_root = reader.array::<32>()?;
-        let count = reader.u32()? as usize;
-        if count > MAX_RUNTIME_ACTIONS {
-            return Err(WireError::TooManyItems);
-        }
-        let mut receipts = Vec::with_capacity(count);
-        for _ in 0..count {
-            let action_hash = reader.array::<32>()?;
-            let status = match reader.u8()? {
-                0 => ActionStatusV1::Applied,
-                1 => ActionStatusV1::Failed,
-                2 => ActionStatusV1::Rejected,
-                _ => return Err(WireError::InvalidEncoding),
-            };
-            let error_code = match reader.u8()? {
-                0 => None,
-                1 => Some(reader.u32()?),
-                _ => return Err(WireError::InvalidEncoding),
-            };
-            receipts.push(ActionReceiptV1 {
-                action_hash,
-                status,
-                error_code,
-            });
-        }
-        let recovery_commitment = match reader.u8()? {
-            0 => None,
-            1 => Some(reader.array::<32>()?),
-            _ => return Err(WireError::InvalidEncoding),
-        };
-        if reader.remaining() != 0 {
-            return Err(WireError::InvalidEncoding);
-        }
-        Ok(Self {
-            version,
-            parent_root,
-            new_root,
-            receipts,
-            recovery_commitment,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeRefineOutputV2 {
-    pub version: u8,
-    pub parent_root: StateRoot,
-    pub new_root: StateRoot,
     pub transition_valid_until: Option<u64>,
     pub receipts: Vec<ActionReceiptV1>,
     pub recovery_commitment: StateRoot,
@@ -1055,7 +848,7 @@ pub struct RuntimeRefineOutputV2 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RuntimeRefineTransitionHeaderV2 {
+pub struct RuntimeRefineTransitionHeaderV1 {
     pub version: u8,
     pub parent_root: StateRoot,
     pub new_root: StateRoot,
@@ -1063,7 +856,7 @@ pub struct RuntimeRefineTransitionHeaderV2 {
     pub recovery_commitment: StateRoot,
 }
 
-impl RuntimeRefineOutputV2 {
+impl RuntimeRefineOutputV1 {
     pub fn from_diff(
         parent_root: StateRoot,
         new_root: StateRoot,
@@ -1084,7 +877,7 @@ impl RuntimeRefineOutputV2 {
         let recovery_payload = recovery.encode()?;
         let recovery_commitment = blake2_256(&recovery_payload);
         Ok(Self {
-            version: MANAGED_STATE_PROTOCOL_VERSION + 1,
+            version: MANAGED_STATE_PROTOCOL_VERSION,
             parent_root,
             new_root,
             transition_valid_until,
@@ -1095,7 +888,7 @@ impl RuntimeRefineOutputV2 {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
-        if self.version != MANAGED_STATE_PROTOCOL_VERSION + 1
+        if self.version != MANAGED_STATE_PROTOCOL_VERSION
             || self.receipts.len() > MAX_RUNTIME_ACTIONS
             || self.recovery_payload.len() > MAX_RECOVERY_BYTES
         {
@@ -1131,10 +924,10 @@ impl RuntimeRefineOutputV2 {
 
     pub fn decode_transition_header(
         bytes: &[u8],
-    ) -> Result<RuntimeRefineTransitionHeaderV2, WireError> {
+    ) -> Result<RuntimeRefineTransitionHeaderV1, WireError> {
         let mut reader = Reader::new(bytes);
         let version = reader.u8()?;
-        if version != MANAGED_STATE_PROTOCOL_VERSION + 1 {
+        if version != MANAGED_STATE_PROTOCOL_VERSION {
             return Err(WireError::UnsupportedVersion);
         }
         let parent_root = reader.array::<32>()?;
@@ -1163,7 +956,7 @@ impl RuntimeRefineOutputV2 {
                 _ => return Err(WireError::InvalidEncoding),
             }
         }
-        Ok(RuntimeRefineTransitionHeaderV2 {
+        Ok(RuntimeRefineTransitionHeaderV1 {
             version,
             parent_root,
             new_root,
@@ -1178,7 +971,7 @@ impl RuntimeRefineOutputV2 {
         }
         let mut reader = Reader::new(bytes);
         let version = reader.u8()?;
-        if version != MANAGED_STATE_PROTOCOL_VERSION + 1 {
+        if version != MANAGED_STATE_PROTOCOL_VERSION {
             return Err(WireError::UnsupportedVersion);
         }
         let parent_root = reader.array::<32>()?;
@@ -1670,6 +1463,7 @@ mod tests {
         let witness = ManagedStateWitnessV1 {
             version: 1,
             parent_root: [4; 32],
+            access_plan: StateAccessPlanV1::from_keys(core::iter::empty::<&[u8]>()).unwrap(),
             storage_proof: vec![vec![5, 6]],
         };
         assert_eq!(
@@ -1677,24 +1471,24 @@ mod tests {
             Ok(witness)
         );
 
-        let witness_v2 = ManagedStateWitnessV2 {
-            version: ManagedStateWitnessV2::VERSION,
+        let witness_v1 = ManagedStateWitnessV1 {
+            version: ManagedStateWitnessV1::VERSION,
             parent_root: [4; 32],
             access_plan: StateAccessPlanV1::from_keys([b"a".as_slice(), b"b"]).unwrap(),
             storage_proof: vec![vec![5, 6]],
         };
         assert_eq!(
-            ManagedStateWitnessV2::decode(&witness_v2.encode().unwrap()),
-            Ok(witness_v2.clone())
+            ManagedStateWitnessV1::decode(&witness_v1.encode().unwrap()),
+            Ok(witness_v1.clone())
         );
-        let input_v2 = RuntimeRefineInputV2 {
-            version: RuntimeRefineInputV2::VERSION,
-            managed_state: witness_v2,
+        let input_v1 = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: witness_v1,
             actions: vec![vec![7]],
         };
         assert_eq!(
-            RuntimeRefineInputV2::decode(&input_v2.encode().unwrap()),
-            Ok(input_v2)
+            RuntimeRefineInputV1::decode(&input_v1.encode().unwrap()),
+            Ok(input_v1)
         );
     }
 
@@ -1721,6 +1515,8 @@ mod tests {
     fn witness_decode_rejects_untrusted_allocation_sizes() {
         let mut encoded = vec![1];
         encoded.extend_from_slice(&[0; 32]);
+        encoded.extend_from_slice(&5u32.to_le_bytes());
+        encoded.extend_from_slice(&[1, 0, 0, 0, 0]);
         encoded.extend_from_slice(&((MAX_WITNESS_NODES as u32) + 1).to_le_bytes());
         assert_eq!(
             ManagedStateWitnessV1::decode(&encoded),
@@ -1730,6 +1526,7 @@ mod tests {
         let oversized = ManagedStateWitnessV1 {
             version: 1,
             parent_root: [0; 32],
+            access_plan: StateAccessPlanV1::from_keys(core::iter::empty::<&[u8]>()).unwrap(),
             storage_proof: vec![vec![0; MAX_WITNESS_NODE_BYTES + 1]],
         };
         assert_eq!(oversized.encode(), Err(WireError::TooManyItems));
@@ -1852,14 +1649,14 @@ mod tests {
     }
 
     #[test]
-    fn runtime_refine_output_v2_matches_golden_vector() {
+    fn runtime_refine_output_v1_matches_golden_vector() {
         let diff = StateDiffV1 {
             changes: vec![StateChangeV1 {
                 key: vec![1],
                 value: Some(vec![2]),
             }],
         };
-        let output = RuntimeRefineOutputV2::from_diff_with_validity(
+        let output = RuntimeRefineOutputV1::from_diff_with_validity(
             [1; 32],
             [2; 32],
             vec![ActionReceiptV1 {
@@ -1874,11 +1671,11 @@ mod tests {
         let encoded = output.encode().unwrap();
         assert_eq!(
             hex::encode(&encoded),
-            "0201010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202012a000000000000002c60e8b423b234cec3a82162cb14e733d3f4302f84dbdb69b4253052abe42c06010000000303030303030303030303030303030303030303030303030303030303030303000015000000011000000001010000000100000001010100000002"
+            "0101010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202012a000000000000002c60e8b423b234cec3a82162cb14e733d3f4302f84dbdb69b4253052abe42c06010000000303030303030303030303030303030303030303030303030303030303030303000015000000011000000001010000000100000001010100000002"
         );
-        let decoded = RuntimeRefineOutputV2::decode(&encoded).unwrap();
+        let decoded = RuntimeRefineOutputV1::decode(&encoded).unwrap();
         assert_eq!(decoded, output);
-        let header = RuntimeRefineOutputV2::decode_transition_header(&encoded).unwrap();
+        let header = RuntimeRefineOutputV1::decode_transition_header(&encoded).unwrap();
         assert_eq!(header.transition_valid_until, Some(42));
         assert_eq!(header.recovery_commitment, output.recovery_commitment);
     }

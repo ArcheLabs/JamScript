@@ -1,10 +1,10 @@
 use anyhow::{bail, Context, Result};
 use jamscript_backend_scriptc::{ScriptcArtifact, ScriptcBuildMetadata, ScriptcCompiler};
 use jamscript_codegen_rust::{
-    generate_builder_application_rust, generate_no_std_rust_with_context,
-    generate_no_std_rust_with_scriptc_context, ManagementPolicyConfig, PortableServiceContext,
+    generate_builder_application_rust, generate_no_std_rust_with_scriptc_context,
+    ManagementPolicyConfig, PortableServiceContext,
 };
-use jamscript_ir::{abi_for, abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
+use jamscript_ir::{abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
 use serde::{Deserialize, Serialize};
 use service_build_polkavm::{
     GuestBuildArtifacts, NativeArchive, PolkaVmBuildConfig, PolkaVmBuildRequest, PolkaVmBuilder,
@@ -38,6 +38,8 @@ pub struct BuildMetadata {
     pub managed_state_layout_version: u8,
     #[serde(rename = "runtimeRefineInputVersion")]
     pub runtime_refine_input_version: u8,
+    #[serde(rename = "signedActionVersion")]
+    pub signed_action_version: u8,
     #[serde(rename = "recoveryFormatVersion")]
     pub recovery_format_version: u8,
     pub abi_version: u32,
@@ -126,6 +128,8 @@ struct ProtocolBoundaryV0 {
     release_channel: &'static str,
     language: &'static str,
     signed_action: &'static str,
+    #[serde(rename = "signedActionVersion")]
+    signed_action_version: u8,
     application_abi: u8,
     managed_state_protocol: u8,
     managed_state_layout: u8,
@@ -178,32 +182,6 @@ impl MiniJamTarget {
         }
     }
 
-    pub fn emit_generated_source(
-        &self,
-        ir: &ServiceIr,
-        context: PortableServiceContext,
-        output: &Path,
-    ) -> Result<()> {
-        fs::write(
-            output,
-            generate_no_std_rust_with_context(ir, context)
-                .map_err(|error| anyhow::anyhow!(error))?,
-        )
-        .with_context(|| format!("writing {}", output.display()))?;
-        Ok(())
-    }
-
-    pub fn build_probe(
-        &self,
-        project_root: &Path,
-        ir: &ServiceIr,
-        context: PortableServiceContext,
-        output_dir: &Path,
-        native_modules: &[NativeModule],
-    ) -> Result<BuildMetadata> {
-        self.build_probe_inner(project_root, ir, context, output_dir, native_modules, None)
-    }
-
     pub fn build_scriptc_probe(
         &self,
         project_root: &Path,
@@ -221,7 +199,7 @@ impl MiniJamTarget {
             context,
             output_dir,
             native_modules,
-            Some(artifact),
+            artifact,
         )
     }
 
@@ -232,15 +210,12 @@ impl MiniJamTarget {
         context: PortableServiceContext,
         output_dir: &Path,
         native_modules: &[NativeModule],
-        scriptc: Option<ScriptcArtifact>,
+        scriptc: ScriptcArtifact,
     ) -> Result<BuildMetadata> {
         fs::create_dir_all(output_dir)?;
         let generated = output_dir.join("generated_service.rs");
-        let generated_source = match scriptc.as_ref() {
-            Some(_) => generate_no_std_rust_with_scriptc_context(ir, context),
-            None => generate_no_std_rust_with_context(ir, context),
-        }
-        .map_err(|error| anyhow::anyhow!(error))?;
+        let generated_source = generate_no_std_rust_with_scriptc_context(ir, context)
+            .map_err(|error| anyhow::anyhow!(error))?;
         fs::write(&generated, generated_source)
             .with_context(|| format!("writing {}", generated.display()))?;
         fs::write(
@@ -256,21 +231,18 @@ impl MiniJamTarget {
             output_dir.join("protocol-v0.json"),
             serde_json::to_vec_pretty(&ProtocolBoundaryV0 {
                 release_channel: "testnet-developer-preview",
-                language: if scriptc.is_some() { "0.2" } else { "0.1" },
-                signed_action: "SignedActionV2",
+                language: "0.2",
+                signed_action: "SignedActionV1",
+                signed_action_version: 1,
                 application_abi: 1,
                 managed_state_protocol: MANAGED_STATE_PROTOCOL_VERSION,
                 managed_state_layout: MANAGED_STATE_LAYOUT_VERSION,
-                runtime_refine_input: if scriptc.is_some() { 2 } else { 1 },
+                runtime_refine_input: 1,
                 recovery_format: RECOVERY_FORMAT_VERSION,
                 builder_artifact: 1,
             })?,
         )?;
-        let abi = if scriptc.is_some() {
-            abi_for_language(ir, "0.2")
-        } else {
-            abi_for(ir)
-        }?;
+        let abi = abi_for_language(ir, "0.2")?;
         fs::write(
             output_dir.join("service.abi.json"),
             serde_json::to_vec_pretty(&abi)?,
@@ -298,9 +270,7 @@ impl MiniJamTarget {
         let work = tempdir().context("creating MiniJAM native build directory")?;
         let clang = pinned_clang()?;
         let mut archives = vec![compile_sdk_archive(&self.sdk_root, &clang, work.path())?];
-        if let Some(scriptc) = scriptc.as_ref() {
-            archives.push(compile_scriptc_archive(scriptc, &clang, work.path())?);
-        }
+        archives.push(compile_scriptc_archive(&scriptc, &clang, work.path())?);
         for module in native_modules {
             archives.push(compile_native_archive(module, &clang, work.path())?);
         }
@@ -366,17 +336,15 @@ impl MiniJamTarget {
             "builder.json",
             "protocol-v0.json",
         ];
-        if scriptc.is_some() {
-            checksum_files.extend([
-                "scriptc/scriptc_service.ts",
-                "scriptc/scriptc_service.json",
-                "scriptc/scriptc_service.transformed.ts",
-                "scriptc/scriptc_runtime.ts",
-                "scriptc/scriptc_service.profile.json",
-                "scriptc/scriptc_service.lib.c",
-                "scriptc/scriptc_service_adapter.c",
-            ]);
-        }
+        checksum_files.extend([
+            "scriptc/scriptc_service.ts",
+            "scriptc/scriptc_service.json",
+            "scriptc/scriptc_service.transformed.ts",
+            "scriptc/scriptc_runtime.ts",
+            "scriptc/scriptc_service.profile.json",
+            "scriptc/scriptc_service.lib.c",
+            "scriptc/scriptc_service_adapter.c",
+        ]);
         let files = checksum_files
             .into_iter()
             .map(|name| Ok((name.to_owned(), hash_file(&output_dir.join(name))?)))
@@ -401,8 +369,8 @@ impl MiniJamTarget {
             sdk_revision.clone(),
             native_metadata,
             artifacts,
-            scriptc.as_ref().map(|artifact| artifact.metadata.clone()),
-            if scriptc.is_some() { "0.2" } else { "0.1" },
+            Some(scriptc.metadata.clone()),
+            "0.2",
         ))
     }
 }
@@ -460,7 +428,8 @@ fn build_metadata(
         runtime_package_version: "service-runtime-0.1.0".into(),
         managed_state_protocol_version: MANAGED_STATE_PROTOCOL_VERSION,
         managed_state_layout_version: MANAGED_STATE_LAYOUT_VERSION,
-        runtime_refine_input_version: if scriptc.is_some() { 2 } else { 1 },
+        runtime_refine_input_version: 1,
+        signed_action_version: 1,
         recovery_format_version: RECOVERY_FORMAT_VERSION,
         abi_version: 1,
         target_adapter_version: "minijam-0.2".into(),

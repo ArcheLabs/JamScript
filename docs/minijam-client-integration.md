@@ -1,7 +1,7 @@
 # MiniJAM Client Integration
 
 JamScript application semantics remain in generated services. The client
-derives the JamScript ABI, creates the opaque SignedActionV2 payload, and
+derives the JamScript ABI, creates the opaque SignedActionV1 payload, and
 submits one formal Work request.
 
 ## Client package
@@ -12,8 +12,8 @@ submits one formal Work request.
     npm test
 
 The browser wallet adapter calls signRaw exactly once with the
-SignedActionV2 signing digest. The digest contains the
-JAMSCRIPT_ACTION_V2 domain, while sr25519 verification uses the standard
+SignedActionV1 signing digest. The digest contains the
+JAMSCRIPT_ACTION_V1 domain, while sr25519 verification uses the standard
 Substrate context.
 
 For production, compose the endpoints explicitly. Finalized chain reads stay

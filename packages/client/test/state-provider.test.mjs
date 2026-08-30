@@ -21,7 +21,7 @@ const deployment = {
   abiVersion: 1,
   abi: {
     abiVersion: 1,
-    languageVersion: "0.1",
+    languageVersion: "0.2",
     package: { name: "provider-test", version: "0.1.0" },
     actions: [{ name: "submit", selector: toHex(actionSelector("submit")), auth: "wallet", input: [], executeOutput: "unit" }],
     queries: [{ name: "getScore", kind: "state_get", state: "scores", keyType: "address", output: { type: "u64", nullable: true } }],

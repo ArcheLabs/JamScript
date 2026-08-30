@@ -18,8 +18,8 @@ await writeFile(transformedPath, transformService(source, spec));
 
 const profilePath = resolve(output, "scriptc_service.profile.json");
 const exports = spec.actions.map((action) => ({
-  export: `__jamscript_action_${action.name}_v2`,
-  symbol: `jamscript_scriptc_${action.name}_entry_v2`,
+  export: `__jamscript_action_${action.name}_v1`,
+  symbol: `jamscript_scriptc_${action.name}_entry_v1`,
   params: ["bytes", "bytes", "bytes"],
   returns: "bytes",
 }));
@@ -175,7 +175,7 @@ function generateAction(action, execute, printer, file) {
   const inputType = `{ ${fields} }`;
   const decode = decoderFunction(`decode_${suffix}_input`, { Record: { fields: action.input } });
   const senderCheck = action.auth === "Wallet" ? "if (sender.length !== 32) throw new Error(\"wallet sender length\");" : "if (sender.length !== 0) throw new Error(\"public sender must be empty\");";
-  return `${decode}\nfunction execute_${suffix}(ctx: { sender: Uint8Array }, input: ${inputType}): void ${body}\nexport function __jamscript_action_${action.name}_v2(payload: Uint8Array, sender: Uint8Array, stateView: Uint8Array): Uint8Array { try { initializeStateView(stateView); ${senderCheck} const input = decode_${suffix}_input(payload); execute_${suffix}({ sender }, input); return appliedResult(); } catch (error) { return caughtResult(error); } }`;
+  return `${decode}\nfunction execute_${suffix}(ctx: { sender: Uint8Array }, input: ${inputType}): void ${body}\nexport function __jamscript_action_${action.name}_v1(payload: Uint8Array, sender: Uint8Array, stateView: Uint8Array): Uint8Array { try { initializeStateView(stateView); ${senderCheck} const input = decode_${suffix}_input(payload); execute_${suffix}({ sender }, input); return appliedResult(); } catch (error) { return caughtResult(error); } }`;
 }
 
 function decoderFunction(name, type) {

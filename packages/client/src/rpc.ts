@@ -17,7 +17,7 @@ export type SubmitWorkResult = {
   packageHash: string;
   submissionHash: string;
   context: FinalizedContext;
-  /** Hash of the exact SignedActionV2 bytes submitted by submitAction. */
+  /** Hash of the exact SignedActionV1 bytes submitted by submitAction. */
   actionHash?: string;
 };
 

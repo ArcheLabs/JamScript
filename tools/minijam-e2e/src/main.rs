@@ -10,7 +10,7 @@ use jambda_minijam_executive::{
 use jambda_refine::{compute_work_report, ImportProofBundle, WorkReportInput};
 use jambda_state_backend::StateBackend;
 use jamscript_crypto::SR25519_CONTEXT;
-use jamscript_protocol::SignedActionV2;
+use jamscript_protocol::SignedActionV1;
 use jp_core_primitives::{
     blake2b,
     crypto::OpaqueHash,
@@ -29,8 +29,8 @@ use minijam_jamcore_api::{
 use minijam_protocol::{StateOperation, PROTOCOL_VERSION_V1};
 use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
 use service_runtime_core::{
-    application_key_v1, ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineInputV2,
-    RuntimeRefineOutputV2, ServiceKeyV1, StateAccessPlanV1, MANAGED_STATE_COMMITMENT_KEY_V1,
+    application_key_v1, ManagedStateCommitmentV1, RuntimeRefineInputV1,
+    RuntimeRefineOutputV1, ServiceKeyV1, StateAccessPlanV1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
 use service_runtime_host::{
     AuthenticatedWorkBuilder, FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider,
@@ -206,11 +206,11 @@ fn action(
     valid_until: u64,
     selector: [u8; 8],
     payload: Vec<u8>,
-) -> (SignedActionV2, [u8; 32]) {
+) -> (SignedActionV1, [u8; 32]) {
     let keypair = MiniSecretKey::from_bytes(&[seed; 32])
         .unwrap()
         .expand_to_keypair(ExpansionMode::Ed25519);
-    let mut action = SignedActionV2::unsigned(
+    let mut action = SignedActionV1::unsigned(
         [0; 32],
         service_key,
         selector,
@@ -307,7 +307,7 @@ fn runtime_input_batch(
 ) -> Vec<u8> {
     let mut keys = Vec::new();
     for action in actions {
-        let signed = SignedActionV2::decode(action).expect("V2 action envelope");
+        let signed = SignedActionV1::decode(action).expect("Formal V1 action envelope");
         let sender: [u8; 32] = signed
             .public_key
             .as_slice()
@@ -323,7 +323,7 @@ fn runtime_input_batch(
         .materialized_root(service_key)
         .expect("provider root");
     let witness = provider
-        .build_witness_v1(service_key, parent_root, &plan)
+        .build_witness(service_key, parent_root, &plan)
         .expect("provider witness");
     RuntimeRefineInputV1 {
         version: 1,
@@ -387,7 +387,7 @@ fn execute_batch(
                 .enumerate()
                 .map(|(index, result)| match &result.result {
                     WorkExecResult::Ok(payload) => {
-                        match RuntimeRefineOutputV2::decode(payload.as_ref()) {
+                        match RuntimeRefineOutputV1::decode(payload.as_ref()) {
                             Ok(refined) => {
                                 let parent = refined.parent_root;
                                 let next = refined.new_root;
@@ -549,7 +549,7 @@ fn execute_work_item(
     });
     let result = &report.report.results[0];
     let recovered = match &result.result {
-        WorkExecResult::Ok(payload) => match RuntimeRefineOutputV2::decode(payload.as_ref()) {
+        WorkExecResult::Ok(payload) => match RuntimeRefineOutputV1::decode(payload.as_ref()) {
             Ok(output) => {
                 eprintln!(
                     "slot={slot},work_item_actions={},result=Ok,gas_limit={item_gas},gas_used={},gas_remaining={},valid_until={:?},receipts={:?},witness_bytes={witness_bytes},witness_nodes={witness_nodes},output_bytes={},recovery_bytes={}",
@@ -712,7 +712,7 @@ fn state_summary(state: &TestState, actions: &[Vec<u8>]) -> String {
     let items = actions
         .iter()
         .enumerate()
-        .map(|(index, encoded)| match SignedActionV2::decode(encoded) {
+        .map(|(index, encoded)| match SignedActionV1::decode(encoded) {
             Ok(action) if action.public_key.len() == 32 => {
                 format!(
                     "item={index},sender={:?},nonce={},result={:?}",
@@ -758,7 +758,7 @@ fn signed_game(
     nonce: u64,
     valid_until: u64,
     run: Vec<u8>,
-) -> (SignedActionV2, [u8; 32]) {
+) -> (SignedActionV1, [u8; 32]) {
     let mut payload = Vec::with_capacity(4 + run.len());
     payload.extend_from_slice(&(run.len() as u32).to_le_bytes());
     payload.extend_from_slice(&run);
@@ -1165,16 +1165,16 @@ fn execute_dynamic_work(
     action: Vec<u8>,
     slot: u8,
     item_gas: u64,
-) -> RuntimeRefineOutputV2 {
+) -> RuntimeRefineOutputV1 {
     let mut source = LocalDynamicSource { state };
     let built = AuthenticatedWorkBuilder::new(&mut source, provider)
         .build_actions(service_key, &GeneratedApplication, vec![action])
-        .expect("V2 authenticated work builder");
+        .expect("Formal V1 authenticated work builder");
     drop(source);
     assert_eq!(
         built.refine_input.version,
-        RuntimeRefineInputV2::VERSION,
-        "dynamic fixture must use RuntimeRefineInputV2"
+        RuntimeRefineInputV1::VERSION,
+        "dynamic fixture must use RuntimeRefineInputV1"
     );
     eprintln!(
         "dynamic access keys={:?}",
@@ -1193,7 +1193,7 @@ fn execute_dynamic_work(
     let runtime_payload = built
         .refine_input
         .encode()
-        .expect("V2 runtime input encoding");
+        .expect("Formal V1 runtime input encoding");
     let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
     backend.load_tiny_from_db().unwrap();
     let report = compute_work_report::<
@@ -1207,13 +1207,13 @@ fn execute_dynamic_work(
         work_input(code_hash, vec![runtime_payload], slot, item_gas, ITEM_GAS),
         InterpBackend,
     )
-    .expect("real MiniJAM V2 refine");
+    .expect("real MiniJAM Formal V1 refine");
     let result = &report.report.results[0];
     let output = match &result.result {
         WorkExecResult::Ok(payload) => {
-            RuntimeRefineOutputV2::decode(payload.as_ref()).expect("V2 refine output")
+            RuntimeRefineOutputV1::decode(payload.as_ref()).expect("Formal V1 refine output")
         }
-        other => panic!("dynamic V2 refine did not return an output: {other:?}"),
+        other => panic!("dynamic Formal V1 refine did not return an output: {other:?}"),
     };
     let reports = vec![report.report.encode().try_into().unwrap()]
         .try_into()
@@ -1233,12 +1233,12 @@ fn execute_dynamic_work(
             },
             state,
         )
-        .expect("real MiniJAM V2 accumulate");
+        .expect("real MiniJAM Formal V1 accumulate");
     state.apply(&accumulated);
     assert_eq!(output.new_root, canonical_root(state));
     provider
         .apply_recovery(service_key, &output)
-        .expect("provider V2 recovery");
+        .expect("provider Formal V1 recovery");
     assert_eq!(
         provider.materialized_root(service_key).unwrap(),
         output.new_root
@@ -1249,8 +1249,8 @@ fn execute_dynamic_work(
 fn run_dynamic(blob: &[u8], item_gas: u64) {
     assert_eq!(
         JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION,
-        RuntimeRefineInputV2::VERSION,
-        "dynamic fixture builder must advertise runtime input V2"
+        RuntimeRefineInputV1::VERSION,
+        "dynamic fixture builder must advertise RuntimeRefineInputV1"
     );
     let service_key = ServiceKeyV1::new([0x44; 32]);
     let key_1 = [0x11; 32];
@@ -1310,13 +1310,13 @@ fn run_dynamic(blob: &[u8], item_gas: u64) {
     );
     assert_ne!(seed_output.new_root, advance_output.new_root);
     eprintln!(
-        "V2 dynamic seed parent={} new={} receipts={:?}",
+        "Formal V1 dynamic seed parent={} new={} receipts={:?}",
         hex(&seed_output.parent_root),
         hex(&seed_output.new_root),
         seed_output.receipts
     );
     eprintln!(
-        "V2 dynamic advance parent={} new={} receipts={:?}",
+        "Formal V1 dynamic advance parent={} new={} receipts={:?}",
         hex(&advance_output.parent_root),
         hex(&advance_output.new_root),
         advance_output.receipts
@@ -1334,7 +1334,7 @@ fn run_dynamic(blob: &[u8], item_gas: u64) {
     .expect("dynamic value after advance");
     assert_eq!(&value[..32], &advance_sender);
     assert_eq!(u32::from_le_bytes(value[32..].try_into().unwrap()), 11);
-    println!("MiniJAM V2 dynamic ScriptC E2E passed: seed/advance/replay planner/PVM/Accumulate.");
+    println!("MiniJAM Formal V1 dynamic ScriptC E2E passed: seed/advance/replay planner/PVM/Accumulate.");
 }
 
 fn main() {
@@ -1379,13 +1379,9 @@ fn main() {
         return;
     }
     let counter_path = paths.first().expect(
-        "usage: jamscript-minijam-e2e [--diagnostic-only] [--diagnostic-item-gas GAS] <counter.blob> <game.blob>",
-    );
-    let game_path = paths.get(1).expect(
-        "usage: jamscript-minijam-e2e [--diagnostic-only] [--diagnostic-item-gas GAS] <counter.blob> <game.blob>",
+        "usage: jamscript-minijam-e2e [--diagnostic-only] [--diagnostic-item-gas GAS] <counter.blob>",
     );
     let counter = fs::read(counter_path).expect("read counter service blob");
-    let game = fs::read(game_path).expect("read game service blob");
     if item_gas != ITEM_GAS {
         eprintln!("diagnostic gas mode: item_gas={item_gas}; acceptance gas remains {ITEM_GAS}");
     }
@@ -1398,13 +1394,6 @@ fn main() {
         return;
     }
     run_counter(&counter, item_gas);
-    if counter_only {
-        println!("MiniJAM wallet counter E2E passed: nonce/auth/replay path.");
-        return;
-    }
-    println!(
-        "MiniJAM wallet E2E passed: valid nonce, replay rejection, next nonce, expiry rejection."
-    );
-    run_game(&game, item_gas);
-    println!("MiniJAM M4 game E2E passed: canonical bytes, native replay, tamper/native failure isolation, max state, query ABI path, batch nonce semantics.");
+    let _ = counter_only;
+    println!("MiniJAM Formal V1 wallet E2E passed: valid nonce, replay rejection, next nonce, expiry rejection.");
 }

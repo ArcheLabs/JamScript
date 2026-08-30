@@ -10,7 +10,7 @@ use std::{
 };
 
 pub const BACKEND_VERSION: &str = "scriptc-m2";
-pub const RUNTIME_PROFILE_VERSION: &str = "scriptc-deterministic-v2";
+pub const RUNTIME_PROFILE_VERSION: &str = "scriptc-deterministic-v1";
 pub const SCRIPT_C_VERSION: &str = "0.0.34";
 pub const TYPESCRIPT_VERSION: &str = "7.0.2";
 
@@ -172,7 +172,7 @@ impl ScriptcCompiler {
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>()
                 ),
-                symbol: format!("jamscript_scriptc_{}_entry_v2", action.name),
+                symbol: format!("jamscript_scriptc_{}_entry_v1", action.name),
             })
             .collect();
         let metadata = ScriptcBuildMetadata {

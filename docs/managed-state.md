@@ -73,30 +73,27 @@ availability is not canonicality: only the finalized JAM commitment selects
 the canonical root, while a provider may retain and serve any number of
 historical `(ServiceKey, StateRoot)` snapshots.
 
-Managed-state reads never implicitly fall back to JAM Service KV. The client
-retains an explicit `legacyServiceKvFallback` compatibility option, defaulting
-to `false`; applications should leave it disabled for authenticated managed
-state.
+Managed-state reads never fall back to JAM Service KV. Authenticated managed
+state always uses the proof-backed provider contract.
 
 ## Work builder
 
-`ManagedStateWorkBuilder` anchors every build to a newly resolved finalized
+`AuthenticatedWorkBuilder` anchors every build to a newly resolved finalized
 context. It reads `MANAGED_STATE_COMMITMENT_KEY_V1` from that context's native
 Service storage, opens the provider snapshot at the resulting explicit root,
 and executes the application once against the full state. The host transaction
 records all actual trie accesses, including dynamic keys and valid
 non-inclusion reads, and turns them into the `RuntimeRefineInputV1` witness.
 
-The builder then executes the identical input through `ProofState`. Producer
-and proof-backed outputs must match exactly before the work is returned. A
+The builder executes the canonical input through `ProofState`. A
 provider's `materialized_root` is never consulted for canonicality. If the
 finalized root is unavailable, malformed, or does not match the supplied full
 state, the build fails.
 
 Each builder invocation resolves its context and commitment again. Retrying
 after a stale Work anchor therefore reuses the signed action but rebuilds the
-root, witness, refine input, and Work payload. `build_one` is a convenience
-wrapper over the batch-shaped `build_actions` API.
+root, witness, refine input, and Work payload. `build_actions` is the sole
+builder entrypoint.
 
 ## Generated Builder application
 

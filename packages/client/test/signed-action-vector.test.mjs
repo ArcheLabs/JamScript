@@ -2,16 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import {
-  actionSelector,
   encodeValue,
-  encodeSignedAction,
   parseHex,
-  signingDigest,
   toHex,
-  decodeSignedActionV2,
-  encodeSignedActionV2,
-  signingDigestV2,
+  decodeSignedActionV1,
+  encodeSignedActionV1,
+  signingDigestV1,
 } from "../dist/index.js";
+import { blake2AsU8a } from "@polkadot/util-crypto";
 
 const vector = JSON.parse(
   fs.readFileSync(new URL("../../../test-vectors/signed-action-v1.json", import.meta.url)),
@@ -20,28 +18,6 @@ const vector = JSON.parse(
 test("SignedActionV1 matches the Rust golden vector", () => {
   const unsigned = {
     version: 1,
-    genesisHash: parseHex(vector.genesisHash, 32),
-    serviceId: vector.serviceId,
-    actionSelector: parseHex(vector.actionSelector, 8),
-    signerScheme: 0,
-    publicKey: parseHex(vector.publicKey, 32),
-    nonce: BigInt(vector.nonce),
-    validUntil: BigInt(vector.validUntil),
-    payloadHash: parseHex(vector.payloadHash, 32),
-    payload: parseHex(vector.payload),
-  };
-  const signed = { ...unsigned, signature: parseHex(vector.signature, 64) };
-  assert.equal(toHex(actionSelector("increment")), vector.actionSelector);
-  assert.equal(toHex(signingDigest(unsigned)), vector.signingDigest);
-  assert.equal(toHex(encodeSignedAction(signed)), vector.encoded);
-});
-
-test("SignedActionV2 matches the Rust golden vector", () => {
-  const vector = JSON.parse(
-    fs.readFileSync(new URL("../../../test-vectors/signed-action-v2.json", import.meta.url)),
-  );
-  const unsigned = {
-    version: 2,
     networkDomain: parseHex(vector.networkDomain, 32),
     serviceKey: parseHex(vector.serviceKey, 32),
     actionSelector: parseHex(vector.actionSelector, 8),
@@ -53,12 +29,13 @@ test("SignedActionV2 matches the Rust golden vector", () => {
     payload: parseHex(vector.payload),
   };
   const signed = { ...unsigned, signature: parseHex(vector.signature, 64) };
-  assert.equal(toHex(signingDigestV2(unsigned)), vector.signingDigest);
-  assert.equal(toHex(encodeSignedActionV2(signed)), vector.encoded);
-  assert.deepEqual(decodeSignedActionV2(parseHex(vector.encoded)), signed);
+  assert.equal(toHex(signingDigestV1(unsigned)), vector.signingDigest);
+  assert.equal(toHex(encodeSignedActionV1(signed)), vector.encoded);
+  assert.equal(toHex(blake2AsU8a(parseHex(vector.encoded), 256)), vector.actionHash);
+  assert.deepEqual(decodeSignedActionV1(parseHex(vector.encoded)), signed);
   const tampered = parseHex(vector.encoded);
   tampered[tampered.length - 1] ^= 1;
-  assert.throws(() => decodeSignedActionV2(tampered), /payload hash mismatch/);
+  assert.throws(() => decodeSignedActionV1(tampered), /payload hash mismatch/);
 });
 
 test("ABI integer and boolean encoders reject silent coercion and wrap", () => {

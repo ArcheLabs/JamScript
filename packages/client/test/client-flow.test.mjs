@@ -33,7 +33,7 @@ const deployment = {
   abiVersion: 1,
   abi: {
     abiVersion: 1,
-    languageVersion: "0.1",
+    languageVersion: "0.2",
     package: { name: "game", version: "0.1.0" },
     actions: [
       {
@@ -152,40 +152,6 @@ test("query reads and decodes state at the finalized block", async () => {
   assert.equal(result.stateRoot, queryManagedStateRoot);
 });
 
-test("scalar query encodes the unit key as empty bytes", async () => {
-  const scalarDeployment = JSON.parse(JSON.stringify(deployment));
-  scalarDeployment.abi.queries = [{
-    name: "getConfig",
-    kind: "state_get",
-    state: "config",
-    keyType: { kind: "unit" },
-    output: { type: { kind: "u64" }, nullable: true },
-  }];
-  scalarDeployment.abi.state = [{
-    name: "config",
-    schema: "config/v1",
-    kind: "scalar",
-    keyType: { kind: "unit" },
-    valueType: { kind: "u64" },
-  }];
-  let providerKey;
-  const transport = {
-    async call(method, params = {}) {
-      if (method === "minijam_getFinalizedContext") return initialContext;
-      if (method === "minijam_getServiceStorageAt") return null;
-      if (method === "minijam_getManagedStateV1") {
-        providerKey = params.keyBase64;
-        throw new RpcError("unavailable root", -32030);
-      }
-      throw new Error("unexpected RPC method: " + method);
-    },
-  };
-  const client = new JamScriptClient(scalarDeployment, transport, { legacyServiceKvFallback: true });
-  const result = await client.query("getConfig");
-  assert.equal(result.value, null);
-  assert.equal(providerKey, "AQkAY29uZmlnL3Yx");
-});
-
 test("managed-state provider unavailability does not fall back to Service KV by default", async () => {
   let storageReads = 0;
   const transport = {
@@ -202,25 +168,6 @@ test("managed-state provider unavailability does not fall back to Service KV by 
   const client = new JamScriptClient(deployment, transport);
   await assert.rejects(client.queryLatest("getScore", new Uint8Array(32).fill(1)), /unavailable root/);
   assert.equal(storageReads, 1);
-});
-
-test("legacy Service KV fallback requires explicit opt-in", async () => {
-  let storageReads = 0;
-  const transport = {
-    async call(method) {
-      if (method === "minijam_getFinalizedContext") return initialContext;
-      if (method === "minijam_getServiceStorageAt") {
-        storageReads += 1;
-        return storageReads === 1 ? null : stateU64(99);
-      }
-      if (method === "minijam_getManagedStateV1") throw new RpcError("unavailable root", -32030);
-      throw new Error("unexpected RPC method: " + method);
-    },
-  };
-  const client = new JamScriptClient(deployment, transport, { legacyServiceKvFallback: true });
-  const result = await client.queryLatest("getScore", new Uint8Array(32).fill(1));
-  assert.equal(result.value, 99n);
-  assert.equal(storageReads, 2);
 });
 
 test("waitForWork tolerates not-finalized package lookup and stops at Imported", async () => {

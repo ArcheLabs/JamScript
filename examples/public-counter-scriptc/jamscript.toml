@@ -8,7 +8,7 @@ language = "0.2"
 backend = "scriptc"
 
 [target.minijam]
-# Legacy deployment/routing field only; SignedActionV2 uses ServiceKey.
+# Legacy deployment/routing field only; SignedActionV1 uses ServiceKey.
 service_id = 1001
 # Legacy manifest spelling for the network domain.
 genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"

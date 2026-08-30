@@ -4,7 +4,7 @@ JamScript is a deterministic TypeScript-like application runtime for JAM
 services. The release ABI uses a single typed descriptor for actions, managed
 state, queries, and clients.
 
-The compatibility path supports imports from the `jam` standard library, bounded
+The supported path uses imports from the `jam` standard library, bounded
 primitive input schemas, ABI generation, and generated `no_std` Rust for the
 MiniJAM target. With the pinned Rust target and Clang 20 installed, `build` emits `service.blob`,
 `service.polkavm`, `service.pvm`, and a portable Builder host artifact. The
@@ -12,20 +12,21 @@ PVM guest and Builder artifact embed the same compiler-generated
 `ServiceApplication`; native imports use the same declared C sources compiled
 once for PolkaVM and once for the host.
 
-The v0 release boundary uses `SignedActionV2`: canonical bounded encoding,
+The v0 release boundary uses `SignedActionV1`: canonical bounded encoding,
 payload commitments, ServiceKey identity, domain-separated sr25519
 verification, sender derivation, expiry, and nonce-context validation.
-`SignedActionV1` remains available only as a compatibility implementation.
+Formal V1 is the first supported wire/runtime protocol; development generations
+before it are not compatibility contracts.
 
 The release ABI uses one typed descriptor and Jambda's `jam-codec 0.1.1`
 encoding rules; JamScript does not maintain an independent binary codec. See
 [`docs/release-conformance.md`](docs/release-conformance.md) for the type
-system, canonical vectors, and compatibility rules.
+system and canonical vectors.
 
 The runtime layer provides a language-independent managed-state foundation:
 SDK LayoutV1 trie roots and proofs, canonical diffs/transitions, managed wallet
 nonce keys, proof-backed guest interfaces, and a reference host provider.
-`jamscript-runtime` remains as a compatibility wrapper during migration.
+`jamscript-runtime` exposes the formal runtime wrapper.
 
 ```bash
 cargo build --locked --bin jamscript
