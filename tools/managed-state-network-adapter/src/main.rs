@@ -19,7 +19,7 @@ use service_runtime_core::{
 };
 use service_runtime_host::{
     FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider, ManagedStateWorkBuilder,
-    ServiceStateProvider,
+    MaterializedServiceStateProvider, ServiceStateProvider,
 };
 
 const MAX_HTTP_BYTES: usize = 8 * 1024 * 1024;

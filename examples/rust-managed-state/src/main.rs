@@ -4,7 +4,7 @@ use service_runtime_core::{
 };
 use service_runtime_host::{
     FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider, ManagedStateWorkBuilder,
-    ServiceStateProvider,
+    MaterializedServiceStateProvider,
 };
 use service_runtime_state::FullState;
 
