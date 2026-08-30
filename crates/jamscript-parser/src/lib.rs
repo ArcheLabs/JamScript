@@ -81,7 +81,7 @@ fn parse_service_with_language(
     for item in module.body {
         match item {
             ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
-                collect_import(&import, native_modules, &mut native_imports)?
+                collect_import(&import, native_modules, &mut native_imports, language)?
             }
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
                 decl: Decl::Fn(_),
@@ -187,6 +187,7 @@ fn collect_import(
     import: &ImportDecl,
     native_modules: &[String],
     native_imports: &mut Vec<NativeImportIr>,
+    language: &str,
 ) -> Result<(), ParseError> {
     let source = import.src.value.to_string();
     let native_module = source.strip_prefix("native:");
@@ -242,38 +243,40 @@ fn collect_import(
                 ))
             }
         };
-        if !matches!(
-            name.as_str(),
-            "action"
-                | "wallet"
-                | "publicAction"
-                | "unit"
-                | "bool"
-                | "u8"
-                | "u16"
-                | "u32"
-                | "u64"
-                | "u128"
-                | "i8"
-                | "i16"
-                | "i32"
-                | "i64"
-                | "i128"
-                | "bytes"
-                | "string"
-                | "fixedBytes"
-                | "fixedArray"
-                | "array"
-                | "option"
-                | "tuple"
-                | "record"
-                | "enumType"
-                | "result"
-                | "address"
-                | "state"
-                | "stateMap"
-                | "query"
-        ) {
+        if !(language == "0.2" && name == "abort")
+            && !matches!(
+                name.as_str(),
+                "action"
+                    | "wallet"
+                    | "publicAction"
+                    | "unit"
+                    | "bool"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "bytes"
+                    | "string"
+                    | "fixedBytes"
+                    | "fixedArray"
+                    | "array"
+                    | "option"
+                    | "tuple"
+                    | "record"
+                    | "enumType"
+                    | "result"
+                    | "address"
+                    | "state"
+                    | "stateMap"
+                    | "query"
+            )
+        {
             return Err(diag(
                 "1009",
                 format!("`{name}` is not part of the v0.1 standard library"),

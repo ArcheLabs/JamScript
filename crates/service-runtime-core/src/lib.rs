@@ -142,9 +142,19 @@ pub struct StateViewEntryV1 {
     pub value: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Default)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateViewV1 {
+    pub version: u8,
     pub entries: Vec<StateViewEntryV1>,
+}
+
+impl Default for StateViewV1 {
+    fn default() -> Self {
+        Self {
+            version: STATE_VIEW_VERSION,
+            entries: Vec::new(),
+        }
+    }
 }
 
 impl StateViewV1 {
@@ -154,7 +164,10 @@ impl StateViewV1 {
     {
         let mut entries = entries.into_iter().collect::<Vec<_>>();
         entries.sort_by(|left, right| left.key.cmp(&right.key));
-        let view = Self { entries };
+        let view = Self {
+            version: STATE_VIEW_VERSION,
+            entries,
+        };
         view.validate_canonical()?;
         Ok(view)
     }
@@ -167,6 +180,9 @@ impl StateViewV1 {
     }
 
     fn validate_canonical(&self) -> Result<(), WireError> {
+        if self.version != STATE_VIEW_VERSION {
+            return Err(WireError::UnsupportedVersion);
+        }
         if self.entries.len() > MAX_STATE_VIEW_ENTRIES {
             return Err(WireError::TooManyItems);
         }
@@ -194,7 +210,7 @@ impl StateViewV1 {
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
         self.validate_canonical()?;
         let mut writer = Writer::new();
-        writer.u8(STATE_VIEW_VERSION);
+        writer.u8(self.version);
         writer.u32(u32::try_from(self.entries.len()).map_err(|_| WireError::LengthOverflow)?);
         for entry in &self.entries {
             writer.bytes_u32(&entry.key)?;
@@ -218,7 +234,8 @@ impl StateViewV1 {
             return Err(WireError::TooManyItems);
         }
         let mut reader = Reader::new(bytes);
-        if reader.u8()? != STATE_VIEW_VERSION {
+        let version = reader.u8()?;
+        if version != STATE_VIEW_VERSION {
             return Err(WireError::UnsupportedVersion);
         }
         let count = reader.u32()? as usize;
@@ -238,7 +255,7 @@ impl StateViewV1 {
         if reader.remaining() != 0 {
             return Err(WireError::InvalidEncoding);
         }
-        let view = Self { entries };
+        let view = Self { version, entries };
         view.validate_canonical()?;
         Ok(view)
     }
@@ -1771,6 +1788,7 @@ mod tests {
         assert_eq!(StateViewV1::decode(&view.encode().unwrap()), Ok(view));
 
         let duplicate = StateViewV1 {
+            version: STATE_VIEW_VERSION,
             entries: vec![
                 StateViewEntryV1 {
                     key: vec![1],
