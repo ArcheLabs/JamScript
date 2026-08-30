@@ -29,11 +29,22 @@ const spec = {
       ] } },
     },
   ],
-  actions: [{
-    name: "advance",
-    auth: "Wallet",
-    input: [{ name: "key", ty: { Bytes: { max: 32 } } }],
-  }],
+  actions: [
+    {
+      name: "seed",
+      auth: "Wallet",
+      input: [
+        { name: "key", ty: { Bytes: { max: 32 } } },
+        { name: "next", ty: { Bytes: { max: 32 } } },
+        { name: "value", ty: "U32" },
+      ],
+    },
+    {
+      name: "advance",
+      auth: "Wallet",
+      input: [{ name: "key", ty: { Bytes: { max: 32 } } }],
+    },
+  ],
   queries: [],
 };
 const specPath = resolve(output, "dynamic-service.json");
@@ -42,6 +53,10 @@ await run(process.execPath, [resolve(import.meta.dirname, "compile-service.mjs")
 const generated = await readFile(resolve(output, "scriptc_service.transformed.ts"), "utf8");
 if (!generated.includes("stateGetRaw") || !generated.includes("stateSetRaw") || !generated.includes("__jamscript_action_advance_v2")) {
   throw new Error("dynamic ScriptC conformance artifact is incomplete");
+}
+const seedDecoder = generated.match(/function decode_seed_input\([^]*?\n\}/)?.[0] ?? "";
+if (!/jamNatural\(cursor\).*jamTake\(cursor, v\d+\).*jamNatural\(cursor\).*jamTake\(cursor, v\d+\)/s.test(seedDecoder)) {
+  throw new Error("dynamic ScriptC decoder must consume each bounded field before reading the next length");
 }
 console.log("ScriptC M2 dynamic-state compilation: PASS");
 

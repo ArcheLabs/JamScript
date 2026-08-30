@@ -36,6 +36,8 @@ pub struct BuildMetadata {
     pub managed_state_protocol_version: u8,
     #[serde(rename = "managedStateLayoutVersion")]
     pub managed_state_layout_version: u8,
+    #[serde(rename = "runtimeRefineInputVersion")]
+    pub runtime_refine_input_version: u8,
     #[serde(rename = "recoveryFormatVersion")]
     pub recovery_format_version: u8,
     pub abi_version: u32,
@@ -127,6 +129,8 @@ struct ProtocolBoundaryV0 {
     application_abi: u8,
     managed_state_protocol: u8,
     managed_state_layout: u8,
+    #[serde(rename = "runtimeRefineInputVersion")]
+    runtime_refine_input: u8,
     recovery_format: u8,
     builder_artifact: u8,
 }
@@ -257,6 +261,7 @@ impl MiniJamTarget {
                 application_abi: 1,
                 managed_state_protocol: MANAGED_STATE_PROTOCOL_VERSION,
                 managed_state_layout: MANAGED_STATE_LAYOUT_VERSION,
+                runtime_refine_input: if scriptc.is_some() { 2 } else { 1 },
                 recovery_format: RECOVERY_FORMAT_VERSION,
                 builder_artifact: 1,
             })?,
@@ -455,6 +460,7 @@ fn build_metadata(
         runtime_package_version: "service-runtime-0.1.0".into(),
         managed_state_protocol_version: MANAGED_STATE_PROTOCOL_VERSION,
         managed_state_layout_version: MANAGED_STATE_LAYOUT_VERSION,
+        runtime_refine_input_version: if scriptc.is_some() { 2 } else { 1 },
         recovery_format_version: RECOVERY_FORMAT_VERSION,
         abi_version: 1,
         target_adapter_version: "minijam-0.2".into(),

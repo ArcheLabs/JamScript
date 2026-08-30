@@ -100,11 +100,14 @@ fn generate_no_std_rust_with_backend(
     } else {
         "RuntimeRefineInputV1"
     };
+    let runtime_input_version = if scriptc { 2 } else { 1 };
     Ok(format!(
         r##"#![no_std]
 #![allow(static_mut_refs)]
 #[cfg(not(target_env = "polkavm"))]
 compile_error!("generated service must be built with the official PolkaVM target");
+
+pub const JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = {runtime_input_version};
 
 use service_runtime_core::{{
     ManagedStateCommitmentV1, {runtime_input_type}, RuntimeRefineOutputV2, StateRoot,
@@ -169,10 +172,9 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
 
 #[no_mangle]
 pub extern "C" fn minijam_accumulate() {{
-    // Jambda starts an accumulate VM with the init input in A memory and
-    // initializes a0/a1 to its pointer and length.  The SDK export metadata
-    // deliberately declares this entry as input_regs=0, so these values are
-    // an invocation-context transport, not C function arguments.
+    // Jambda places the accumulation init input in A memory and initializes
+    // a0/a1 to its pointer and length, while the SDK export still uses
+    // input_regs=0 because this is invocation-context transport.
     let init_pointer: usize;
     let init_size: usize;
     unsafe {{
@@ -187,7 +189,8 @@ pub extern "C" fn minijam_accumulate() {{
     let init_input = unsafe {{ core::slice::from_raw_parts(init_pointer as *const u8, init_size) }};
     let (authoritative_tick, _sid, _items_count) =
         match decode_accumulate_init_input(init_input) {{ Ok(value) => value, Err(_) => return }};
-    let mut current = match read_current_commitment() {{ Ok(root) => root, Err(_) => return }};
+    let mut current = read_current_commitment().unwrap_or(service_runtime_core::EMPTY_STATE_ROOT_V1);
+    let mut advanced = false;
     let count = unsafe {{ minijam_result_count() }};
     for index in 0..count {{
         let mut size = 0usize;
@@ -197,8 +200,9 @@ pub extern "C" fn minijam_accumulate() {{
         if header.parent_root != current {{ continue; }}
         if header.transition_valid_until.is_some_and(|valid_until| authoritative_tick > valid_until) {{ continue; }}
         current = header.new_root;
+        advanced = true;
     }}
-    if current != read_current_commitment().unwrap_or(current) {{
+    if advanced {{
         let commitment = ManagedStateCommitmentV1::new(current).encode();
         let key = MANAGED_STATE_COMMITMENT_KEY_V1;
         let _ = unsafe {{
@@ -223,6 +227,7 @@ fn read_current_commitment() -> Result<StateRoot, ()> {{
     }}
 }}
 
+fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_slice(&code.to_le_bytes()); RefineOutput {{ data: OUTPUT.as_ptr(), size: 4 }} }} }}
 fn read_fnencode(input: &[u8], offset: &mut usize) -> Result<u64, ()> {{
     let first = *input.get(*offset).ok_or(())?;
     *offset += 1;
@@ -245,7 +250,6 @@ fn decode_accumulate_init_input(input: &[u8]) -> Result<(u64, u64, u64), ()> {{
     Ok((tick, sid, items_count))
 }}
 
-fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_slice(&code.to_le_bytes()); RefineOutput {{ data: OUTPUT.as_ptr(), size: 4 }} }} }}
 "##,
     ))
 }
@@ -255,15 +259,21 @@ pub fn generate_builder_application_rust(
     mut context: PortableServiceContext,
 ) -> Result<String, String> {
     context.diagnostic = false;
-    if ir
-        .actions
-        .iter()
-        .all(|action| matches!(action.body, ActionBodyIr::ScriptC { .. }))
-    {
-        generate_scriptc_application_rust(ir, context)
+    let scriptc = !ir.actions.is_empty()
+        && ir
+            .actions
+            .iter()
+            .all(|action| matches!(action.body, ActionBodyIr::ScriptC { .. }));
+    let source = if scriptc {
+        generate_scriptc_application_rust(ir, context)?
     } else {
-        generate_application_rust_with_context(ir, context, None)
-    }
+        generate_application_rust_with_context(ir, context, None)?
+    };
+    Ok(format!(
+        "pub const JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = {};\n{}",
+        if scriptc { 2 } else { 1 },
+        source
+    ))
 }
 
 fn generate_scriptc_application_rust(
@@ -412,7 +422,7 @@ fn execute_scriptc(
     payload: &[u8],
     sender: &[u8],
 ) -> Result<(), StateAccessError> {{
-    context.begin_transaction()?;
+        context.begin_transaction()?;
     let business = (|| -> Result<(), StateAccessError> {{
         let state_view = context.state_view()?.encode().map_err(|_| StateAccessError::Backend)?;
         let mut output = core::ptr::null();

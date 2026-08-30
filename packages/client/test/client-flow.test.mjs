@@ -241,3 +241,28 @@ test("waitForWork tolerates not-finalized package lookup and stops at Imported",
   assert.equal(result.status, "imported");
   assert.equal(reads, 3);
 });
+
+test("waitForAction distinguishes an imported failed application receipt", async () => {
+  const transport = {
+    async call(method) {
+      if (method !== "minijam_getWorkStatusV1") throw new Error("unexpected RPC method");
+      return {
+        packageHash: "0x" + "77".repeat(32),
+        workId: 3,
+        status: "imported",
+        executionReceipt: "0x" + "99".repeat(32),
+        actionReceipts: [{ actionHash: "0x" + "aa".repeat(32), status: "failed", errorCode: 2 }],
+        context: initialContext,
+      };
+    },
+  };
+  const client = new JamScriptClient(deployment, transport);
+  const result = await client.waitForAction(
+    "0x" + "77".repeat(32),
+    "0x" + "aa".repeat(32),
+    { intervalMs: 0, timeoutMs: 1000 },
+  );
+  assert.equal(result.status, "imported");
+  assert.equal(result.actionReceipt.status, "failed");
+  assert.equal(result.actionReceipt.errorCode, 2);
+});

@@ -11,7 +11,7 @@ import {
   toHex,
   type SignedActionV2,
 } from "./crypto.js";
-import { asWorkRpc, RpcError, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
@@ -104,6 +104,7 @@ export class JamScriptClient {
     const signature = await signer.signRaw(signingDigestV2(unsigned));
     if (signature.length !== 64) throw new Error("sr25519 signRaw must return a 64-byte signature");
     const signed = encodeSignedActionV2({ ...unsigned, signature });
+    const actionHash = toHex(blake2(signed));
     const requestBase = {
       serviceId: this.deployment.serviceId,
       serviceCodeHash: this.deployment.codeHash,
@@ -115,7 +116,7 @@ export class JamScriptClient {
     const retries = options.staleRetries ?? 1;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await this.rpc.submitWork({
+        const submitted = await this.rpc.submitWork({
           ...requestBase,
           context: {
             blockHash: context.blockHash,
@@ -123,6 +124,7 @@ export class JamScriptClient {
             slot: context.slot,
           },
         });
+        return { ...submitted, actionHash };
       } catch (error) {
         if (attempt >= retries || !isStaleContext(error)) throw error;
         context = await this.rpc.finalizedContext();
@@ -227,6 +229,26 @@ export class JamScriptClient {
       if (Date.now() >= deadline) throw new Error("timed out waiting for finalized Work");
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
+  }
+
+  async waitForAction(
+    packageHash: string,
+    actionHash?: string,
+    options: { intervalMs?: number; timeoutMs?: number } = {},
+  ): Promise<WorkStatusResult & { actionReceipt: ActionReceipt }> {
+    const work = await this.waitForWork(packageHash, options);
+    if (work.status === "failed") {
+      throw new RpcError("Work failed before an action receipt was produced", -32040, work);
+    }
+    const expected = actionHash?.toLowerCase();
+    const receipts = work.actionReceipts ?? [];
+    const receipt = expected === undefined && receipts.length === 1
+      ? receipts[0]
+      : receipts.find((item) => item.actionHash.toLowerCase() === expected);
+    if (!receipt) {
+      throw new Error("canonical action receipt is missing from the imported Work result");
+    }
+    return { ...work, actionReceipt: receipt };
   }
 }
 

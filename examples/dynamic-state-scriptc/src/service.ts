@@ -23,6 +23,18 @@ const values = stateMap({
   value: Value,
 });
 
+export const seed = action({
+  auth: wallet(),
+  input: { key: IndexKey, next: IndexKey, value: u32 },
+  execute(ctx, input) {
+    if (index.has(input.key)) abort(3);
+    if (values.has(input.next)) abort(4);
+
+    index.set(input.key, { next: input.next });
+    values.set(input.next, { owner: ctx.sender, value: input.value });
+  },
+});
+
 export const advance = action({
   auth: wallet(),
   input: { key: IndexKey },

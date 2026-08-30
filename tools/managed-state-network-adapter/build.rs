@@ -12,7 +12,7 @@ fn main() {
                 .join("placeholder_builder_application.rs");
             fs::write(
                 &path,
-                "pub struct GeneratedApplication;\nimpl service_runtime_core::ServiceApplication for GeneratedApplication { type Error = service_runtime_core::StateAccessError; fn execute(&self, _: &mut service_runtime_core::ExecutionContext<'_>, _: &[u8]) -> Result<(), Self::Error> { Err(service_runtime_core::StateAccessError::Backend) } }\n",
+                "pub const JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = 1;\npub struct GeneratedApplication;\nimpl service_runtime_core::ServiceApplication for GeneratedApplication { type Error = service_runtime_core::StateAccessError; fn execute(&self, _: &mut service_runtime_core::ExecutionContext<'_>, _: &[u8]) -> Result<(), Self::Error> { Err(service_runtime_core::StateAccessError::Backend) } }\n",
             )
             .expect("write placeholder builder application");
             (path, false)

@@ -1731,6 +1731,7 @@ dependencies = [
  "jambda-accumulate",
  "jambda-authorizations",
  "jambda-history",
+ "jambda-minijam-spec",
  "jambda-preimages",
  "jambda-safrole",
  "jambda-state-backend",
@@ -1742,6 +1743,13 @@ dependencies = [
  "minijam-protocol",
  "parity-scale-codec",
  "spin",
+]
+
+[[package]]
+name = "jambda-minijam-spec"
+version = "0.0.1"
+dependencies = [
+ "jp-core-primitives",
 ]
 
 [[package]]
@@ -2886,6 +2894,7 @@ dependencies = [
 name = "service-runtime-host"
 version = "0.1.0"
 dependencies = [
+ "jamscript-runtime-core",
  "service-runtime-core",
  "service-runtime-guest",
  "service-runtime-state",

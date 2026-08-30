@@ -198,7 +198,13 @@ function decodeExpression(type, cursor, lines, next) {
   if (kind === "Bool") { const name = next(); lines.push(`const ${name} = jamU8(${cursor}); if (${name} > 1) throw new Error("invalid bool");`); return `${name} === 1`; }
   if (kind === "Address") return `jamTake(${cursor}, 32)`;
   if (kind === "FixedBytes") return `jamTake(${cursor}, ${data.len})`;
-  if (kind === "Bytes" || kind === "String") { const length = next(); lines.push(`const ${length} = jamNatural(${cursor}); if (${length} > ${data.max}) throw new Error("bound exceeded");`); const bytes = `jamTake(${cursor}, ${length})`; if (kind === "String") throw new Error("ScriptC M2 string execution is not implemented yet"); return bytes; }
+  if (kind === "Bytes" || kind === "String") {
+    const length = next();
+    const value = next();
+    if (kind === "String") throw new Error("ScriptC M2 string execution is not implemented yet");
+    lines.push(`const ${length} = jamNatural(${cursor}); if (${length} > ${data.max}) throw new Error("bound exceeded"); const ${value} = jamTake(${cursor}, ${length});`);
+    return value;
+  }
   if (kind === "Record") {
     const fields = data.fields.map((field) => `${field.name}: ${decodeExpression(field.ty, cursor, lines, next)}`);
     return `{ ${fields.join(", ")} }`;

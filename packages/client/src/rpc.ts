@@ -17,6 +17,8 @@ export type SubmitWorkResult = {
   packageHash: string;
   submissionHash: string;
   context: FinalizedContext;
+  /** Hash of the exact SignedActionV2 bytes submitted by submitAction. */
+  actionHash?: string;
 };
 
 export type WorkStatus =
@@ -32,7 +34,14 @@ export type WorkStatusResult = {
   workId: number | null;
   status: WorkStatus;
   executionReceipt: string | null;
+  actionReceipts?: ActionReceipt[];
   context: FinalizedContext;
+};
+
+export type ActionReceipt = {
+  actionHash: string;
+  status: "applied" | "failed" | "rejected";
+  errorCode: number | null;
 };
 
 export type ManagedStateResult = {
