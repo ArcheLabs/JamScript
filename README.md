@@ -1,5 +1,9 @@
 # JamScript
 
+JamScript's MiniJAM Stage-1 production boundary is the neutral node RPC,
+Formal Work RPC, and proof-aware StateProvider. It has no Playground runtime
+or compiler dependency.
+
 JamScript is a deterministic TypeScript-like application runtime for JAM
 services. The release ABI uses a single typed descriptor for actions, managed
 state, queries, and clients.
