@@ -5,6 +5,12 @@ on:
   pull_request:
 
 jobs:
+  stage1-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-stage1-boundary.sh
+
   rust:
     runs-on: ubuntu-latest
     steps:
