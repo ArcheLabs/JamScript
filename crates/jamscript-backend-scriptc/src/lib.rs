@@ -23,6 +23,7 @@ pub struct ScriptcBuildMetadata {
     pub typescript_version: String,
     pub surface_manifest_hash: String,
     pub package_lock_hash: String,
+    pub native_ffi_manifest_hash: String,
     pub runtime_profile_version: String,
     pub generated_actions: Vec<ScriptcGeneratedAction>,
     #[serde(rename = "typedRuntimeVersion")]
@@ -185,6 +186,7 @@ impl ScriptcCompiler {
                     .join("node_modules/@scriptc/compiler/surface-manifest.json"),
             )?,
             package_lock_hash: hash_file(&self.toolchain_root.join("package-lock.json"))?,
+            native_ffi_manifest_hash: hash_file(&output_dir.join("scriptc_native_ffi.json"))?,
             runtime_profile_version: RUNTIME_PROFILE_VERSION.into(),
             generated_actions,
             typed_runtime_version: 1,
