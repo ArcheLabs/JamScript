@@ -1,7 +1,10 @@
 import { readFile, mkdir, writeFile, copyFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import ts from "typescript5/lib/typescript.js";
-import { compileLibrary } from "@scriptc/compiler";
+
+await ensureLibraryFfiSupport();
+const { compileLibrary } = await import("@scriptc/compiler");
 
 const specPath = resolve(process.argv[2] ?? "");
 if (!specPath) throw new Error("missing M2 ScriptC service spec");
@@ -17,9 +20,10 @@ await copyFile(resolve(import.meta.dirname, "runtime.ts"), runtimePath);
 const nativeImports = spec.native_imports ?? [];
 const nativeBindings = nativeImports.map(({ module, function: functionName }) => ({
   local: functionName,
-  binding: `__jamscript_native_${module}_${functionName}_v1`,
+  binding: functionName,
   symbol: `jamscript_ffi_${module}_${functionName}_v1`,
 }));
+if (nativeBindings.length > 0) process.env.SCRIPTC_NO_CACHE = "1";
 const nativeNames = new Set();
 for (const binding of nativeBindings) {
   if (nativeNames.has(binding.local)) {
@@ -134,8 +138,29 @@ function validateImports(file, service) {
 
 function nativeDeclarations(bindings) {
   return bindings.map((binding) =>
-    `declare function ${binding.binding}(input: Uint8Array): number;\nfunction ${binding.local}(input: Uint8Array): number { const value = ${binding.binding}(input); if (value < 0) abort(Math.floor(-value)); return value; }`
+    `declare function ${binding.binding}(input: Uint8Array): number;`
   ).join("\n\n");
+}
+
+async function ensureLibraryFfiSupport() {
+  const compilerEntry = fileURLToPath(await import.meta.resolve("@scriptc/compiler"));
+  const compilerPath = compilerEntry.replace(/dist[\\/]index\.js$/, "dist/index.js");
+  let source = await readFile(compilerPath, "utf8");
+  if (!source.includes("const loadedFfi = loadFfiProfile(resolve(opts.ffiProfilePath));")) {
+    const profileMarker = "    const profile = loadedProfile.profile;\n";
+    const profilePatch = `${profileMarker}    let ffi = null;\n    if (opts.ffiProfilePath !== undefined) {\n        const loadedFfi = loadFfiProfile(resolve(opts.ffiProfilePath));\n        if (!loadedFfi.ok) {\n            return { ok: false, diagnostics: loadedFfi.diagnostics, sourceTexts: new Map() };\n        }\n        ffi = loadedFfi.profile;\n    }\n`;
+    if (!source.includes(profileMarker)) throw new Error("ScriptC compiler library FFI patch anchor is missing");
+    source = source.replace(profileMarker, profilePatch);
+    const callbackBlock = `        const cbImports = profile.callbacks.map((cb) => ({\n            name: cb.name,\n            symbol: cb.name,\n            params: [...cb.params],\n            returns: cb.returns,\n        }));\n`;
+    const callbackPatch = `${callbackBlock}        const ffiImports = [\n            ...(ffi?.functions ?? []),\n            ...cbImports,\n        ];\n`;
+    if (!source.includes(callbackBlock)) throw new Error("ScriptC compiler library callback anchor is missing");
+    source = source.replace(callbackBlock, callbackPatch);
+    const lowerBlock = `                ...(cbImports.length > 0 ? { ffiImports: cbImports, libraryCallbacks: true } : {}),`;
+    const lowerPatch = `                ...(ffiImports.length > 0 ? { ffiImports } : {}),\n                ...(cbImports.length > 0 ? { libraryCallbacks: true } : {}),`;
+    if (!source.includes(lowerBlock)) throw new Error("ScriptC compiler library lowerer anchor is missing");
+    source = source.replace(lowerBlock, lowerPatch);
+    await writeFile(compilerPath, source);
+  }
 }
 
 function validateDeterminism(file, service) {
