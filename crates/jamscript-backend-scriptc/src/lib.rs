@@ -104,6 +104,7 @@ impl ScriptcCompiler {
                     "input": action.input,
                 })).collect::<Vec<_>>(),
                 "queries": ir.queries,
+                "native_imports": ir.native_imports,
                 "output": output_dir,
             })
             .to_string(),
@@ -156,10 +157,7 @@ impl ScriptcCompiler {
             );
         }
         let adapter_c = output_dir.join("scriptc_service_adapter.c");
-        fs::write(
-            &adapter_c,
-            "/* ScriptC M2 exports its canonical bytes ABI directly. */\n",
-        )?;
+        fs::write(&adapter_c, native_ffi_adapter_c(&ir.native_imports))?;
         let generated_actions = ir
             .actions
             .iter()
@@ -198,6 +196,26 @@ impl ScriptcCompiler {
             metadata,
         })
     }
+}
+
+fn native_ffi_adapter_c(imports: &[jamscript_ir::NativeImportIr]) -> String {
+    let mut out = String::from(
+        "/* Generated ScriptC FFI adapters. The JamScript native ABI remains the stable boundary. */\n#include <stddef.h>\n#include <stdint.h>\n\n",
+    );
+    for import in imports {
+        let native = format!("jamscript_native_{}_{}_v1", import.module, import.function);
+        let ffi = format!("jamscript_ffi_{}_{}_v1", import.module, import.function);
+        out.push_str(&format!(
+            "extern uint32_t {native}(const uint8_t *, uint32_t, uint64_t *);\n"
+        ));
+        out.push_str(&format!(
+            "double {ffi}(const uint8_t *input, size_t input_len) {{\n"
+        ));
+        out.push_str("  uint64_t output = 0;\n  uint32_t status = ");
+        out.push_str(&format!("{native}(input, (uint32_t)input_len, &output);\n"));
+        out.push_str("  if (status != 0) return -(double)status;\n  return (double)output;\n}\n\n");
+    }
+    out
 }
 
 fn command_output(command: &Path, args: &[&str], cwd: &Path) -> Result<String> {
@@ -282,4 +300,21 @@ fn verify_surface_manifest(toolchain_root: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_ffi_adapter_c;
+    use jamscript_ir::NativeImportIr;
+
+    #[test]
+    fn native_ffi_adapter_preserves_canonical_abi_and_errors() {
+        let source = native_ffi_adapter_c(&[NativeImportIr {
+            module: "math".into(),
+            function: "calculate".into(),
+        }]);
+        assert!(source.contains("jamscript_native_math_calculate_v1"));
+        assert!(source.contains("jamscript_ffi_math_calculate_v1"));
+        assert!(source.contains("if (status != 0) return -(double)status"));
+    }
 }

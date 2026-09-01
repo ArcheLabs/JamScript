@@ -342,6 +342,7 @@ impl MiniJamTarget {
             "scriptc/scriptc_service.transformed.ts",
             "scriptc/scriptc_runtime.ts",
             "scriptc/scriptc_service.profile.json",
+            "scriptc/scriptc_native_ffi.json",
             "scriptc/scriptc_service.lib.c",
             "scriptc/scriptc_service_adapter.c",
         ]);

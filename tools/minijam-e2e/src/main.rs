@@ -34,7 +34,7 @@ use service_runtime_core::{
 };
 use service_runtime_host::{
     AuthenticatedWorkBuilder, FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider,
-    MaterializedServiceStateProvider,
+    MaterializedServiceStateProvider, ServiceStateProvider,
 };
 
 include!(env!("JAMSCRIPT_E2E_BUILDER_APPLICATION_RS"));

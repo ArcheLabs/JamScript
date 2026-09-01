@@ -14,6 +14,19 @@ await mkdir(output, { recursive: true });
 const transformedPath = resolve(output, "scriptc_service.transformed.ts");
 const runtimePath = resolve(output, "scriptc_runtime.ts");
 await copyFile(resolve(import.meta.dirname, "runtime.ts"), runtimePath);
+const nativeImports = spec.native_imports ?? [];
+const nativeBindings = nativeImports.map(({ module, function: functionName }) => ({
+  local: functionName,
+  binding: `__jamscript_native_${module}_${functionName}_v1`,
+  symbol: `jamscript_ffi_${module}_${functionName}_v1`,
+}));
+const nativeNames = new Set();
+for (const binding of nativeBindings) {
+  if (nativeNames.has(binding.local)) {
+    throw new Error(`native import binding \`${binding.local}\` is declared more than once`);
+  }
+  nativeNames.add(binding.local);
+}
 await writeFile(transformedPath, transformService(source, spec));
 
 const profilePath = resolve(output, "scriptc_service.profile.json");
@@ -23,6 +36,18 @@ const exports = spec.actions.map((action) => ({
   params: ["bytes", "bytes", "bytes"],
   returns: "bytes",
 }));
+const ffiProfilePath = resolve(output, "scriptc_native_ffi.json");
+await writeFile(ffiProfilePath, JSON.stringify({
+  ffi_format: 1,
+  functions: nativeBindings.map((binding) => ({
+    name: binding.binding,
+    symbol: binding.symbol,
+    params: ["bytes"],
+    returns: "f64",
+  })),
+  libraries: [],
+  system_libraries: [],
+}, null, 2));
 await writeFile(profilePath, JSON.stringify({
   profile_format: 1,
   name: `jamscript-m2-${spec.package_name}`,
@@ -46,12 +71,13 @@ const result = await compileLibrary({
   outDir: output,
   outPath: resolve(output, "scriptc_service.lib.a"),
   emitIr: true,
+  ffiProfilePath,
 });
 if (!result.ok) throw new Error(JSON.stringify(result.diagnostics, null, 2));
 
 function transformService(text, service) {
   const file = ts.createSourceFile("service.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  validateImports(file);
+  validateImports(file, service);
   validateDeterminism(file, service);
   const actionBodies = new Map();
   const stateNames = new Set(service.states.map((state) => state.name));
@@ -80,7 +106,7 @@ function transformService(text, service) {
     retained.push(printer.printNode(ts.EmitHint.Unspecified, statement, file));
   }
 
-  const sections = [runtimeImports(), codecRuntime(), ...retained];
+  const sections = [runtimeImports(), codecRuntime(), nativeDeclarations(nativeBindings), ...retained];
   for (const state of service.states) sections.push(generateStateBinding(state));
   for (const action of service.actions) {
     const execute = actionBodies.get(action.name);
@@ -90,12 +116,26 @@ function transformService(text, service) {
   return sections.join("\n\n") + "\n";
 }
 
-function validateImports(file) {
+function validateImports(file, service) {
+  const declared = new Set((service.native_imports ?? []).map(({ module, function: functionName }) => `${module}:${functionName}`));
   for (const statement of file.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
     const module = ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : "";
-    if (module !== "jam") throw new Error(`ScriptC M2 does not support runtime import \`${module}\``);
+    if (module === "jam") continue;
+    if (!module.startsWith("native:")) throw new Error(`ScriptC M2 does not support runtime import \`${module}\``);
+    for (const specifier of statement.importClause?.namedBindings?.elements ?? []) {
+      const functionName = specifier.propertyName?.text ?? specifier.name.text;
+      if (!declared.has(`${module.slice("native:".length)}:${functionName}`)) {
+        throw new Error(`native import \`${module}:${functionName}\` is missing from the parsed service manifest`);
+      }
+    }
   }
+}
+
+function nativeDeclarations(bindings) {
+  return bindings.map((binding) =>
+    `declare function ${binding.binding}(input: Uint8Array): number;\nfunction ${binding.local}(input: Uint8Array): number { const value = ${binding.binding}(input); if (value < 0) abort(Math.floor(-value)); return value; }`
+  ).join("\n\n");
 }
 
 function validateDeterminism(file, service) {
