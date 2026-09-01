@@ -1,8 +1,10 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(jamscript_e2e_native_host)");
     println!("cargo:rerun-if-env-changed=JAMSCRIPT_E2E_BUILDER_APPLICATION_RS");
     println!("cargo:rerun-if-env-changed=JAMSCRIPT_E2E_SCRIPTC_ARCHIVE");
+    println!("cargo:rerun-if-env-changed=JAMSCRIPT_E2E_NATIVE_SOURCE");
 
     let (application, configured) = match env::var_os("JAMSCRIPT_E2E_BUILDER_APPLICATION_RS") {
         Some(path) => (PathBuf::from(path), true),
@@ -30,13 +32,20 @@ fn main() {
     if let Some(archive) = env::var_os("JAMSCRIPT_E2E_SCRIPTC_ARCHIVE") {
         let archive = PathBuf::from(archive);
         println!("cargo:rerun-if-changed={}", archive.display());
-        let host_archive = build_host_scriptc_archive(&archive);
+        let native_source = env::var_os("JAMSCRIPT_E2E_NATIVE_SOURCE").map(PathBuf::from);
+        if native_source.is_some() {
+            println!("cargo:rustc-cfg=jamscript_e2e_native_host");
+        }
+        let host_archive = build_host_scriptc_archive(&archive, native_source.as_ref());
         println!("cargo:rerun-if-changed={}", host_archive.display());
         println!("cargo:rustc-link-arg={}", host_archive.display());
     }
 }
 
-fn build_host_scriptc_archive(target_archive: &PathBuf) -> PathBuf {
+fn build_host_scriptc_archive(
+    target_archive: &PathBuf,
+    native_source: Option<&PathBuf>,
+) -> PathBuf {
     let output_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let source_dir = target_archive.parent().expect("ScriptC archive directory");
     let workspace =
@@ -51,6 +60,8 @@ fn build_host_scriptc_archive(target_archive: &PathBuf) -> PathBuf {
     fs::write(
         &host_shims,
         r#"#include <math.h>
+#include <stddef.h>
+#include <string.h>
 #include <stdint.h>
 
 #undef isfinite
@@ -83,6 +94,29 @@ double scr_bit_shr(double a, double b) {
 }
 double scr_bit_ushr(double a, double b) { return (double)(jamscript_to_uint32(a) >> (jamscript_to_uint32(b) & 31u)); }
 double scr_bit_not(double value) { return jamscript_bits_as_int32(~jamscript_to_uint32(value)); }
+
+static const uint8_t *jamscript_e2e_extrinsic;
+static size_t jamscript_e2e_extrinsic_size;
+static size_t jamscript_e2e_extrinsic_count;
+
+void jamscript_e2e_set_extrinsic(const uint8_t *bytes, size_t size) {
+  jamscript_e2e_extrinsic = bytes;
+  jamscript_e2e_extrinsic_size = size;
+  jamscript_e2e_extrinsic_count = 1;
+}
+
+void jamscript_e2e_set_extrinsic_count(size_t count) {
+  jamscript_e2e_extrinsic_count = count;
+}
+
+uint64_t minijam_host_call(uint32_t call, const uint64_t args[6]) {
+  if (call != 1u) return UINT64_MAX;
+  if (args[4] >= jamscript_e2e_extrinsic_count) return UINT64_MAX;
+  if (args[0] == 0u) return (uint64_t)jamscript_e2e_extrinsic_size;
+  if (args[2] < jamscript_e2e_extrinsic_size) return (uint64_t)jamscript_e2e_extrinsic_size;
+  memcpy((void *)(uintptr_t)args[0], jamscript_e2e_extrinsic, jamscript_e2e_extrinsic_size);
+  return (uint64_t)jamscript_e2e_extrinsic_size;
+}
 "#,
     )
     .expect("write host ScriptC shims");
@@ -134,6 +168,37 @@ double scr_bit_not(double value) { return jamscript_bits_as_int32(~jamscript_to_
             source.display()
         );
         objects.push(object);
+    }
+    if let Some(native_source) = native_source {
+        let native_include = workspace.join("../minijam-client/service-toolchain/sdk/include");
+        for (index, source) in [
+            native_source.clone(),
+            workspace.join("../minijam-client/service-toolchain/sdk/src/minijam.c"),
+            workspace.join("../minijam-client/service-toolchain/sdk/src/crypto.c"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let object = output_dir.join(format!("scriptc_native_host_{index}.o"));
+            let status = Command::new(&clang)
+                .args(["-std=c11", "-O0", "-fPIC", "-DMINIJAM_HOST_TEST"])
+                .arg("-I")
+                .arg(&include)
+                .arg("-I")
+                .arg(&native_include)
+                .arg("-c")
+                .arg(&source)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .unwrap_or_else(|error| panic!("launching native host compiler: {error}"));
+            assert!(
+                status.success(),
+                "compiling native host source {}",
+                source.display()
+            );
+            objects.push(object);
+        }
     }
     let archive = output_dir.join("libscriptc_host.a");
     let status = Command::new(&ar)

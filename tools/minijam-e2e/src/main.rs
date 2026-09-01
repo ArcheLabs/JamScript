@@ -19,7 +19,7 @@ use jp_core_primitives::{
     state::{column, ColumnFamily, StateKey, StoreChange, StoreKey},
     traits::DataBase as CoreDataBase,
     types::ServiceInfo,
-    work::{PreimagesLookups, RefineContext, WorkExecResult, WorkItem, WorkPackage},
+    work::{ExtrinsicSpec, PreimagesLookups, RefineContext, WorkExecResult, WorkItem, WorkPackage},
 };
 use jp_vm_engine::InnerEngine;
 use jp_vm_interp::InterpBackend;
@@ -29,8 +29,8 @@ use minijam_jamcore_api::{
 use minijam_protocol::{StateOperation, PROTOCOL_VERSION_V1};
 use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
 use service_runtime_core::{
-    application_key_v1, ManagedStateCommitmentV1, RuntimeRefineInputV1,
-    RuntimeRefineOutputV1, ServiceKeyV1, StateAccessPlanV1, MANAGED_STATE_COMMITMENT_KEY_V1,
+    application_key_v1, ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV1,
+    ServiceKeyV1, StateAccessPlanV1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
 use service_runtime_host::{
     AuthenticatedWorkBuilder, FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider,
@@ -38,6 +38,28 @@ use service_runtime_host::{
 };
 
 include!(env!("JAMSCRIPT_E2E_BUILDER_APPLICATION_RS"));
+
+#[cfg(jamscript_e2e_native_host)]
+unsafe extern "C" {
+    fn jamscript_e2e_set_extrinsic(bytes: *const u8, size: usize);
+    fn jamscript_e2e_set_extrinsic_count(count: usize);
+}
+
+#[cfg(jamscript_e2e_native_host)]
+fn set_host_extrinsic(bytes: &[u8]) {
+    unsafe { jamscript_e2e_set_extrinsic(bytes.as_ptr(), bytes.len()) }
+}
+
+#[cfg(jamscript_e2e_native_host)]
+fn set_host_extrinsic_count(count: usize) {
+    unsafe { jamscript_e2e_set_extrinsic_count(count) }
+}
+
+#[cfg(not(jamscript_e2e_native_host))]
+fn set_host_extrinsic(_: &[u8]) {}
+
+#[cfg(not(jamscript_e2e_native_host))]
+fn set_host_extrinsic_count(_: usize) {}
 
 const SERVICE_ID: u32 = 1_000;
 const MAX_BLOCK_GAS: u64 = 20_000_000;
@@ -233,6 +255,30 @@ fn work_input(
     accumulate_gas: u64,
 ) -> WorkReportInput {
     let item_count = payloads.len();
+    work_input_with_extrinsics(
+        code_hash,
+        payloads,
+        vec![Vec::new(); item_count],
+        sequence,
+        refine_gas,
+        accumulate_gas,
+    )
+}
+
+fn work_input_with_extrinsics(
+    code_hash: OpaqueHash,
+    payloads: Vec<Vec<u8>>,
+    extrinsics: Vec<Vec<Vec<u8>>>,
+    sequence: u8,
+    refine_gas: u64,
+    accumulate_gas: u64,
+) -> WorkReportInput {
+    let item_count = payloads.len();
+    assert_eq!(
+        extrinsics.len(),
+        item_count,
+        "one extrinsic list per WorkItem"
+    );
     let package = WorkPackage {
         auth_code_host: SYSTEM_SERVICE_ID,
         auth_code_hash: OpaqueHash([0; 32]),
@@ -248,7 +294,8 @@ fn work_input(
         authorizer_config: ByteSequence::from(Vec::new()),
         items: payloads
             .into_iter()
-            .map(|payload| WorkItem {
+            .zip(extrinsics.iter())
+            .map(|(payload, item_extrinsics)| WorkItem {
                 service: SERVICE_ID,
                 code_hash,
                 refine_gas_limit: refine_gas,
@@ -256,14 +303,25 @@ fn work_input(
                 export_count: 0,
                 payload: ByteSequence::from(payload),
                 import_segments: Vec::new(),
-                extrinsic: Vec::new(),
+                extrinsic: item_extrinsics
+                    .iter()
+                    .map(|bytes| ExtrinsicSpec {
+                        hash: OpaqueHash(blake2b(bytes)),
+                        len: bytes.len().try_into().expect("extrinsic length fits u32"),
+                    })
+                    .collect(),
             })
             .collect(),
     };
     WorkReportInput {
         core_index: 0,
         work_package: Arc::new(package),
-        external_data: Arc::new(vec![Vec::new(); item_count]),
+        external_data: Arc::new(
+            extrinsics
+                .into_iter()
+                .map(|item| item.into_iter().map(ByteSequence::from).collect())
+                .collect(),
+        ),
         import_segments: Arc::new(vec![Vec::new(); item_count]),
         import_proofs: ImportProofBundle::default(),
     }
@@ -1334,7 +1392,229 @@ fn run_dynamic(blob: &[u8], item_gas: u64) {
     .expect("dynamic value after advance");
     assert_eq!(&value[..32], &advance_sender);
     assert_eq!(u32::from_le_bytes(value[32..].try_into().unwrap()), 11);
-    println!("MiniJAM Formal V1 dynamic ScriptC E2E passed: seed/advance/replay planner/PVM/Accumulate.");
+    println!(
+        "MiniJAM Formal V1 dynamic ScriptC E2E passed: seed/advance/replay planner/PVM/Accumulate."
+    );
+}
+
+fn probe_failure_status(
+    state: &TestState,
+    provider: &FullStateProvider,
+    service_key: ServiceKeyV1,
+    code_hash: OpaqueHash,
+    action_bytes: &[u8],
+    schema: &[u8],
+    extrinsics: &[Vec<u8>],
+    slot: u8,
+    item_gas: u64,
+) -> u32 {
+    set_host_extrinsic_count(extrinsics.len());
+    if let Some(first) = extrinsics.first() {
+        set_host_extrinsic(first);
+    }
+    let runtime_payload = runtime_input(provider, service_key, action_bytes, Some(schema));
+    let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(state));
+    backend.load_tiny_from_db().unwrap();
+    let report = compute_work_report::<
+        TinySpec,
+        MiniJamDb<'_>,
+        StateBackend<TinySpec, MiniJamDb<'_>>,
+        InterpBackend,
+        InnerEngine<InterpBackend>,
+    >(
+        &backend,
+        work_input_with_extrinsics(
+            code_hash,
+            vec![runtime_payload],
+            vec![extrinsics.to_vec()],
+            slot,
+            item_gas,
+            ITEM_GAS,
+        ),
+        InterpBackend,
+    )
+    .expect("probe negative refine");
+    match &report.report.results[0].result {
+        WorkExecResult::Ok(payload) if payload.len() == 4 => {
+            u32::from_le_bytes(payload.as_slice().try_into().unwrap())
+        }
+        other => panic!("probe negative result: {other:?}"),
+    }
+}
+
+fn run_native_probe(blob: &[u8], item_gas: u64) {
+    let service_key = ServiceKeyV1::new([0x11; 32]);
+    let schema = b"native-extrinsic-probe/result/v1";
+    let external_data = b"hello external data".to_vec();
+    let run_id = blake2b(&external_data);
+    let (signed, sender) = action(
+        service_key,
+        9,
+        0,
+        10,
+        jamscript_ir::action_selector("submitProbe"),
+        run_id.to_vec(),
+    );
+    let action_bytes = signed.encode().expect("probe action encoding");
+    let mut state = new_state();
+    let mut provider = FullStateProvider::default();
+    let code_hash = install_service(&mut state, blob, item_gas);
+    set_host_extrinsic(&external_data);
+    let runtime_payload = runtime_input(&provider, service_key, &action_bytes, Some(schema));
+    let mut backend = StateBackend::<TinySpec, _>::new_tiny(MiniJamDb::new(&state));
+    backend.load_tiny_from_db().unwrap();
+    let report = compute_work_report::<
+        TinySpec,
+        MiniJamDb<'_>,
+        StateBackend<TinySpec, MiniJamDb<'_>>,
+        InterpBackend,
+        InnerEngine<InterpBackend>,
+    >(
+        &backend,
+        work_input_with_extrinsics(
+            code_hash,
+            vec![runtime_payload],
+            vec![vec![external_data.clone()]],
+            1,
+            item_gas,
+            ITEM_GAS,
+        ),
+        InterpBackend,
+    )
+    .expect("native probe refine");
+    let result = &report.report.results[0];
+    let output = match &result.result {
+        WorkExecResult::Ok(payload) => {
+            RuntimeRefineOutputV1::decode(payload.as_ref()).expect("native probe output")
+        }
+        other => panic!("native probe refine failed: {other:?}"),
+    };
+    assert_eq!(output.receipts.len(), 1);
+    assert_eq!(
+        output.receipts[0].error_code, None,
+        "native probe receipt: {:?}",
+        output.receipts
+    );
+    let reports = vec![report.report.encode().try_into().unwrap()]
+        .try_into()
+        .unwrap();
+    let accumulated = MiniJamExecutive
+        .execute(
+            MiniJamExecutionInput {
+                protocol_version: PROTOCOL_VERSION_V1,
+                slot: 1,
+                parent_hash: [0; 32],
+                parent_state_root: [0; 32],
+                entropy: [0; 32],
+                reports,
+                preimages: Default::default(),
+                system_ops: Default::default(),
+                max_gas: MAX_BLOCK_GAS,
+            },
+            &mut state,
+        )
+        .expect("native probe accumulate");
+    state.apply(&accumulated);
+    provider.apply_recovery(service_key, &output).unwrap();
+    let stored = provider_value(
+        &provider,
+        service_key,
+        &application_key_v1(schema, &sender).unwrap(),
+    )
+    .expect("probe result query");
+    assert_eq!(stored, (external_data.len() as u32).to_le_bytes());
+    println!(
+        "NATIVE_WORK_EXTRINSIC=PASS packageHash={} actionHash={} sender={} runId={} extrinsicBytes={} extrinsicCount=1 nativeReturned={} stored={} receipts=1",
+        hex(&report.report.package_spec.hash.0),
+        hex(&blake2b(&action_bytes)),
+        hex(&sender),
+        hex(&run_id),
+        external_data.len(),
+        external_data.len(),
+        u32::from_le_bytes(stored.try_into().unwrap()),
+    );
+
+    let mut mutated = external_data.clone();
+    mutated[0] ^= 1;
+    set_host_extrinsic(&mutated);
+    let negative_action = action(
+        service_key,
+        9,
+        1,
+        10,
+        jamscript_ir::action_selector("submitProbe"),
+        run_id.to_vec(),
+    )
+    .0
+    .encode()
+    .expect("negative probe action encoding");
+    let status = probe_failure_status(
+        &state,
+        &provider,
+        service_key,
+        code_hash,
+        &negative_action,
+        schema,
+        &[mutated],
+        2,
+        item_gas,
+    );
+    assert_ne!(
+        status & NATIVE_ERROR_BASE,
+        0,
+        "negative probe must be fatal"
+    );
+    println!("NATIVE_WORK_EXTRINSIC_NEGATIVE_STATUS=0x{status:08x}");
+    assert_eq!(
+        provider_value(
+            &provider,
+            service_key,
+            &application_key_v1(schema, &sender).unwrap()
+        ),
+        Some((external_data.len() as u32).to_le_bytes().to_vec())
+    );
+    println!("NATIVE_WORK_EXTRINSIC_NEGATIVE=PASS mutatedHashRejected=true stateUnchanged=true");
+
+    let empty_status = probe_failure_status(
+        &state,
+        &provider,
+        service_key,
+        code_hash,
+        &negative_action,
+        schema,
+        &[],
+        3,
+        item_gas,
+    );
+    let two_status = probe_failure_status(
+        &state,
+        &provider,
+        service_key,
+        code_hash,
+        &negative_action,
+        schema,
+        &[external_data.clone(), external_data.clone()],
+        4,
+        item_gas,
+    );
+    let oversized = vec![0u8; 128 * 1024 + 1];
+    let oversized_status = probe_failure_status(
+        &state,
+        &provider,
+        service_key,
+        code_hash,
+        &negative_action,
+        schema,
+        &[oversized],
+        5,
+        item_gas,
+    );
+    assert_ne!(empty_status & NATIVE_ERROR_BASE, 0);
+    assert_ne!(two_status & NATIVE_ERROR_BASE, 0);
+    assert_ne!(oversized_status & NATIVE_ERROR_BASE, 0);
+    println!(
+        "NATIVE_WORK_EXTRINSIC_CARDINALITY=PASS zero=0x{empty_status:08x} two=0x{two_status:08x} oversized=0x{oversized_status:08x}"
+    );
 }
 
 fn main() {
@@ -1350,6 +1630,7 @@ fn main() {
     let mut diagnostic_only = false;
     let mut counter_only = false;
     let mut dynamic_only = false;
+    let mut native_probe_only = false;
     let mut paths = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--diagnostic-item-gas" {
@@ -1366,6 +1647,8 @@ fn main() {
             counter_only = true;
         } else if arg == "--dynamic-only" {
             dynamic_only = true;
+        } else if arg == "--native-probe-only" {
+            native_probe_only = true;
         } else {
             paths.push(arg);
         }
@@ -1376,6 +1659,14 @@ fn main() {
             .expect("usage: jamscript-minijam-e2e --dynamic-only <dynamic-state-scriptc.blob>");
         let dynamic = fs::read(dynamic_path).expect("read dynamic ScriptC service blob");
         run_dynamic(&dynamic, item_gas);
+        return;
+    }
+    if native_probe_only {
+        let probe_path = paths
+            .first()
+            .expect("usage: jamscript-minijam-e2e --native-probe-only <probe.blob>");
+        let probe = fs::read(probe_path).expect("read native probe service blob");
+        run_native_probe(&probe, item_gas);
         return;
     }
     let counter_path = paths.first().expect(
