@@ -35,6 +35,19 @@ only source of canonical roots; the Provider supplies data and proofs for explic
 
 ## Operator workflow
 
+The compiler distribution is a JamScript responsibility. Release engineering
+produces versioned, checksum-addressed bundles with
+[`tools/release/toolchain/build-linux.sh`](../tools/release/toolchain/build-linux.sh)
+and publishes them as GitHub Release assets. Users install JamScript and run
+`jamscript build`; Docker, LLVM, Rust, Node, and a MiniJAM checkout are not
+user requirements. The distribution workflow is
+[`publish-toolchain.yml`](../.github/workflows/publish-toolchain.yml).
+
+The checked-in distribution record is intentionally marked unpublished until
+the first bundle has been built and its exact SHA-256 and byte size promoted
+into `toolchains/distribution-v1.toml`. This prevents a floating or guessed
+compiler identity from entering a canonical build.
+
 1. Build the Service with `jamscript build`.
 2. Verify the deployment bundle with `jamscript inspect <bundle>`.
 3. Provision or upgrade the Service through the network operator's deployment control plane.

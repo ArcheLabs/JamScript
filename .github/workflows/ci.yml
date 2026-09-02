@@ -5,6 +5,15 @@ on:
   pull_request:
 
 jobs:
+  toolchain-distribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+      - run: ./scripts/check-toolchain-distribution.sh
+
   stage1-boundary:
     runs-on: ubuntu-latest
     steps:

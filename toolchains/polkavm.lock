@@ -7,3 +7,4 @@ abi = "lp64e"
 target_source = "polkavm-linker"
 target_selection = "autodetect"
 clang_major = 20
+clang_version = "20.1.8"

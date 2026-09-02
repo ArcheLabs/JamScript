@@ -57,6 +57,15 @@ impl ScriptcCompiler {
         let node = std::env::var_os("SCRIPTC_NODE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("node"));
+        Self::from_paths(toolchain_root, node)
+    }
+
+    pub fn from_paths(
+        toolchain_root: impl Into<PathBuf>,
+        node: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let toolchain_root = toolchain_root.into();
+        let node = node.into();
         let version = command_output(&node, &["--version"], &toolchain_root)?;
         let pinned_node = read_trim(&toolchain_root.join("NODE_VERSION"))?;
         let actual_node = version.trim().trim_start_matches('v');

@@ -1,0 +1,21 @@
+format = 1
+toolchain_id = "scriptc-m2-v1"
+language = "0.2"
+backend = "scriptc-m2"
+node_version = "24.15.0"
+rust_toolchain = "nightly-2026-05-02"
+clang_version = "20.1.8"
+polkavm_linker = "0.30.0"
+minijam_revision = "18de55e175abb1cb40679be2e538644e2387655f"
+scriptc_revision = "d7b4480"
+
+# This is intentionally an explicit promotion record. Release engineering
+# replaces the bundle fields with the values emitted by publish-toolchain.yml;
+# the CLI rejects incomplete records instead of resolving "latest" or using a
+# host compiler.
+[platforms.linux-x86_64]
+url = "https://github.com/ArcheLabs/JamScript/releases/download/toolchain-scriptc-m2-v1/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 1
+archive = "tar.zst"
+published = false

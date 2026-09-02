@@ -1,0 +1,51 @@
+name: Publish JamScript Toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing or new GitHub Release tag for the promoted bundle
+        required: true
+        default: toolchain-scriptc-m2-v1
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src
+      - name: Install release tools
+        run: sudo apt-get update && sudo apt-get install -y clang-20 lld-20 zstd patchelf
+      - name: Checkout the pinned MiniJAM SDK
+        run: |
+          revision="$(sed -n 's/^revision = "\(.*\)"/\1/p' toolchains/minijam.lock)"
+          git clone https://github.com/ArcheLabs/minijam-client.git "$RUNNER_TEMP/minijam-client"
+          git -C "$RUNNER_TEMP/minijam-client" checkout --detach "$revision"
+          echo "JAMSCRIPT_MINIJAM_SDK=$RUNNER_TEMP/minijam-client" >> "$GITHUB_ENV"
+      - name: Build deterministic bundle
+        env:
+          JAMSCRIPT_CLANG: /usr/lib/llvm-20/bin/clang
+          JAMSCRIPT_LLVM_AR: /usr/lib/llvm-20/bin/llvm-ar
+          JAMSCRIPT_LLVM_LD: /usr/lib/llvm-20/bin/ld.lld
+        run: |
+          export SCRIPTC_NODE="$(command -v node)"
+          ./tools/release/toolchain/build-linux.sh "$RUNNER_TEMP/toolchain"
+          ./tools/release/toolchain/verify-bundle.sh "$RUNNER_TEMP/toolchain/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+      - name: Upload GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --title "JamScript Toolchain $RELEASE_TAG" --notes "Managed JamScript compiler distribution."
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/toolchain/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst" \
+            "$RUNNER_TEMP/toolchain/toolchain-manifest.json" --clobber

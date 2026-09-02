@@ -14,6 +14,11 @@ pub struct PolkaVmBuildConfig {
     pub diagnostic: bool,
     pub lock_path: PathBuf,
     pub rustflags: Option<String>,
+    /// Managed distributions pass these explicitly. `None` is retained only
+    /// for contributor-facing callers that use rustup.
+    pub cargo_path: Option<PathBuf>,
+    pub rustc_path: Option<PathBuf>,
+    pub cargo_home: Option<PathBuf>,
 }
 
 impl Default for PolkaVmBuildConfig {
@@ -24,6 +29,9 @@ impl Default for PolkaVmBuildConfig {
             diagnostic: false,
             lock_path: repo_root().join("toolchains/polkavm.lock"),
             rustflags: None,
+            cargo_path: None,
+            rustc_path: None,
+            cargo_home: None,
         }
     }
 }
@@ -134,9 +142,16 @@ impl PolkaVmBuilder {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("target-polkavm");
-        let mut cargo = Command::new("cargo");
+        let mut cargo = Command::new(
+            self.config
+                .cargo_path
+                .as_deref()
+                .unwrap_or_else(|| Path::new("cargo")),
+        );
+        if self.config.cargo_path.is_none() {
+            cargo.arg(format!("+{}", self.config.rust_toolchain));
+        }
         cargo
-            .arg(format!("+{}", self.config.rust_toolchain))
             .args([
                 "-Z",
                 "build-std=core,alloc",
@@ -156,6 +171,12 @@ impl PolkaVmBuilder {
                 "SERVICE_BUILD_POLKAVM_NATIVE_ARCHIVES",
                 encode_archives(&request.native_archives),
             );
+        if let Some(rustc) = &self.config.rustc_path {
+            cargo.env("RUSTC", rustc);
+        }
+        if let Some(cargo_home) = &self.config.cargo_home {
+            cargo.env("CARGO_HOME", cargo_home);
+        }
         if let Some(rustflags) = &self.config.rustflags {
             cargo.env("RUSTFLAGS", rustflags);
         }
@@ -183,7 +204,10 @@ impl PolkaVmBuilder {
             fs::write(request.output_dir.join("symbols.txt"), &diagnostics.symbols)?;
         }
 
-        let rustc_version = rustc_version(&self.config.rust_toolchain)?;
+        let rustc_version = match &self.config.rustc_path {
+            Some(rustc) => command_rustc_version(rustc)?,
+            None => rustc_version(&self.config.rust_toolchain)?,
+        };
         validate_resolved_guest_versions(&request.manifest_path, &lock)?;
         Ok(GuestBuildArtifacts {
             elf: output_elf,
@@ -330,6 +354,20 @@ fn rustc_version(toolchain: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn command_rustc_version(rustc: &Path) -> Result<String> {
+    let output = Command::new(rustc)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("reading rustc version from {}", rustc.display()))?;
+    if !output.status.success() {
+        bail!(
+            "rustc version query failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 fn run(command: &mut Command, description: &str) -> Result<()> {
     let output = command
         .stdout(Stdio::piped())
@@ -378,6 +416,8 @@ struct ToolchainLock {
     target_source: String,
     target_selection: String,
     clang_major: u32,
+    #[serde(default)]
+    clang_version: Option<String>,
 }
 
 impl ToolchainLock {
@@ -392,6 +432,7 @@ impl ToolchainLock {
             || lock.target_source != "polkavm-linker"
             || lock.target_selection != "autodetect"
             || lock.clang_major != 20
+            || lock.clang_version.as_deref() != Some("20.1.8")
         {
             bail!("unsupported PolkaVM toolchain lock {}", path.display());
         }
@@ -459,11 +500,11 @@ fn repo_root() -> PathBuf {
 
 fn default_toolchain() -> String {
     let path = repo_root().join("toolchains/polkavm.lock");
-    let contents = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
-    toml::from_str::<ToolchainLock>(&contents)
-        .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
-        .rust
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|contents| toml::from_str::<ToolchainLock>(&contents).ok())
+        .map(|lock| lock.rust)
+        .unwrap_or_else(|| "nightly-2026-05-02".into())
 }
 
 #[cfg(test)]
