@@ -40,8 +40,12 @@ produces versioned, checksum-addressed bundles with
 [`tools/release/toolchain/build-linux.sh`](../tools/release/toolchain/build-linux.sh)
 and publishes them as GitHub Release assets. Users install JamScript and run
 `jamscript build`; Docker, LLVM, Rust, Node, and a MiniJAM checkout are not
-user requirements. The distribution workflow is
-[`publish-toolchain.yml`](../.github/workflows/publish-toolchain.yml).
+user requirements. The candidate distribution workflow is
+[`build-toolchain-bundle.yml`](../.github/workflows/build-toolchain-bundle.yml).
+It produces and verifies two identical Linux x86_64 archives and uploads a
+short-lived Actions validation artifact. The separate
+[`publish-toolchain.yml`](../.github/workflows/publish-toolchain.yml) workflow
+is reserved for an explicit reviewed Release promotion.
 
 The checked-in distribution record is intentionally marked unpublished until
 the first bundle has been built and its exact SHA-256 and byte size promoted

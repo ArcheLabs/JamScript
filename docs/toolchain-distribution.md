@@ -59,5 +59,20 @@ The release flow is:
 5. Promote the exact archive URL, SHA-256, and byte size in the distribution
    manifest in a separate commit.
 
+The hosted production gate is
+[`build-toolchain-bundle.yml`](../.github/workflows/build-toolchain-bundle.yml).
+It runs on Ubuntu 24.04, checks the exact source SHA and x86_64 architecture,
+installs the locked ScriptC packages, builds and verifies two independent
+`tar.zst` archives, and compares their bytes before uploading the validation
+artifact `toolchain-linux-x86_64` for seven days. The artifact includes the
+archive, `SHA256SUMS`, `bundle-status.json`, `bundle-metadata.json`, and the
+internal toolchain manifest.
+
+The workflow's candidate consumer smoke test uses a temporary manifest only in
+an ephemeral source copy. It installs the archive through `ToolchainManager`,
+then runs `jamscript build --offline` from a fresh cache. The checked-in
+`published = false` record is never edited or promoted by Actions; an Actions
+artifact is not a public distribution URL.
+
 The native bundle scope starts with `linux-x86_64`. Windows, macOS, and
 Linux ARM bundles use the same manifest and cache model when published.

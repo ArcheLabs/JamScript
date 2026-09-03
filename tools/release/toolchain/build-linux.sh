@@ -73,18 +73,23 @@ EOF
 
 RUST_SYSROOT="$("${RUSTC_BIN}" --print sysroot)"
 copy_tree "${RUST_SYSROOT}/lib/rustlib" lib/rustlib
+while read -r runtime_library; do
+  copy_file "${runtime_library}" "lib/$(basename -- "${runtime_library}")"
+done < <(find "${RUST_SYSROOT}/lib" -maxdepth 1 -type f -name '*.so*' -print | sort)
 test -d "${RUST_SYSROOT}/share" && copy_tree "${RUST_SYSROOT}/share" share || true
 
-while read -r dependency; do
-  case "${dependency}" in
-    /usr/lib/llvm-*/*|/lib/*/libffi.so*|/usr/lib/*/libffi.so*)
-      copy_file "${dependency}" "lib/$(basename -- "${dependency}")"
-      ;;
-  esac
-done < <(ldd "${CLANG_BIN}" | awk '$3 ~ /^\// {print $3}' | sort -u)
+for binary in "${NODE_BIN}" "${CLANG_BIN}" "${LLVM_AR_BIN}" "${LLD_BIN}" "${RUSTC_BIN}" "${CARGO_BIN}"; do
+  while read -r dependency; do
+    case "${dependency}" in
+      /usr/lib/llvm-*/*|/lib/*/libffi.so*|/usr/lib/*/libffi.so*|*/libstdc++.so*|*/libgcc_s.so*)
+        copy_file "${dependency}" "lib/$(basename -- "${dependency}")"
+        ;;
+    esac
+  done < <(ldd "${binary}" | awk '$3 ~ /^\// {print $3}' | sort -u)
+done
 for binary in bin/node bin/clang bin/llvm-ar bin/ld.lld bin/rustc bin/cargo; do
   if command -v patchelf >/dev/null 2>&1; then
-    patchelf --set-rpath '\$ORIGIN/../lib' "${STAGE}/${binary}" || true
+    patchelf --set-rpath '$ORIGIN/../lib' "${STAGE}/${binary}"
   fi
 done
 
@@ -116,3 +121,10 @@ ARCHIVE="${OUT}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
 sha256sum "${ARCHIVE}"
 stat -c '%s' "${ARCHIVE}"
 cp -L "${STAGE}/manifest.json" "${OUT}/toolchain-manifest.json"
+python3 "${ROOT}/tools/release/toolchain/write-bundle-metadata.py" \
+  --output "${OUT}/bundle-metadata.json" \
+  --toolchain-id scriptc-m2-v1 --platform linux-x86_64 \
+  --archive "$(basename -- "${ARCHIVE}")" \
+  --source-revision "$(git -C "${ROOT}" rev-parse HEAD)"
+echo "BUNDLE_PATH=${ARCHIVE}"
+echo "BUNDLE_METADATA=${OUT}/bundle-metadata.json"
