@@ -155,9 +155,13 @@ mkdir -p "${STAGE}/targets/minijam/sdk"
 SDK_REVISION="$(sed -n 's/^revision = "\(.*\)"/\1/p' "${ROOT}/toolchains/minijam.lock")"
 git -C "${SDK_ROOT}" archive --format=tar "${SDK_REVISION}" | tar -xf - -C "${STAGE}/targets/minijam/sdk"
 CARGO_HOME="${STAGE}/cargo" CARGO_TARGET_DIR="${OUT}/converter-target" RUSTC="${RUSTC_BIN}" \
+  RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${STAGE}=/jamscript-stage" \
   "${CARGO_BIN}" build --offline --locked --release --manifest-path "${CONVERTER_MANIFEST}"
 copy_file "${OUT}/converter-target/release/minijam-polkavm-to-jam" \
   targets/minijam/sdk/service-toolchain/compiler/polkavm-to-jam/target/release/minijam-polkavm-to-jam
+
+rm -f -- "${STAGE}/cargo/.global-cache" "${STAGE}/cargo/.package-cache" \
+  "${STAGE}/cargo/.package-cache-mutate"
 
 python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
   --root "${STAGE}" --output "${STAGE}/manifest.json" \
