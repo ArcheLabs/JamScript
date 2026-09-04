@@ -22,7 +22,7 @@ export JAMSCRIPT_TOOLCHAIN_HOME="${INSTALL_HOME}"
 unset JAMSCRIPT_OFFLINE JAMSCRIPT_DEV_TOOLCHAIN JAMSCRIPT_MINIJAM_SDK
 "${SOURCE_COPY}/target/debug/jamscript" toolchain install
 export JAMSCRIPT_OFFLINE=1
-"${SOURCE_COPY}/target/debug/jamscript" build "${SOURCE_COPY}/examples/counter" \
+"${SOURCE_COPY}/target/debug/jamscript" build "${SOURCE_COPY}/examples/dynamic-state-scriptc" \
   --offline --output "${OUTPUT}"
 
 test -s "${OUTPUT}/build.json"

@@ -89,9 +89,10 @@ thiserror = "2.0.17"
 EOF
 
 mkdir -p "${STAGE}/cargo/vendor"
-(cd "${ROOT}" && "${CARGO_BIN}" vendor --locked "${STAGE}/cargo/vendor" >/dev/null)
+(cd "${ROOT}" && "${CARGO_BIN}" vendor --locked --versioned-dirs "${STAGE}/cargo/vendor" >/dev/null)
+(cd "${ROOT}" && "${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --sync crates/jamscript-runtime-core/Cargo.toml "${STAGE}/cargo/vendor" >/dev/null)
 CONVERTER_MANIFEST="${SDK_ROOT}/service-toolchain/compiler/polkavm-to-jam/Cargo.toml"
-"${CARGO_BIN}" vendor --locked --manifest-path "${CONVERTER_MANIFEST}" "${STAGE}/cargo/vendor" >/dev/null
+"${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --manifest-path "${CONVERTER_MANIFEST}" "${STAGE}/cargo/vendor" >/dev/null
 cat > "${STAGE}/cargo/config.toml" <<'EOF'
 [source.crates-io]
 replace-with = "vendored-sources"
