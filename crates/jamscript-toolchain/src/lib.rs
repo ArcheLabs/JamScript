@@ -29,7 +29,8 @@ pub struct DistributionManifest {
     pub rust_toolchain: String,
     pub clang_version: String,
     pub polkavm_linker: String,
-    pub minijam_revision: String,
+    pub jam_target_version: String,
+    pub jam_blob_encoder_version: String,
     #[serde(default)]
     pub scriptc_revision: String,
     pub platforms: BTreeMap<String, PlatformBundle>,
@@ -63,11 +64,10 @@ pub struct InstalledToolchain {
     pub runtime_scriptc: PathBuf,
     pub cargo_home: PathBuf,
     pub polkavm_lock: PathBuf,
-    pub minijam_sdk: PathBuf,
+    pub jam_target: PathBuf,
     pub toolchain_id: String,
     pub platform: String,
     pub bundle_sha256: String,
-    pub minijam_revision: String,
     pub rust_toolchain: String,
 }
 
@@ -92,7 +92,8 @@ struct InternalManifest {
     node_version: String,
     clang_version: String,
     rust_toolchain: String,
-    minijam_revision: String,
+    jam_target_version: String,
+    jam_blob_encoder_version: String,
     #[serde(default)]
     scriptc_revision: String,
     #[serde(default)]
@@ -322,11 +323,10 @@ impl ToolchainManager {
             runtime_scriptc: root.join("runtime-scriptc"),
             cargo_home: root.join("cargo"),
             polkavm_lock: root.join("toolchains/polkavm.lock"),
-            minijam_sdk: root.join("targets/minijam/sdk"),
+            jam_target: root.join("targets/jam/sdk"),
             toolchain_id: self.manifest.toolchain_id.clone(),
             platform: self.platform.clone(),
             bundle_sha256: bundle.sha256.clone(),
-            minijam_revision: self.manifest.minijam_revision.clone(),
             rust_toolchain: self.manifest.rust_toolchain.clone(),
         }
     }
@@ -343,7 +343,8 @@ impl ToolchainManager {
             || internal.node_version != self.manifest.node_version
             || internal.clang_version != self.manifest.clang_version
             || internal.rust_toolchain != self.manifest.rust_toolchain
-            || internal.minijam_revision != self.manifest.minijam_revision
+            || internal.jam_target_version != self.manifest.jam_target_version
+            || internal.jam_blob_encoder_version != self.manifest.jam_blob_encoder_version
             || (!self.manifest.scriptc_revision.is_empty()
                 && internal.scriptc_revision != self.manifest.scriptc_revision)
         {
@@ -375,7 +376,7 @@ impl ToolchainManager {
                 );
             }
         }
-        for required in [&installed.scriptc, &installed.minijam_sdk] {
+        for required in [&installed.scriptc, &installed.jam_target] {
             if !required.is_dir() {
                 bail!(
                     "managed toolchain directory is missing: {}",
@@ -505,11 +506,16 @@ fn validate_source_locks(manifest: &DistributionManifest, source_root: &Path) ->
             "TOOLCHAIN_MANIFEST_DRIFT=FAIL: Cargo.lock does not resolve the pinned PolkaVM linker"
         );
     }
-    let minijam = fs::read_to_string(source_root.join("toolchains/minijam.lock"))?;
-    if !minijam.contains(&format!("revision = \"{}\"", manifest.minijam_revision)) {
+    if !cargo_lock.contains(&format!(
+        "name = \"jam-program-blob-common\"\nversion = \"{}\"",
+        manifest.jam_blob_encoder_version
+    )) {
         bail!(
-            "TOOLCHAIN_MANIFEST_DRIFT=FAIL: MiniJAM revision differs from toolchains/minijam.lock"
+            "TOOLCHAIN_MANIFEST_DRIFT=FAIL: Cargo.lock does not resolve the pinned JAM blob encoder"
         );
+    }
+    if manifest.jam_target_version != "jam-v1" || manifest.jam_blob_encoder_version != "0.1.28" {
+        bail!("TOOLCHAIN_MANIFEST_DRIFT=FAIL: JAM target lock identity is unsupported");
     }
     Ok(())
 }

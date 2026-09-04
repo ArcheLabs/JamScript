@@ -5,7 +5,7 @@ use jamscript_codegen_rust::{
 };
 use jamscript_ir::abi_for_language;
 use jamscript_parser::parse_service_v02;
-use jamscript_target_minijam::{verify_deployment_bundle, MiniJamTarget, NativeModule};
+use jamscript_target_jam::{verify_deployment_bundle, JamTarget, NativeModule};
 use jamscript_toolchain::ToolchainManager;
 use serde::Deserialize;
 use service_runtime_core::ServiceKeyV1;
@@ -118,17 +118,12 @@ struct Package {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Target {
-    minijam: Option<MiniJamConfig>,
+    jam: Option<JamConfig>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MiniJamConfig {
-    sdk_root: Option<String>,
-    /// Legacy deployment/routing identifier. It is never embedded in
-    /// SignedActionV1 or generated Service identity.
-    #[allow(dead_code)]
-    service_id: Option<u32>,
-    /// Legacy manifest spelling for the network domain (genesis hash).
+struct JamConfig {
+    /// Optional deployment domain used by the runtime signing context.
     genesis_hash: Option<String>,
 }
 
@@ -245,8 +240,8 @@ fn doctor() -> Result<()> {
         check_marker(status.verified)
     );
     println!(
-        "\nMiniJAM SDK:\n{} {}",
-        manager.manifest().minijam_revision,
+        "\nJAM target:\n{} {}",
+        manager.manifest().jam_target_version,
         check_marker(status.verified)
     );
     Ok(())
@@ -423,17 +418,17 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         }
         Some(manager.resolve()?)
     };
-    let minijam = manifest
+    let jam = manifest
         .target
         .as_ref()
-        .and_then(|target| target.minijam.as_ref());
+        .and_then(|target| target.jam.as_ref());
     let (service_key, service_instance_id) = load_service_identity(path)?;
     let management_policy = resolve_management_policy(manifest.management.as_ref(), &service_key)?;
     let context = PortableServiceContext {
         service_key: service_key.into_bytes(),
         service_instance_id,
         management_policy,
-        genesis_hash: minijam
+        genesis_hash: jam
             .and_then(|target| target.genesis_hash.as_deref())
             .map(parse_hash)
             .transpose()?
@@ -460,28 +455,12 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         .with_context(|| format!("canonicalizing project root {}", path.display()))?;
     let native_modules = resolve_native_modules(&project_root, manifest.native.as_ref())?;
     let target = match managed_toolchain.as_ref() {
-        Some(toolchain) => MiniJamTarget::from_installed_toolchain(toolchain),
-        None => {
-            let sdk_root = minijam
-                .and_then(|target| target.sdk_root.as_deref())
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("JAMSCRIPT_MINIJAM_SDK").map(PathBuf::from))
-                .or_else(|| {
-                    [
-                        path.join("../../../minijam-client"),
-                        path.join("../../minijam-client"),
-                        std::env::current_dir().ok()?.join("../minijam-client"),
-                    ]
-                    .into_iter()
-                    .find(|candidate| candidate.join("service-toolchain/sdk").is_dir())
-                })
-                .ok_or_else(|| anyhow::anyhow!("MiniJAM SDK not found; set target.minijam.sdk_root or JAMSCRIPT_MINIJAM_SDK"))?;
-            MiniJamTarget::from_sdk_root(sdk_root)
-        }
+        Some(toolchain) => JamTarget::from_installed_toolchain(toolchain),
+        None => JamTarget::new(),
     };
     let metadata = target
         .build_scriptc_probe(&project_root, &ir, context, output, &native_modules)
-        .context("MiniJAM target build")?;
+        .context("JAM target build")?;
     fs::write(
         output.join("build.json"),
         serde_json::to_vec_pretty(&metadata)?,

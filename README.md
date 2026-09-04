@@ -10,7 +10,7 @@ state, queries, and clients.
 
 The supported path uses imports from the `jam` standard library, bounded
 primitive input schemas, ABI generation, and generated `no_std` Rust for the
-MiniJAM target. JamScript manages its compiler toolchain automatically: the
+canonical JAM target. JamScript manages its compiler toolchain automatically: the
 first canonical build installs the exact platform bundle and verifies its
 checksum. `build` emits `service.blob`,
 `service.polkavm`, `service.pvm`, and a portable Builder host artifact. The
@@ -48,9 +48,9 @@ To run the real cross-process MiniJAM path:
     ./scripts/minijam-network-e2e.sh
 
 For contributors building from this repository, use
-`JAMSCRIPT_DEV_TOOLCHAIN=1` with an explicit MiniJAM SDK checkout. Canonical
-user builds use the managed bundle and do not require host Node, LLVM, Rust,
-Docker, or a MiniJAM checkout. See
+`JAMSCRIPT_DEV_TOOLCHAIN=1` with the repository's target SDK. Canonical user
+builds use the managed bundle and do not require host Node, LLVM, Rust, Docker,
+or a MiniJAM checkout. See
 [`docs/toolchain-distribution.md`](docs/toolchain-distribution.md).
 
 Managed-state architecture details are in

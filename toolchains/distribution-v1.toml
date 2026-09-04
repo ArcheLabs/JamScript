@@ -8,7 +8,8 @@ clang_version = "20.1.8"
 llvm_distribution = "llvm-official-linux-x64"
 llvm_lock = "toolchains/llvm/linux-x86_64.lock"
 polkavm_linker = "0.30.0"
-minijam_revision = "18de55e175abb1cb40679be2e538644e2387655f"
+jam_target_version = "jam-v1"
+jam_blob_encoder_version = "0.1.28"
 scriptc_revision = "d7b4480"
 
 # This is intentionally an explicit promotion record. Release engineering

@@ -1,5 +1,5 @@
 [package]
-name = "jamscript-target-minijam"
+name = "jamscript-target-jam"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 blake2b_simd.workspace = true
+jam-program-blob-common.workspace = true
+polkavm-linker.workspace = true
 jamscript-codegen-rust = { path = "../jamscript-codegen-rust" }
 jamscript-backend-scriptc = { path = "../jamscript-backend-scriptc" }
 jamscript-runtime-scriptc = { path = "../jamscript-runtime-scriptc" }

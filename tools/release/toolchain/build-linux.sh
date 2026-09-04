@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
-SDK_ROOT="${JAMSCRIPT_MINIJAM_SDK:?set JAMSCRIPT_MINIJAM_SDK to the pinned MiniJAM checkout}"
 OUT="${1:-${ROOT}/dist/toolchain}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "${ROOT}" log -1 --format=%ct)}"
 NODE_BIN="${SCRIPTC_NODE:?set SCRIPTC_NODE to the exact Node binary}"
@@ -60,6 +59,7 @@ copy_file "${ROOT}/Cargo.lock" Cargo.lock
 copy_file "${ROOT}/toolchains/polkavm.lock" toolchains/polkavm.lock
 copy_tree "${ROOT}/toolchains/scriptc" scriptc
 copy_tree "${ROOT}/crates/jamscript-runtime-scriptc" runtime-scriptc
+copy_tree "${ROOT}/crates/jamscript-target-jam/sdk" targets/jam/sdk
 
 LLVM_RESOURCE_DIR="$(${CLANG_BIN} -print-resource-dir)"
 case "${LLVM_RESOURCE_DIR}" in
@@ -94,8 +94,6 @@ mkdir -p "${STAGE}/cargo/vendor"
 (cd "${ROOT}" && "${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --sync crates/jamscript-runtime-core/Cargo.toml "${STAGE}/cargo/vendor" >/dev/null)
 RUST_SYSROOT="$(${RUSTC_BIN} --print sysroot)"
 (cd "${RUST_SYSROOT}/lib/rustlib/src/rust" && "${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --manifest-path library/Cargo.toml "${STAGE}/cargo/vendor" >/dev/null)
-CONVERTER_MANIFEST="${SDK_ROOT}/service-toolchain/compiler/polkavm-to-jam/Cargo.toml"
-"${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --manifest-path "${CONVERTER_MANIFEST}" "${STAGE}/cargo/vendor" >/dev/null
 cat > "${STAGE}/cargo/config.toml" <<'EOF'
 [source.crates-io]
 replace-with = "vendored-sources"
@@ -152,16 +150,7 @@ fi
 
 test "$("${NODE_BIN}" --version | tr -d '\r\n' | sed 's/^v//')" = "$(tr -d '\r\n' < "${ROOT}/toolchains/scriptc/NODE_VERSION")"
 test "$("${CLANG_BIN}" --version | sed -n '1s/.*clang version \([0-9.]*\).*/\1/p')" = "${LLVM_VERSION}"
-test "$(git -C "${SDK_ROOT}" rev-parse HEAD)" = "$(sed -n 's/^revision = "\(.*\)"/\1/p' "${ROOT}/toolchains/minijam.lock")"
-
-mkdir -p "${STAGE}/targets/minijam/sdk"
-SDK_REVISION="$(sed -n 's/^revision = "\(.*\)"/\1/p' "${ROOT}/toolchains/minijam.lock")"
-git -C "${SDK_ROOT}" archive --format=tar "${SDK_REVISION}" | tar -xf - -C "${STAGE}/targets/minijam/sdk"
-CARGO_HOME="${STAGE}/cargo" CARGO_TARGET_DIR="${OUT}/converter-target" RUSTC="${RUSTC_BIN}" \
-  RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${STAGE}=/jamscript-stage" \
-  "${CARGO_BIN}" build --offline --locked --release --manifest-path "${CONVERTER_MANIFEST}"
-copy_file "${OUT}/converter-target/release/minijam-polkavm-to-jam" \
-  targets/minijam/sdk/service-toolchain/compiler/polkavm-to-jam/target/release/minijam-polkavm-to-jam
+test -d "${STAGE}/targets/jam/sdk"
 
 rm -f -- "${STAGE}/cargo/.global-cache" "${STAGE}/cargo/.package-cache" \
   "${STAGE}/cargo/.package-cache-mutate"
@@ -174,7 +163,8 @@ python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
   --llvm-distribution "${LLVM_DISTRIBUTION}" --llvm-archive-sha256 "${LLVM_ARCHIVE_SHA256}" \
   --llvm-clang-sha256 "${LLVM_CLANG_SHA256}" --llvm-ar-sha256 "${LLVM_AR_SHA256}" --llvm-lld-sha256 "${LLVM_LLD_SHA256}" \
   --rust-toolchain nightly-2026-05-02 \
-  --minijam-revision "$(sed -n 's/^revision = "\(.*\)"/\1/p' "${ROOT}/toolchains/minijam.lock")" \
+  --jam-target-version "$(sed -n 's/^jam_target_version = "\(.*\)"/\1/p' "${ROOT}/toolchains/distribution-v1.toml")" \
+  --jam-blob-encoder-version "$(sed -n 's/^jam_blob_encoder_version = "\(.*\)"/\1/p' "${ROOT}/toolchains/distribution-v1.toml")" \
   --scriptc-revision "$(sed -n 's/^commit=//p' "${ROOT}/toolchains/scriptc/REVISION")"
 
 find "${STAGE}" -type f -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +

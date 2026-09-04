@@ -13,7 +13,7 @@ for artifact in service.blob service.polkavm service.pvm service.abi.json build.
 done
 
 rg -q '"rust_toolchain": "nightly-2026-05-02"' "$output/build.json"
-rg -q '"minijam_sdk_revision"' "$output/build.json"
+rg -q '"jam_target_version": "jam-v1"' "$output/build.json"
 rg -q 'minijam_storage_write' "$output/generated_service.rs"
 rg -q 'verify_signed_action' "$output/generated_service.rs"
 

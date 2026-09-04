@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use jam_program_blob_common::ProgramBlob;
 use jamscript_backend_scriptc::{ScriptcArtifact, ScriptcBuildMetadata, ScriptcCompiler};
 use jamscript_codegen_rust::{
     generate_builder_application_rust, generate_no_std_rust_with_scriptc_context,
@@ -14,6 +15,7 @@ use service_runtime_core::{
     MANAGED_STATE_LAYOUT_VERSION, MANAGED_STATE_PROTOCOL_VERSION, RECOVERY_FORMAT_VERSION,
 };
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
@@ -48,7 +50,11 @@ pub struct BuildMetadata {
     #[serde(rename = "recoveryFormatVersion")]
     pub recovery_format_version: u8,
     pub abi_version: u32,
-    pub target_adapter_version: String,
+    pub jam_target_version: String,
+    #[serde(rename = "jamBlobEncoder")]
+    pub jam_blob_encoder: String,
+    #[serde(rename = "jamBlobEncoderVersion")]
+    pub jam_blob_encoder_version: String,
     pub pvm_toolchain: String,
     #[serde(rename = "rustToolchain")]
     pub rust_toolchain: String,
@@ -75,9 +81,6 @@ pub struct BuildMetadata {
     #[serde(rename = "minimumStackBytes")]
     pub minimum_stack_bytes: u64,
     pub clang_version: String,
-    pub minijam_sdk_revision: String,
-    #[serde(rename = "minijamConverterRevision")]
-    pub converter_revision: String,
     pub source_hash: String,
     pub abi_hash: String,
     pub code_hash: Option<String>,
@@ -172,18 +175,15 @@ pub fn verify_deployment_bundle(bundle: &Path) -> Result<BTreeMap<String, String
     Ok(manifest.files)
 }
 
-pub struct MiniJamTarget {
+pub struct JamTarget {
     pub sdk_root: PathBuf,
-    pub converter_manifest: PathBuf,
     pub toolchain: Option<InstalledToolchain>,
 }
 
-impl MiniJamTarget {
-    pub fn from_sdk_root(sdk_root: impl Into<PathBuf>) -> Self {
-        let sdk_root = sdk_root.into();
+impl JamTarget {
+    pub fn new() -> Self {
+        let sdk_root = workspace_root().join("crates/jamscript-target-jam/sdk");
         Self {
-            converter_manifest: sdk_root
-                .join("service-toolchain/compiler/polkavm-to-jam/Cargo.toml"),
             sdk_root,
             toolchain: None,
         }
@@ -191,12 +191,13 @@ impl MiniJamTarget {
 
     pub fn from_installed_toolchain(toolchain: &InstalledToolchain) -> Self {
         Self {
-            converter_manifest: toolchain
-                .minijam_sdk
-                .join("service-toolchain/compiler/polkavm-to-jam/Cargo.toml"),
-            sdk_root: toolchain.minijam_sdk.clone(),
+            sdk_root: toolchain.jam_target.clone(),
             toolchain: Some(toolchain.clone()),
         }
+    }
+
+    pub fn target_sdk_root(&self) -> &Path {
+        &self.sdk_root
     }
 
     pub fn build_scriptc_probe(
@@ -305,13 +306,13 @@ impl MiniJamTarget {
         fs::copy(&generated, guest_project.path().join("src/lib.rs"))?;
         fs::write(guest_project.path().join("build.rs"), build_script())?;
 
-        let work = tempdir().context("creating MiniJAM native build directory")?;
+        let work = tempdir().context("creating JAM target native build directory")?;
         let clang = pinned_clang(self.toolchain.as_ref())?;
         let ar = self
             .toolchain
             .as_ref()
             .map(|toolchain| toolchain.llvm_ar.as_path());
-        let mut archives = vec![compile_sdk_archive(
+        let mut archives = vec![compile_jam_archive(
             &self.sdk_root,
             &clang,
             ar,
@@ -374,49 +375,7 @@ impl MiniJamTarget {
 
         let blob = output_dir.join("service.blob");
         let polkavm = output_dir.join("service.polkavm");
-        let converter = self.sdk_root.join(
-            "service-toolchain/compiler/polkavm-to-jam/target/release/minijam-polkavm-to-jam",
-        );
-        if converter.is_file() {
-            let mut command = Command::new(converter);
-            command.args([
-                artifacts.elf.to_str().unwrap(),
-                blob.to_str().unwrap(),
-                polkavm.to_str().unwrap(),
-            ]);
-            run(
-                &mut command,
-                "converting the guest ELF to PolkaVM/JAM artifacts",
-            )?;
-        } else {
-            let mut command = Command::new(
-                self.toolchain
-                    .as_ref()
-                    .map(|toolchain| toolchain.cargo.as_path())
-                    .unwrap_or_else(|| Path::new("cargo")),
-            );
-            if let Some(toolchain) = &self.toolchain {
-                command.env("CARGO_HOME", &toolchain.cargo_home);
-                command.env("RUSTC", &toolchain.rustc);
-            }
-            command.args([
-                "run",
-                "--quiet",
-                "--locked",
-                "--release",
-                "--manifest-path",
-                self.converter_manifest.to_str().unwrap(),
-                "--offline",
-                "--",
-                artifacts.elf.to_str().unwrap(),
-                blob.to_str().unwrap(),
-                polkavm.to_str().unwrap(),
-            ]);
-            run(
-                &mut command,
-                "building and running the pinned PolkaVM converter",
-            )?;
-        }
+        link_elf_to_jam(&artifacts.elf, &blob, &polkavm)?;
         fs::copy(&polkavm, output_dir.join("service.pvm"))?;
         let mut checksum_files = vec![
             "service.blob",
@@ -451,10 +410,6 @@ impl MiniJamTarget {
             })?,
         )?;
         let clang_version = command_version(&clang)?;
-        let sdk_revision = match self.toolchain.as_ref() {
-            Some(toolchain) => toolchain.minijam_revision.clone(),
-            None => git_revision(&self.sdk_root)?,
-        };
         let native_metadata = native_metadata(project_root, native_modules)?;
         Ok(build_metadata(
             context,
@@ -462,7 +417,6 @@ impl MiniJamTarget {
             abi_hash,
             hash_file(&blob)?,
             clang_version,
-            sdk_revision.clone(),
             native_metadata,
             artifacts,
             Some(scriptc.metadata.clone()),
@@ -472,6 +426,40 @@ impl MiniJamTarget {
     }
 }
 
+impl Default for JamTarget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Convert a RISC-V guest ELF into a PolkaVM debug artifact and canonical JAM
+/// ProgramBlob using the locked JamV1 conversion semantics.
+pub fn elf_to_jam_blob(elf: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut config = polkavm_linker::Config::default();
+    config.set_strip(true);
+    config.set_dispatch_table(vec![
+        b"minijam_refine".to_vec(),
+        b"minijam_accumulate".to_vec(),
+    ]);
+    let linked =
+        polkavm_linker::program_from_elf(config, polkavm_linker::TargetInstructionSet::JamV1, elf)
+            .map_err(|error| anyhow::anyhow!("link ELF for JAM target: {error}"))?;
+    let parts = polkavm_linker::ProgramParts::from_bytes(linked.clone().into())
+        .map_err(|error| anyhow::anyhow!("decode linked PolkaVM program: {error}"))?;
+    let blob = ProgramBlob::from_pvm(&parts, Cow::Borrowed(&[]))
+        .to_vec()
+        .map_err(|error| anyhow::anyhow!("materialize JAM ProgramBlob: {error}"))?;
+    Ok((linked, blob))
+}
+
+pub fn link_elf_to_jam(elf: &Path, blob: &Path, polkavm: &Path) -> Result<()> {
+    let input = fs::read(elf).with_context(|| format!("reading {}", elf.display()))?;
+    let (linked, encoded_blob) = elf_to_jam_blob(&input)?;
+    fs::write(polkavm, linked).with_context(|| format!("writing {}", polkavm.display()))?;
+    fs::write(blob, encoded_blob).with_context(|| format!("writing {}", blob.display()))?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_metadata(
     context: PortableServiceContext,
@@ -479,7 +467,6 @@ fn build_metadata(
     abi_hash: String,
     code_hash: String,
     clang_version: String,
-    sdk_revision: String,
     native_modules: Vec<NativeModuleMetadata>,
     artifacts: GuestBuildArtifacts,
     scriptc: Option<ScriptcBuildMetadata>,
@@ -540,7 +527,9 @@ fn build_metadata(
         signed_action_version: 1,
         recovery_format_version: RECOVERY_FORMAT_VERSION,
         abi_version: 1,
-        target_adapter_version: "minijam-0.2".into(),
+        jam_target_version: "jam-v1".into(),
+        jam_blob_encoder: "jam-program-blob-common".into(),
+        jam_blob_encoder_version: "0.1.28".into(),
         pvm_toolchain: format!(
             "official polkavm-linker {} target + rust-lld",
             toolchain.polkavm_linker_version
@@ -558,8 +547,6 @@ fn build_metadata(
         target_environment: toolchain.target_environment,
         minimum_stack_bytes: toolchain.minimum_stack_bytes,
         clang_version,
-        minijam_sdk_revision: sdk_revision.clone(),
-        converter_revision: sdk_revision,
         source_hash,
         abi_hash,
         code_hash: Some(code_hash),
@@ -663,16 +650,16 @@ fn pinned_clang(toolchain: Option<&InstalledToolchain>) -> Result<PathBuf> {
     Ok(clang)
 }
 
-fn compile_sdk_archive(
+fn compile_jam_archive(
     sdk_root: &Path,
     clang: &Path,
     ar: Option<&Path>,
     work: &Path,
 ) -> Result<NativeArchive> {
-    let include = sdk_root.join("service-toolchain/sdk/include");
-    let source_root = sdk_root.join("service-toolchain/sdk/src");
+    let include = sdk_root.join("include");
+    let source_root = sdk_root.join("src");
     let sources = ["host", "minijam", "crypto"].map(|unit| source_root.join(format!("{unit}.c")));
-    compile_archive("minijam_guest", &sources, &[include], clang, ar, work)
+    compile_archive("jam_target_guest", &sources, &[include], clang, ar, work)
 }
 
 fn compile_native_archive(
@@ -931,17 +918,6 @@ fn hash_file(path: &Path) -> Result<String> {
             .map(|b| format!("{b:02x}"))
             .collect::<String>()
     ))
-}
-
-fn git_revision(path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["-C", path.to_str().unwrap(), "rev-parse", "HEAD"])
-        .output()
-        .with_context(|| format!("reading git revision for {}", path.display()))?;
-    if !output.status.success() {
-        bail!("{} is not a git checkout", path.display());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(test)]

@@ -17,7 +17,8 @@ parser.add_argument('--llvm-clang-sha256', required=True)
 parser.add_argument('--llvm-ar-sha256', required=True)
 parser.add_argument('--llvm-lld-sha256', required=True)
 parser.add_argument('--rust-toolchain', required=True)
-parser.add_argument('--minijam-revision', required=True)
+parser.add_argument('--jam-target-version', required=True)
+parser.add_argument('--jam-blob-encoder-version', required=True)
 parser.add_argument('--scriptc-revision', required=True)
 args = parser.parse_args()
 
@@ -51,7 +52,9 @@ manifest = {
         'ldLldSha256': args.llvm_lld_sha256,
     },
     'rustToolchain': args.rust_toolchain,
-    'minijamRevision': args.minijam_revision,
+    'jamTargetVersion': args.jam_target_version,
+    'jamBlobEncoder': 'jam-program-blob-common',
+    'jamBlobEncoderVersion': args.jam_blob_encoder_version,
     'scriptcRevision': args.scriptc_revision,
     'files': files,
 }

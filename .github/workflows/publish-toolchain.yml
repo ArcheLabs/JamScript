@@ -24,18 +24,15 @@ jobs:
           toolchain: nightly-2026-05-02
           components: rust-src
       - name: Install release tools
-        run: sudo apt-get update && sudo apt-get install -y clang-20 lld-20 zstd patchelf
-      - name: Checkout the pinned MiniJAM SDK
+        run: sudo apt-get update && sudo apt-get install -y zstd patchelf jq curl xz-utils
+      - name: Bootstrap exact LLVM distribution
         run: |
-          revision="$(sed -n 's/^revision = "\(.*\)"/\1/p' toolchains/minijam.lock)"
-          git clone https://github.com/ArcheLabs/minijam-client.git "$RUNNER_TEMP/minijam-client"
-          git -C "$RUNNER_TEMP/minijam-client" checkout --detach "$revision"
-          echo "JAMSCRIPT_MINIJAM_SDK=$RUNNER_TEMP/minijam-client" >> "$GITHUB_ENV"
+          llvm_out="$RUNNER_TEMP/jamscript-llvm"
+          ./tools/release/toolchain/bootstrap-llvm-linux.sh "$llvm_out"
+          cat "$llvm_out/llvm.env" >> "$GITHUB_ENV"
       - name: Build deterministic bundle
         env:
-          JAMSCRIPT_CLANG: /usr/lib/llvm-20/bin/clang
-          JAMSCRIPT_LLVM_AR: /usr/lib/llvm-20/bin/llvm-ar
-          JAMSCRIPT_LLVM_LD: /usr/lib/llvm-20/bin/ld.lld
+          JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING: "1"
         run: |
           export SCRIPTC_NODE="$(command -v node)"
           ./tools/release/toolchain/build-linux.sh "$RUNNER_TEMP/toolchain"

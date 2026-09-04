@@ -1856,6 +1856,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jam-program-blob-common"
+version = "0.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96f007b097811de6c3fbd7d48773afc627409a13dc445e133ff8973f0ce30f6e"
+dependencies = [
+ "jam-codec",
+ "polkavm",
+]
+
+[[package]]
 name = "jamscript-backend-scriptc"
 version = "0.1.0"
 dependencies = [
@@ -1877,7 +1887,7 @@ dependencies = [
  "jamscript-codegen-rust",
  "jamscript-ir",
  "jamscript-parser",
- "jamscript-target-minijam",
+ "jamscript-target-jam",
  "jamscript-toolchain",
  "serde",
  "serde_json",
@@ -1968,16 +1978,18 @@ name = "jamscript-runtime-scriptc"
 version = "0.1.0"
 
 [[package]]
-name = "jamscript-target-minijam"
+name = "jamscript-target-jam"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake2b_simd",
+ "jam-program-blob-common",
  "jamscript-backend-scriptc",
  "jamscript-codegen-rust",
  "jamscript-ir",
  "jamscript-runtime-scriptc",
  "jamscript-toolchain",
+ "polkavm-linker",
  "serde",
  "serde_json",
  "service-build-polkavm",
@@ -2541,12 +2553,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "polkavm"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4323d016144b2852da47cee55ca5fc33dfe7517be1f52395759f247ecc5695f6"
+dependencies = [
+ "libc",
+ "log",
+ "picosimd",
+ "polkavm-assembler",
+ "polkavm-common",
+ "polkavm-linux-raw",
+]
+
+[[package]]
+name = "polkavm-assembler"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3a873fa7ace058d6507debf5fccb1d06bd3279f5b35dbaf70dc7fe94a6c415c"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "polkavm-common"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed1b408db93d4f49f5c651a7844682b9d7a561827b4dc6202c10356076c055c9"
 dependencies = [
+ "log",
  "picosimd",
+ "polkavm-assembler",
 ]
 
 [[package]]
@@ -2595,6 +2632,12 @@ dependencies = [
  "regalloc2",
  "rustc-demangle",
 ]
+
+[[package]]
+name = "polkavm-linux-raw"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7ba74991a1f380de68dd09c4dac2d492b92ce9139aae29a1de907990691ce52"
 
 [[package]]
 name = "portable-atomic"

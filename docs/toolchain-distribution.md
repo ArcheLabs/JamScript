@@ -10,7 +10,7 @@ JamScript CLI + source + target
 
 The distribution owns Node, LLVM/Clang, `llvm-ar`, `ld.lld`, Rust, `rust-src`,
 ScriptC's prepared npm tree, the compiler/runtime source crates, Cargo's
-vendored dependencies, and the pinned MiniJAM target SDK. It is described by
+vendored dependencies, and the JamScript-owned JAM target SDK. It is described by
 [`toolchains/distribution-v1.toml`](../toolchains/distribution-v1.toml) and
 the Linux LLVM closure by
 [`toolchains/llvm/linux-x86_64.lock`](../toolchains/llvm/linux-x86_64.lock).
@@ -57,7 +57,7 @@ allowed only around release engineering and cross-distro verification.
 
 The release flow is:
 
-1. Check out the exact JamScript and MiniJAM lock revisions.
+1. Check out the exact JamScript revision.
 2. Bootstrap and verify the exact LLVM distribution with
    `tools/release/toolchain/bootstrap-llvm-linux.sh`.
 3. Build the bundle with `tools/release/toolchain/build-linux.sh`.
@@ -80,6 +80,9 @@ an ephemeral source copy. It installs the archive through `ToolchainManager`,
 then runs `jamscript build --offline` from a fresh cache. The checked-in
 `published = false` record is never edited or promoted by Actions; an Actions
 artifact is not a public distribution URL.
+
+The bundle contains only the JamScript-owned JAM target SDK under
+`targets/jam/sdk`; MiniJAM, Jambda, and deployment services are not bundled.
 
 The native bundle scope starts with `linux-x86_64`. Windows, macOS, and
 Linux ARM bundles use the same manifest and cache model when published.

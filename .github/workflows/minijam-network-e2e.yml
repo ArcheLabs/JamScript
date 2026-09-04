@@ -8,7 +8,7 @@ on:
   pull_request:
     paths:
       - "crates/jamscript-codegen-rust/**"
-      - "crates/jamscript-target-minijam/**"
+      - "crates/jamscript-target-jam/**"
       - "crates/service-runtime-*/**"
       - "packages/client/**"
       - "scripts/minijam-network-e2e.sh"

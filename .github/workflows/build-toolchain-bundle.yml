@@ -77,21 +77,6 @@ jobs:
           echo "NODE_VERSION=${node_version}"
           echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "${GITHUB_ENV}"
 
-      - name: Checkout pinned MiniJAM SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-          repository="$(sed -n 's/^repository = "\(.*\)"/\1/p' toolchains/minijam.lock)"
-          revision="$(sed -n 's/^revision = "\(.*\)"/\1/p' toolchains/minijam.lock)"
-          sdk_root="${RUNNER_TEMP}/minijam-client"
-          git init "${sdk_root}"
-          git -C "${sdk_root}" remote add origin "${repository}"
-          git -C "${sdk_root}" fetch --depth=1 origin "${revision}"
-          git -C "${sdk_root}" checkout --detach FETCH_HEAD
-          test "$(git -C "${sdk_root}" rev-parse HEAD)" = "${revision}"
-          echo "JAMSCRIPT_MINIJAM_SDK=${sdk_root}" >> "${GITHUB_ENV}"
-          echo "MINIJAM_REVISION=${revision}"
-
       - name: Install locked ScriptC packages
         working-directory: toolchains/scriptc
         shell: bash

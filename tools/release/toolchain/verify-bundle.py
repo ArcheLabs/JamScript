@@ -63,7 +63,8 @@ distribution = {
     "node_version": toml_string("node_version"),
     "rust_toolchain": toml_string("rust_toolchain"),
     "clang_version": toml_string("clang_version"),
-    "minijam_revision": toml_string("minijam_revision"),
+    "jam_target_version": toml_string("jam_target_version"),
+    "jam_blob_encoder_version": toml_string("jam_blob_encoder_version"),
     "scriptc_revision": toml_string("scriptc_revision"),
 }
 manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -77,7 +78,9 @@ checks = {
     "nodeVersion": distribution["node_version"],
     "clangVersion": distribution["clang_version"],
     "rustToolchain": distribution["rust_toolchain"],
-    "minijamRevision": distribution["minijam_revision"],
+    "jamTargetVersion": distribution["jam_target_version"],
+    "jamBlobEncoder": "jam-program-blob-common",
+    "jamBlobEncoderVersion": distribution["jam_blob_encoder_version"],
     "scriptcRevision": distribution["scriptc_revision"],
 }
 for key, value in checks.items():
@@ -129,13 +132,12 @@ required_files = [
     "bin/cargo",
     "Cargo.lock",
     "toolchains/polkavm.lock",
-    "targets/minijam/sdk/service-toolchain/compiler/polkavm-to-jam/target/release/minijam-polkavm-to-jam",
 ]
 required_directories = [
     "scriptc",
     "runtime",
     "runtime-scriptc",
-    "targets/minijam/sdk",
+    "targets/jam/sdk",
     "cargo/vendor",
 ]
 for name in required_files:
@@ -171,15 +173,11 @@ if json.loads((root / "scriptc/node_modules/@scriptc/compiler/package.json").rea
 if json.loads((root / "scriptc/node_modules/typescript/package.json").read_text())["version"] != "7.0.2":
     raise SystemExit("TypeScript package identity mismatch")
 
-minijam_lock = read_text(source_root / "toolchains/minijam.lock")
-if f"revision = \"{manifest['minijamRevision']}\"" not in minijam_lock:
-    raise SystemExit("MiniJAM lock identity mismatch")
-
 print("TOOLCHAIN_BUNDLE_STRUCTURE=PASS")
 print("TOOLCHAIN_INTERNAL_MANIFEST=PASS")
 print("TOOLCHAIN_NODE=PASS")
 print("TOOLCHAIN_LLVM=PASS")
 print("TOOLCHAIN_RUST=PASS")
 print("TOOLCHAIN_SCRIPTC=PASS")
-print("TOOLCHAIN_MINIJAM=PASS")
+print("TOOLCHAIN_JAM_TARGET=PASS")
 print("TOOLCHAIN_FORBIDDEN_PATHS=PASS")

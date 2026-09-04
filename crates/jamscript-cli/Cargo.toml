@@ -10,7 +10,7 @@ clap.workspace = true
 jamscript-codegen-rust = { path = "../jamscript-codegen-rust" }
 jamscript-ir = { path = "../jamscript-ir" }
 jamscript-parser = { path = "../jamscript-parser" }
-jamscript-target-minijam = { path = "../jamscript-target-minijam" }
+jamscript-target-jam = { path = "../jamscript-target-jam" }
 jamscript-toolchain = { path = "../jamscript-toolchain" }
 serde.workspace = true
 serde_json.workspace = true
