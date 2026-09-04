@@ -14,6 +14,11 @@ vendored dependencies, and the pinned MiniJAM target SDK. It is described by
 [`toolchains/distribution-v1.toml`](../toolchains/distribution-v1.toml) and
 the Linux LLVM closure by
 [`toolchains/llvm/linux-x86_64.lock`](../toolchains/llvm/linux-x86_64.lock).
+The Linux release path bootstraps the immutable LLVM 20.1.8 official
+`LLVM-20.1.8-Linux-X64.tar.xz` archive into `$RUNNER_TEMP`; it does not use
+Ubuntu's `clang-20` package as the canonical compiler. The archive SHA-256 and
+the `clang`, `llvm-ar`, and `ld.lld` SHA-256 values are checked before and after
+extraction, and `ldd` must report a complete LLVM runtime closure.
 
 ## User commands
 
@@ -53,10 +58,12 @@ allowed only around release engineering and cross-distro verification.
 The release flow is:
 
 1. Check out the exact JamScript and MiniJAM lock revisions.
-2. Build the bundle with `tools/release/toolchain/build-linux.sh`.
-3. Run `tools/release/toolchain/verify-bundle.sh`.
-4. Publish the archive and internal manifest to a GitHub Release.
-5. Promote the exact archive URL, SHA-256, and byte size in the distribution
+2. Bootstrap and verify the exact LLVM distribution with
+   `tools/release/toolchain/bootstrap-llvm-linux.sh`.
+3. Build the bundle with `tools/release/toolchain/build-linux.sh`.
+4. Run `tools/release/toolchain/verify-bundle.sh`.
+5. Publish the archive and internal manifest to a GitHub Release.
+6. Promote the exact archive URL, SHA-256, and byte size in the distribution
    manifest in a separate commit.
 
 The hosted production gate is

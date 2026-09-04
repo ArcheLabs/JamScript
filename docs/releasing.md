@@ -52,6 +52,14 @@ the first bundle has been built and its exact SHA-256 and byte size promoted
 into `toolchains/distribution-v1.toml`. This prevents a floating or guessed
 compiler identity from entering a canonical build.
 
+The hosted bootstrap addresses the historical Ubuntu runner failure recorded
+as Actions run `33781367304`, job `100735570690`: the first bundle build stopped
+because the runner supplied LLVM/Clang `20.1.2` while the release contract
+required `20.1.8`. The canonical fix is the JamScript-owned official LLVM
+20.1.8 archive lock, verified before extraction and injected by absolute tool
+paths. The historical failure remains part of the release record and is not
+rewritten as a successful run.
+
 1. Build the Service with `jamscript build`.
 2. Verify the deployment bundle with `jamscript inspect <bundle>`.
 3. Provision or upgrade the Service through the network operator's deployment control plane.

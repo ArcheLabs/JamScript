@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+python3 tools/release/toolchain/test-llvm-lock.py
+
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${ROOT}"
 cargo test --locked -p jamscript-toolchain

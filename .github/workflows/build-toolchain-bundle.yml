@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-linux-x86_64-toolchain:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       TZ: UTC
       LANG: C
@@ -55,10 +55,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang-20 lld-20 zstd patchelf jq
+          sudo apt-get install -y zstd patchelf jq curl xz-utils
           node --version
-          clang-20 --version | head -1
-          ld.lld-20 --version | head -1
           zstd --version | head -1
 
       - name: Install exact Rust release
@@ -116,7 +114,24 @@ jobs:
             exit 1
           fi
           ./scripts/check-toolchain-distribution.sh
+          python3 ./tools/release/toolchain/test-llvm-lock.py
           echo "TOOLCHAIN_TESTS=PASS"
+
+      - name: Bootstrap exact LLVM distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          llvm_out="${RUNNER_TEMP}/jamscript-llvm"
+          ./tools/release/toolchain/bootstrap-llvm-linux.sh "${llvm_out}"
+          while IFS= read -r line; do
+            echo "${line}" >> "${GITHUB_ENV}"
+          done < "${llvm_out}/llvm.env"
+
+      - name: Verify exact LLVM identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/toolchain/verify-llvm-linux.sh "${LLVM_ROOT}"
 
       - name: Record hosted runner disk before production
         shell: bash
@@ -124,10 +139,6 @@ jobs:
 
       - name: Build bundle A
         shell: bash
-        env:
-          JAMSCRIPT_CLANG: /usr/lib/llvm-20/bin/clang
-          JAMSCRIPT_LLVM_AR: /usr/lib/llvm-20/bin/llvm-ar
-          JAMSCRIPT_LLVM_LD: /usr/lib/llvm-20/bin/ld.lld
         run: |
           set -euo pipefail
           out="${RUNNER_TEMP}/toolchain-build-a"
@@ -142,6 +153,8 @@ jobs:
           test -f "${out}/${bundle}"
           test "$(jq -er '.sourceRevision' "${out}/bundle-metadata.json")" = "${JAMSCRIPT_SOURCE_SHA}"
           echo "BUNDLE_A=${out}/${bundle}" >> "${GITHUB_ENV}"
+          echo "BUNDLE_A_SHA256=$(sha256sum "${out}/${bundle}" | awk '{print $1}')" >> "${GITHUB_ENV}"
+          echo "BUNDLE_A_SIZE=$(stat -c '%s' "${out}/${bundle}")" >> "${GITHUB_ENV}"
           echo "BUNDLE_METADATA_A=${out}/bundle-metadata.json" >> "${GITHUB_ENV}"
           echo "BUNDLE_BUILD_A=PASS"
 
@@ -159,10 +172,6 @@ jobs:
 
       - name: Build bundle B independently
         shell: bash
-        env:
-          JAMSCRIPT_CLANG: /usr/lib/llvm-20/bin/clang
-          JAMSCRIPT_LLVM_AR: /usr/lib/llvm-20/bin/llvm-ar
-          JAMSCRIPT_LLVM_LD: /usr/lib/llvm-20/bin/ld.lld
         run: |
           set -euo pipefail
           out="${RUNNER_TEMP}/toolchain-build-b"
@@ -177,6 +186,8 @@ jobs:
           test -f "${out}/${bundle}"
           test "$(jq -er '.sourceRevision' "${out}/bundle-metadata.json")" = "${JAMSCRIPT_SOURCE_SHA}"
           echo "BUNDLE_B=${out}/${bundle}" >> "${GITHUB_ENV}"
+          echo "BUNDLE_B_SHA256=$(sha256sum "${out}/${bundle}" | awk '{print $1}')" >> "${GITHUB_ENV}"
+          echo "BUNDLE_B_SIZE=$(stat -c '%s' "${out}/${bundle}")" >> "${GITHUB_ENV}"
           echo "BUNDLE_METADATA_B=${out}/bundle-metadata.json" >> "${GITHUB_ENV}"
           echo "BUNDLE_BUILD_B=PASS"
 
@@ -261,11 +272,18 @@ jobs:
             echo "| Field | Value |"
             echo "| --- | --- |"
             echo "| Source SHA | ${JAMSCRIPT_SOURCE_SHA} |"
+            echo "| Hosted run/job | ${GITHUB_RUN_ID} / ${GITHUB_JOB} |"
             echo "| Toolchain ID | ${TOOLCHAIN_ID} |"
             echo "| Platform | linux-x86_64 |"
             echo "| Bundle | ${BUNDLE_FILE} |"
             echo "| Size | ${BUNDLE_SIZE} bytes |"
             echo "| SHA256 | ${BUNDLE_SHA256} |"
+            echo "| LLVM distribution | ${LLVM_DISTRIBUTION} |"
+            echo "| LLVM version | ${LLVM_VERSION} |"
+            echo "| LLVM archive SHA256 | ${LLVM_ARCHIVE_SHA256} |"
+            echo "| Host apt LLVM | NOT USED |"
+            echo "| Bundle A SHA256 / size | ${BUNDLE_A_SHA256} / ${BUNDLE_A_SIZE} bytes |"
+            echo "| Bundle B SHA256 / size | ${BUNDLE_B_SHA256} / ${BUNDLE_B_SIZE} bytes |"
             echo "| Build A | PASS |"
             echo "| Verify A | PASS |"
             echo "| Build B | PASS |"

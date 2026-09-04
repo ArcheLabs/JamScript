@@ -11,6 +11,11 @@ parser.add_argument('--platform', required=True)
 parser.add_argument('--toolchain-id', required=True)
 parser.add_argument('--node-version', required=True)
 parser.add_argument('--clang-version', required=True)
+parser.add_argument('--llvm-distribution', required=True)
+parser.add_argument('--llvm-archive-sha256', required=True)
+parser.add_argument('--llvm-clang-sha256', required=True)
+parser.add_argument('--llvm-ar-sha256', required=True)
+parser.add_argument('--llvm-lld-sha256', required=True)
 parser.add_argument('--rust-toolchain', required=True)
 parser.add_argument('--minijam-revision', required=True)
 parser.add_argument('--scriptc-revision', required=True)
@@ -37,6 +42,14 @@ manifest = {
     'platform': args.platform,
     'nodeVersion': args.node_version,
     'clangVersion': args.clang_version,
+    'llvm': {
+        'distribution': args.llvm_distribution,
+        'version': args.clang_version,
+        'archiveSha256': args.llvm_archive_sha256,
+        'clangSha256': args.llvm_clang_sha256,
+        'llvmArSha256': args.llvm_ar_sha256,
+        'ldLldSha256': args.llvm_lld_sha256,
+    },
     'rustToolchain': args.rust_toolchain,
     'minijamRevision': args.minijam_revision,
     'scriptcRevision': args.scriptc_revision,

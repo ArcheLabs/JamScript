@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -38,6 +39,11 @@ root = args.root.resolve()
 source_root = args.source_root.resolve()
 
 distribution_text = (source_root / "toolchains/distribution-v1.toml").read_text(encoding="utf-8")
+llvm_lock_module_path = source_root / "tools/release/toolchain/llvm-lock.py"
+llvm_lock_spec = importlib.util.spec_from_file_location("llvm_lock", llvm_lock_module_path)
+llvm_lock = importlib.util.module_from_spec(llvm_lock_spec)
+llvm_lock_spec.loader.exec_module(llvm_lock)
+llvm_lock_values = llvm_lock.parse_lock(source_root / "toolchains/llvm/linux-x86_64.lock")
 
 
 def toml_string(name):
@@ -77,6 +83,18 @@ checks = {
 for key, value in checks.items():
     if manifest.get(key) != value:
         raise SystemExit(f"internal manifest identity mismatch: {key}")
+
+manifest_llvm = manifest.get("llvm")
+expected_llvm = {
+    "distribution": llvm_lock_values["distribution"],
+    "version": llvm_lock_values["llvm_version"],
+    "archiveSha256": llvm_lock_values["archive_sha256"],
+    "clangSha256": llvm_lock_values["clang_sha256"],
+    "llvmArSha256": llvm_lock_values["llvm_ar_sha256"],
+    "ldLldSha256": llvm_lock_values["ld_lld_sha256"],
+}
+if manifest_llvm != expected_llvm:
+    raise SystemExit("internal manifest LLVM provenance mismatch")
 
 files = manifest.get("files")
 if not isinstance(files, dict) or not files:
@@ -126,6 +144,10 @@ for name in required_files:
 for name in required_directories:
     if not (root / name).is_dir():
         raise SystemExit(f"required bundle directory is missing: {name}")
+
+for name, key in (("bin/clang", "clang_sha256"), ("bin/llvm-ar", "llvm_ar_sha256"), ("bin/ld.lld", "ld_lld_sha256")):
+    if sha256(root / name) != llvm_lock_values[key]:
+        raise SystemExit(f"LLVM binary lock hash mismatch: {name}")
 
 node_version = run_version(root / "bin/node")
 if node_version.startswith("v"):

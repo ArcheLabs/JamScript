@@ -1,11 +1,13 @@
-version = 1
+format = 1
 platform = "linux-x86_64"
-clang_version = "20.1.8"
-clang_sha256 = "18eb5e4c6fc85f8d70499fdaa1401741e39414b47066efa12b770072c6a4ec59"
-llvm_ar_sha256 = "0a7b4890f68bfda4df56addfb2419a28691dbc96079bb2f1d90528c8fd605b10"
-ld_lld_sha256 = "4f96978fddbca08cb4ed2418211aa0f2f2aae43e7b9a028df290da53fe43d3d5"
-
-# The release bundle producer records the exact shared-library closure here
-# after assembling the canonical LLVM distribution. Glibc and the ELF loader
-# remain host ABI dependencies; LLVM-specific libraries are bundled.
-shared_libraries = ["libLLVM.so.20.1", "libclang-cpp.so.20.1", "libffi.so.7"]
+llvm_version = "20.1.8"
+distribution = "llvm-official-linux-x64"
+archive_url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz"
+archive_filename = "LLVM-20.1.8-Linux-X64.tar.xz"
+archive_sha256 = "1ead36b3dfcb774b57be530df42bec70ab2d239fbce9889447c7a29a4ddc1ae6"
+clang_relpath = "bin/clang"
+llvm_ar_relpath = "bin/llvm-ar"
+lld_relpath = "bin/ld.lld"
+clang_sha256 = "92a0ff2751ad344b94c7d30f53c56a71a5edfb6f867e7269a573e0e3f663786a"
+llvm_ar_sha256 = "2eb06f0fa41af4e68aca4a5f09a9cb5375361e9fb4aec542bd5c0744dd6bcd87"
+ld_lld_sha256 = "4213c4392590fad303a8c36dc4819e46a3d344ee656ee6431204410f36a79d3d"
