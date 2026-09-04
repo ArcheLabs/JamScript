@@ -1,6 +1,8 @@
 format = 1
+version = 1
 platform = "linux-x86_64"
 llvm_version = "20.1.8"
+clang_version = "20.1.8"
 distribution = "llvm-official-linux-x64"
 archive_url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz"
 archive_filename = "LLVM-20.1.8-Linux-X64.tar.xz"

@@ -29,7 +29,7 @@ def parse_lock(path):
         values[key] = string_value if string_value is not None else int(integer_value)
 
     required = (
-        "format", "platform", "llvm_version", "distribution", "archive_url",
+        "format", "version", "platform", "llvm_version", "clang_version", "distribution", "archive_url",
         "archive_filename", "archive_sha256", "clang_relpath", "llvm_ar_relpath",
         "lld_relpath", "clang_sha256", "llvm_ar_sha256", "ld_lld_sha256",
     )
@@ -42,6 +42,8 @@ def parse_lock(path):
         raise LockError("LLVM lock platform is not linux-x86_64")
     if values["llvm_version"] != "20.1.8":
         raise LockError("LLVM lock must pin version 20.1.8")
+    if values["clang_version"] != values["llvm_version"]:
+        raise LockError("LLVM clang version disagrees with LLVM version")
     if values["distribution"] != "llvm-official-linux-x64":
         raise LockError("unexpected LLVM distribution")
     url = values["archive_url"]

@@ -12,8 +12,10 @@ SPEC.loader.exec_module(llvm_lock)
 
 BASE = """\
 format = 1
+version = 1
 platform = "linux-x86_64"
 llvm_version = "20.1.8"
+clang_version = "20.1.8"
 distribution = "llvm-official-linux-x64"
 archive_url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz"
 archive_filename = "LLVM-20.1.8-Linux-X64.tar.xz"
@@ -71,5 +73,6 @@ assert_rejected(BASE.replace('archive_sha256 = "1e', 'archive_sha256 = "zz'), "a
 assert_rejected(BASE.replace('clang_sha256 = "92a0', 'clang_sha256 = 123'), "invalid lock syntax")
 assert_rejected(BASE.replace('clang_relpath = "bin/clang"', 'clang_relpath = "../clang"'), "unsafe LLVM tool path")
 assert_rejected(BASE.replace('llvm_version = "20.1.8"', 'llvm_version = "20.1.7"'), "20.1.8")
+assert_rejected(BASE.replace('clang_version = "20.1.8"', 'clang_version = "20.1.7"'), "disagrees")
 assert_rejected(BASE.replace('archive_url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/', 'archive_url = "https://github.com/llvm/llvm-project/releases/download/latest/'), "floating")
 print("LLVM_LOCK_TESTS=PASS")
