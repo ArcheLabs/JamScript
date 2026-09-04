@@ -47,7 +47,7 @@ copy_tree() {
   local source="$1" destination="$2"
   test -d "${source}" || { echo "missing bundle input: ${source}" >&2; exit 1; }
   mkdir -p "$(dirname -- "${STAGE}/${destination}")"
-  cp -aL --no-target-directory "${source}" "${STAGE}/${destination}"
+  cp -aL --no-preserve=links --no-target-directory "${source}" "${STAGE}/${destination}"
 }
 
 copy_file "${NODE_BIN}" bin/node
@@ -92,12 +92,12 @@ mkdir -p "${STAGE}/cargo/vendor"
 (cd "${ROOT}" && "${CARGO_BIN}" vendor --locked "${STAGE}/cargo/vendor" >/dev/null)
 CONVERTER_MANIFEST="${SDK_ROOT}/service-toolchain/compiler/polkavm-to-jam/Cargo.toml"
 "${CARGO_BIN}" vendor --locked --manifest-path "${CONVERTER_MANIFEST}" "${STAGE}/cargo/vendor" >/dev/null
-cat > "${STAGE}/cargo/config.toml" <<EOF
+cat > "${STAGE}/cargo/config.toml" <<'EOF'
 [source.crates-io]
 replace-with = "vendored-sources"
 
 [source.vendored-sources]
-directory = "${STAGE}/cargo/vendor"
+directory = "cargo/vendor"
 EOF
 
 RUST_SYSROOT="$("${RUSTC_BIN}" --print sysroot)"
