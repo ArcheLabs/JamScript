@@ -74,6 +74,7 @@ done
 cp -L "${ROOT}/Cargo.lock" "${STAGE}/runtime/Cargo.lock"
 cat > "${STAGE}/runtime/Cargo.toml" <<'EOF'
 [workspace]
+resolver = "2"
 members = ["crates/jamscript-crypto", "crates/jamscript-runtime-core", "crates/service-runtime-core", "crates/service-runtime-state", "crates/service-runtime-guest"]
 
 [workspace.package]
@@ -82,15 +83,17 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-blake2b_simd = "1.0.4"
+blake2b_simd = { version = "1.0.4", default-features = false }
 polkavm-derive = "=0.30.0"
-schnorrkel = "0.11.5"
-thiserror = "2.0.17"
+schnorrkel = { version = "0.11.5", default-features = false }
+thiserror = { version = "2.0.17", default-features = false }
 EOF
 
 mkdir -p "${STAGE}/cargo/vendor"
 (cd "${ROOT}" && "${CARGO_BIN}" vendor --locked --versioned-dirs "${STAGE}/cargo/vendor" >/dev/null)
 (cd "${ROOT}" && "${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --sync crates/jamscript-runtime-core/Cargo.toml "${STAGE}/cargo/vendor" >/dev/null)
+RUST_SYSROOT="$(${RUSTC_BIN} --print sysroot)"
+(cd "${RUST_SYSROOT}/lib/rustlib/src/rust" && "${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --manifest-path library/Cargo.toml "${STAGE}/cargo/vendor" >/dev/null)
 CONVERTER_MANIFEST="${SDK_ROOT}/service-toolchain/compiler/polkavm-to-jam/Cargo.toml"
 "${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --manifest-path "${CONVERTER_MANIFEST}" "${STAGE}/cargo/vendor" >/dev/null
 cat > "${STAGE}/cargo/config.toml" <<'EOF'
@@ -101,7 +104,6 @@ replace-with = "vendored-sources"
 directory = "cargo/vendor"
 EOF
 
-RUST_SYSROOT="$("${RUSTC_BIN}" --print sysroot)"
 copy_tree "${RUST_SYSROOT}/lib/rustlib" lib/rustlib
 while read -r runtime_library; do
   copy_file "${runtime_library}" "lib/$(basename -- "${runtime_library}")"

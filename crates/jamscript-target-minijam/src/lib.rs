@@ -299,7 +299,7 @@ impl MiniJamTarget {
             ""
         };
         fs::write(guest_project.path().join("Cargo.toml"), format!(
-            "[package]\nname = \"jamscript_guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\njamscript-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-guest = {{ path = \"{}\", default-features = false{} }}\n[workspace]\n",
+            "[package]\nname = \"jamscript_guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\njamscript-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-guest = {{ path = \"{}\", default-features = false{} }}\n[workspace]\nresolver = \"2\"\n",
             runtime_core.display(), service_runtime_core.display(), service_runtime_guest.display(), diagnostic_feature
         ))?;
         fs::copy(&generated, guest_project.path().join("src/lib.rs"))?;
