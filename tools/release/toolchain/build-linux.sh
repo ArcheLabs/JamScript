@@ -107,12 +107,13 @@ test -d "${RUST_SYSROOT}/share" && copy_tree "${RUST_SYSROOT}/share" share || tr
 
 declare -a dependency_queue=("${NODE_BIN}" "${CLANG_BIN}" "${LLVM_AR_BIN}" "${LLD_BIN}" "${RUSTC_BIN}" "${CARGO_BIN}")
 declare -A seen_dependencies=()
+RUNTIME_LIBRARY_PATH="${RUST_SYSROOT}/lib:${LLVM_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 while ((${#dependency_queue[@]})); do
   binary="${dependency_queue[0]}"
   dependency_queue=("${dependency_queue[@]:1}")
   [[ -n "${seen_dependencies[${binary}]:-}" ]] && continue
   seen_dependencies["${binary}"]=1
-  ldd_output="$(LD_LIBRARY_PATH="${LLVM_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ldd "${binary}" 2>&1)" || {
+  ldd_output="$(LD_LIBRARY_PATH="${RUNTIME_LIBRARY_PATH}" ldd "${binary}" 2>&1)" || {
     echo "unable to inspect runtime dependencies: ${binary}" >&2
     echo "${ldd_output}" >&2
     exit 1
