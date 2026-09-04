@@ -144,8 +144,16 @@ jobs:
           out="${RUNNER_TEMP}/toolchain-build-a"
           mkdir -p "${out}"
           export SCRIPTC_NODE="$(command -v node)"
-          if ! ./tools/release/toolchain/build-linux.sh "${out}"; then
+          build_log="${RUNNER_TEMP}/toolchain-build-a.log"
+          if ! ./tools/release/toolchain/build-linux.sh "${out}" 2>&1 | tee "${build_log}"; then
             echo "PRODUCER_FAIL=A"
+            {
+              echo "### Bundle A producer diagnostics"
+              echo
+              echo '```text'
+              tail -200 "${build_log}"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
           bundle="$(jq -er '.archive' "${out}/bundle-metadata.json")"
