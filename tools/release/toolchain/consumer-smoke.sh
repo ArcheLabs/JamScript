@@ -19,7 +19,8 @@ python3 "${ROOT}/tools/release/toolchain/make-candidate-manifest.py" \
 
 cargo build --locked --manifest-path "${SOURCE_COPY}/Cargo.toml" --bin jamscript
 export JAMSCRIPT_TOOLCHAIN_HOME="${INSTALL_HOME}"
-unset JAMSCRIPT_OFFLINE JAMSCRIPT_DEV_TOOLCHAIN
+unset JAMSCRIPT_OFFLINE JAMSCRIPT_DEV_TOOLCHAIN JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING
+unset JAMSCRIPT_MINIJAM_SDK JAMSCRIPT_CLANG JAMSCRIPT_LLVM_ROOT JAMSCRIPT_LLVM_AR JAMSCRIPT_LLVM_LD
 "${SOURCE_COPY}/target/debug/jamscript" toolchain install
 export JAMSCRIPT_OFFLINE=1
 "${SOURCE_COPY}/target/debug/jamscript" build "${SOURCE_COPY}/examples/dynamic-state-scriptc" \
