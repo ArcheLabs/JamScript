@@ -90,12 +90,14 @@ EOF
 
 mkdir -p "${STAGE}/cargo/vendor"
 (cd "${ROOT}" && "${CARGO_BIN}" vendor --locked "${STAGE}/cargo/vendor" >/dev/null)
-cat > "${STAGE}/cargo/config.toml" <<'EOF'
+CONVERTER_MANIFEST="${SDK_ROOT}/service-toolchain/compiler/polkavm-to-jam/Cargo.toml"
+"${CARGO_BIN}" vendor --locked --manifest-path "${CONVERTER_MANIFEST}" "${STAGE}/cargo/vendor" >/dev/null
+cat > "${STAGE}/cargo/config.toml" <<EOF
 [source.crates-io]
 replace-with = "vendored-sources"
 
 [source.vendored-sources]
-directory = "vendor"
+directory = "${STAGE}/cargo/vendor"
 EOF
 
 RUST_SYSROOT="$("${RUSTC_BIN}" --print sysroot)"
@@ -152,7 +154,6 @@ test "$(git -C "${SDK_ROOT}" rev-parse HEAD)" = "$(sed -n 's/^revision = "\(.*\)
 mkdir -p "${STAGE}/targets/minijam/sdk"
 SDK_REVISION="$(sed -n 's/^revision = "\(.*\)"/\1/p' "${ROOT}/toolchains/minijam.lock")"
 git -C "${SDK_ROOT}" archive --format=tar "${SDK_REVISION}" | tar -xf - -C "${STAGE}/targets/minijam/sdk"
-CONVERTER_MANIFEST="${SDK_ROOT}/service-toolchain/compiler/polkavm-to-jam/Cargo.toml"
 CARGO_HOME="${STAGE}/cargo" CARGO_TARGET_DIR="${OUT}/converter-target" RUSTC="${RUSTC_BIN}" \
   "${CARGO_BIN}" build --offline --locked --release --manifest-path "${CONVERTER_MANIFEST}"
 copy_file "${OUT}/converter-target/release/minijam-polkavm-to-jam" \
