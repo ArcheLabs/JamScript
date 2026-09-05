@@ -71,7 +71,7 @@ printf '%s\n' \
 printf '%s\n' \
   'use proc_macro::TokenStream;' \
   '#[proc_macro_attribute]' \
-  'pub fn marker(_: TokenStream, item: TokenStream) -> TokenStream { item }' \
+  'pub fn probe_attr(_: TokenStream, item: TokenStream) -> TokenStream { item }' \
   >"$RUN_ROOT/cargo-probe/macro/src/lib.rs"
 printf '%s\n' \
   '[package]' \
@@ -87,8 +87,8 @@ printf '%s\n' \
   '}' \
   >"$RUN_ROOT/cargo-probe/app/build.rs"
 printf '%s\n' \
-  'use probe_macro::marker;' \
-  '#[marker]' \
+  'use probe_macro::probe_attr;' \
+  '#[probe_attr]' \
   'fn main() { println!("managed proc macro"); }' \
   >"$RUN_ROOT/cargo-probe/app/src/main.rs"
 
@@ -127,10 +127,10 @@ printf '%s\n' \
   >"$RUN_ROOT/cross-probe/guest/Cargo.toml"
 printf '%s\n' \
   '#![no_std]' \
-  'use cross_probe_macro::marker;' \
+  'use cross_probe_macro::probe_attr;' \
   '#[panic_handler]' \
   'fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }' \
-  '#[marker]' \
+  '#[probe_attr]' \
   '#[no_mangle]' \
   'pub extern "C" fn probe_entry() {}' \
   >"$RUN_ROOT/cross-probe/guest/src/lib.rs"
