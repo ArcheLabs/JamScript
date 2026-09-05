@@ -8,7 +8,8 @@ JamScript CLI + source + target
   -> deterministic service artifact
 ```
 
-The distribution owns Node, LLVM/Clang, `llvm-ar`, `ld.lld`, Rust, `rust-src`,
+The distribution owns Node, LLVM/Clang, `llvm-ar` (also exposed as the
+ScriptC-compatible `ar` command), `ld.lld`, Rust, `rust-src`,
 ScriptC's prepared npm tree, the compiler/runtime source crates, Cargo's
 vendored dependencies, and the JamScript-owned JAM target SDK. It is described by
 [`toolchains/distribution-v1.toml`](../toolchains/distribution-v1.toml) and
@@ -75,9 +76,11 @@ artifact `toolchain-linux-x86_64` for seven days. The artifact includes the
 archive, `SHA256SUMS`, `bundle-status.json`, `bundle-metadata.json`, and the
 internal toolchain manifest.
 
-The workflow's candidate consumer smoke test uses a temporary manifest only in
-an ephemeral source copy. It installs the archive through `ToolchainManager`,
-then runs `jamscript build --offline` from a fresh cache. The checked-in
+The workflow prepares a prebuilt CLI and a generic fixture archive before the
+consumer phase. The consumer phase has no source checkout dependency: it
+installs the archive through `ToolchainManager`, verifies managed executable
+paths with `jamscript doctor --json`, then runs `jamscript build --offline`
+from a fresh cache and an external project directory. The checked-in
 `published = false` record is never edited or promoted by Actions; an Actions
 artifact is not a public distribution URL.
 

@@ -4,7 +4,7 @@ use jamscript_ir::{action_selector, ActionBodyIr, ServiceIr};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -119,12 +119,23 @@ impl ScriptcCompiler {
         )?;
         verify_surface_manifest(&self.toolchain_root)?;
         let script = self.toolchain_root.join("m2/compile-service.mjs");
-        let status = Command::new(&self.node)
+        let mut command = Command::new(&self.node);
+        command
             .current_dir(&self.toolchain_root)
             .arg(script)
-            .arg(&spec_path)
-            .status()
-            .context("starting ScriptC M2 compiler")?;
+            .arg(&spec_path);
+        let managed_bin = self.toolchain_root.parent().map(|root| root.join("bin"));
+        if let Some(managed_bin) = managed_bin.filter(|path| path.is_dir()) {
+            let mut path_entries = vec![managed_bin];
+            if let Some(path) = env::var_os("PATH") {
+                path_entries.extend(env::split_paths(&path));
+            }
+            command.env(
+                "PATH",
+                env::join_paths(path_entries).context("constructing ScriptC managed PATH")?,
+            );
+        }
+        let status = command.status().context("starting ScriptC M2 compiler")?;
         if !status.success() {
             bail!("ScriptC failed to compile service `{}`", ir.package_name);
         }

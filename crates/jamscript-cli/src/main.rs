@@ -51,7 +51,10 @@ enum CommandKind {
         #[command(subcommand)]
         command: ToolchainCommand,
     },
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     Inspect {
         #[arg(default_value = "dist")]
         bundle: PathBuf,
@@ -167,7 +170,7 @@ fn main() -> Result<()> {
             build(&path, &output)
         }
         CommandKind::Toolchain { command } => toolchain_command(command),
-        CommandKind::Doctor => doctor(),
+        CommandKind::Doctor { json } => doctor(json),
         CommandKind::Inspect { bundle } => inspect(&bundle),
     }
 }
@@ -207,9 +210,46 @@ fn toolchain_command(command: ToolchainCommand) -> Result<()> {
     }
 }
 
-fn doctor() -> Result<()> {
+fn doctor(json: bool) -> Result<()> {
     let manager = ToolchainManager::new()?;
     let status = manager.status();
+    if json {
+        let root = status
+            .path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("managed toolchain is not installed"))?;
+        if !status.verified {
+            bail!(
+                "managed toolchain is not verified: {}",
+                status
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown verification error")
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "toolchain_id": status.toolchain_id,
+                "platform": status.platform,
+                "canonical": status.verified,
+                "offline": matches!(
+                    std::env::var("JAMSCRIPT_OFFLINE").as_deref(),
+                    Ok("1") | Ok("true") | Ok("yes")
+                ),
+                "toolchain_home": root,
+                "node": root.join("bin/node"),
+                "clang": root.join("bin/clang"),
+                "llvm_ar": root.join("bin/llvm-ar"),
+                "ar": root.join("bin/ar"),
+                "lld": root.join("bin/ld.lld"),
+                "rustc": root.join("bin/rustc"),
+                "cargo": root.join("bin/cargo"),
+                "jam_sdk": root.join("targets/jam/sdk"),
+            }))?
+        );
+        return Ok(());
+    }
     println!("JamScript CLI: {}", env!("CARGO_PKG_VERSION"));
     println!("Language: 0.2\n");
     println!("Host:\n{}\n", status.platform);

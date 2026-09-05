@@ -127,6 +127,7 @@ required_files = [
     "bin/node",
     "bin/clang",
     "bin/llvm-ar",
+    "bin/ar",
     "bin/ld.lld",
     "bin/rustc",
     "bin/cargo",
@@ -162,6 +163,8 @@ if distribution["clang_version"] not in clang_version:
 for name in ["bin/llvm-ar", "bin/ld.lld", "bin/rustc", "bin/cargo"]:
     if not run_version(root / name):
         raise SystemExit(f"tool version query returned no output: {name}")
+if sha256(root / "bin/ar") != llvm_lock_values["llvm_ar_sha256"]:
+    raise SystemExit("LLVM archiver lock hash mismatch: bin/ar")
 if "nightly" not in run_version(root / "bin/rustc"):
     raise SystemExit("Rust identity is not a nightly toolchain")
 

@@ -368,6 +368,7 @@ impl ToolchainManager {
             &installed.lld,
             &installed.rustc,
             &installed.cargo,
+            &root.join("bin/ar"),
         ] {
             if !required.is_file() {
                 bail!(

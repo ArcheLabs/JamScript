@@ -210,17 +210,50 @@ jobs:
           echo "BUNDLE_A_B_IDENTICAL=PASS" >> "${GITHUB_ENV}"
           echo "BUNDLE_REPRODUCIBILITY=PASS"
 
+      - name: Prepare consumer CLI and fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          prep="${RUNNER_TEMP}/consumer-prep"
+          rm -rf -- "${prep}"
+          mkdir -p "${prep}"
+          git archive --format=tar HEAD | tar -xf - -C "${prep}"
+          bundle_size="$(stat -c '%s' "${BUNDLE_A}")"
+          bundle_sha256="$(sha256sum "${BUNDLE_A}" | awk '{print $1}')"
+          python3 ./tools/release/toolchain/make-candidate-manifest.py \
+            --input "${prep}/toolchains/distribution-v1.toml" \
+            --output "${prep}/toolchains/distribution-v1.toml" \
+            --url "file://${BUNDLE_A}" --sha256 "${bundle_sha256}" --size "${bundle_size}"
+          cargo build --locked --manifest-path "${prep}/Cargo.toml" --bin jamscript
+          cp -L "${prep}/target/debug/jamscript" "${RUNNER_TEMP}/jamscript-consumer-cli"
+          (cd "${prep}/examples/dynamic-state-scriptc" && tar --format=ustar -cf "${RUNNER_TEMP}/dynamic-state-scriptc-fixture.tar" .)
+          echo "CONSUMER_CLI=${RUNNER_TEMP}/jamscript-consumer-cli" >> "${GITHUB_ENV}"
+          echo "CONSUMER_FIXTURE=${RUNNER_TEMP}/dynamic-state-scriptc-fixture.tar" >> "${GITHUB_ENV}"
+          echo "CONSUMER_ARTIFACT_PREPARATION=PASS"
+
       - name: Run clean offline consumer smoke test
         shell: bash
         run: |
           set -euo pipefail
           install_home="${RUNNER_TEMP}/consumer-toolchain"
           output="${RUNNER_TEMP}/consumer-output"
-          if [[ -n "$(find "${install_home}" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-            echo "consumer toolchain home is not fresh: ${install_home}"
+          consumer_root="${RUNNER_TEMP}/jamscript-consumer"
+          if [[ -e "${consumer_root}" ]]; then
+            echo "consumer root already exists: ${consumer_root}"
             exit 1
           fi
-          if ! ./tools/release/toolchain/consumer-smoke.sh "${BUNDLE_A}" "${install_home}" "${output}"; then
+          if ! ./tools/release/toolchain/consumer-smoke.sh \
+            "${BUNDLE_A}" "${CONSUMER_CLI}" "${CONSUMER_FIXTURE}" \
+            "${install_home}" "${output}"; then
+            if [[ -f "${consumer_root}/smoke.log" ]]; then
+              {
+                echo "### Offline consumer diagnostics"
+                echo
+                echo '```text'
+                tail -200 "${consumer_root}/smoke.log"
+                echo '```'
+              } >> "${GITHUB_STEP_SUMMARY}"
+            fi
             echo "OFFLINE_CONSUMER_BUILD=FAIL"
             exit 1
           fi
@@ -254,6 +287,15 @@ jobs:
           echo "TOOLCHAIN_ID=${toolchain_id}" >> "${GITHUB_ENV}"
           echo "ARTIFACT_DIR=${artifact_dir}" >> "${GITHUB_ENV}"
           du -sh "${RUNNER_TEMP}/toolchain-build-a" "${RUNNER_TEMP}/toolchain-build-b" "${artifact_dir}"
+          installed_root="$(<"${RUNNER_TEMP}/toolchain-verify-a/root.txt")"
+          file_count="$(find "${installed_root}" -type f -printf '.' | wc -c)"
+          unpacked_bytes="$(du -sb "${installed_root}" | awk '{print $1}')"
+          {
+            echo "### Validated bundle inventory"
+            echo
+            echo "- File count: ${file_count}"
+            echo "- Unpacked bytes: ${unpacked_bytes}"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Write production summary
         shell: bash

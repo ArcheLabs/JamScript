@@ -52,6 +52,7 @@ copy_tree() {
 copy_file "${NODE_BIN}" bin/node
 copy_file "${CLANG_BIN}" bin/clang
 copy_file "${LLVM_AR_BIN}" bin/llvm-ar
+copy_file "${LLVM_AR_BIN}" bin/ar
 copy_file "${LLD_BIN}" bin/ld.lld
 copy_file "${RUSTC_BIN}" bin/rustc
 copy_file "${CARGO_BIN}" bin/cargo
