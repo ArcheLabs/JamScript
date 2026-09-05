@@ -1,7 +1,8 @@
 # JamScript canonical codec
 
 JamScript does not define an independent binary codec. `TypeIr` values use the
-canonical rules of Jambda's `jam-codec 0.1.1`.
+canonical JAM `jam-codec 0.1.1` rules. The implementation carries these rules
+locally and has no dependency on a MiniJAM or Jambda checkout.
 
 Fixed-width primitives are little-endian. Boolean values are exactly `00` or
 `01`. `bytes(N)` and `string(N)` are encoded as `Compact(actual byte length)`

@@ -21,9 +21,9 @@ listed artifact before displaying its metadata.
 
 MiniJamSpec compatibility is an execution-boundary property. JamScript does
 not target JAM FullSpec directly and does not embed MiniJamSpec constants. It
-targets the MiniJAM ABI and network identity. Every release must use the exact
-MiniJAM revision in `toolchains/minijam.lock`, and the generated bundle must
-record the matching MiniJAM SDK and converter revisions.
+ships the JAM target ABI and its own target SDK. MiniJAM compatibility is
+checked separately by the optional downstream network E2E; a MiniJAM or
+Jambda checkout is not part of a JamScript build or release input.
 
 The Builder/Provider process is deployed per Service. It statically compiles the generated host
 application and the same native C sources used by the PVM Service. Loading arbitrary native
@@ -65,7 +65,8 @@ rewritten as a successful run.
 3. Provision or upgrade the Service through the network operator's deployment control plane.
 4. Compile and run the generated Builder application as a per-Service Formal RPC sidecar.
 5. Configure the browser client with separate node, work, and managed-state Provider endpoints.
-6. Run the tagged network E2E before publishing the release artifacts.
+6. When a downstream network is available, run the manual MiniJAM network E2E
+   as a compatibility check before publishing the release artifacts.
 
 Service provisioning is intentionally not exposed as a fake application RPC. MiniJAM currently
 has no formal deployment RPC equivalent to the Work RPC, so v0 deployment remains an explicit

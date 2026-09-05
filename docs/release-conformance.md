@@ -3,14 +3,12 @@
 This release uses one ABI type graph (`TypeIr`) for action inputs, managed
 state keys and values, queries, generated ABI descriptors, and client
 validation. JamScript does not define an independent binary codec. ABI values
-use the canonical encoding rules implemented by Jambda's `jam-codec`.
+use the canonical JAM `jam-codec` encoding rules.
 
 ## Sources of truth
 
-- Jambda revision: `d33e0abf8116b23bbc551c6a8d7075eacb2994ce`
 - `jam-codec`: `0.1.1`
 - JAM Gray Paper serialization semantics: `0.7.2`
-- MiniJAM client revision: `18de55e175abb1cb40679be2e538644e2387655f`
 - ABI language: `0.2`
 
 Fixed-width integers are little-endian. Booleans accept only `00` and `01`.
@@ -33,9 +31,9 @@ runtime never silently rewrites existing managed state.
 
 ## Verification
 
-The Rust `jamscript-codec` crate cross-checks JAM natural encoding against
-`jam-codec 0.1.1`. The TypeScript client accepts both generated descriptors and
-canonical rules.
+The Rust `jamscript-codec` crate cross-checks JAM natural encoding against the
+`jam-codec 0.1.1` vectors. The TypeScript client accepts both generated
+descriptors and canonical rules.
 The release gate additionally requires the workspace tests and client tests to
 pass.
 

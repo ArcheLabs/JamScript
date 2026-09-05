@@ -2,18 +2,10 @@ name: MiniJAM Network E2E
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v0.*"
-  pull_request:
-    paths:
-      - "crates/jamscript-codegen-rust/**"
-      - "crates/jamscript-target-jam/**"
-      - "crates/service-runtime-*/**"
-      - "packages/client/**"
-      - "scripts/minijam-network-e2e.sh"
-      - "tools/managed-state-network-adapter/**"
-      - "toolchains/minijam.lock"
+
+# This is a downstream compatibility check. It is deliberately manual so that
+# the JamScript build and release gates never require a MiniJAM or Jambda
+# checkout.
 
 jobs:
   network-e2e:

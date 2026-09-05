@@ -5,6 +5,16 @@ python3 tools/release/toolchain/test-llvm-lock.py
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${ROOT}"
+
+# The compiler and release gates must remain self-contained. The manually
+# triggered MiniJAM compatibility workflow is intentionally outside this set.
+for workflow in ci.yml build-toolchain-bundle.yml publish-toolchain.yml release.yml; do
+  if rg -n -i 'minijam-client|jambda|JAMSCRIPT_MINIJAM_SDK' ".github/workflows/${workflow}"; then
+    echo "CORE_WORKFLOW_DEPENDENCY=FAIL (${workflow})" >&2
+    exit 1
+  fi
+done
+
 cargo test --locked -p jamscript-toolchain
 cargo run --quiet --locked --bin jamscript -- toolchain status --json > "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
 grep -q '"toolchainId": "scriptc-m2-v1"' "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"

@@ -86,6 +86,9 @@ artifact is not a public distribution URL.
 
 The bundle contains only the JamScript-owned JAM target SDK under
 `targets/jam/sdk`; MiniJAM, Jambda, and deployment services are not bundled.
+The default CI and release workflows use only this bundle. The repository's
+MiniJAM network workflow is a manually triggered downstream compatibility
+check and is never a prerequisite for compiling or publishing JamScript.
 
 The supported Linux x86_64 distribution is compiler-toolchain self-contained.
 It does not require host-installed Rust, Cargo, Node, GCC, Clang, LLD, LLVM

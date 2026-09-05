@@ -24,8 +24,9 @@ verification, sender derivation, expiry, and nonce-context validation.
 Formal V1 is the first supported wire/runtime protocol; development generations
 before it are not compatibility contracts.
 
-The release ABI uses one typed descriptor and Jambda's `jam-codec 0.1.1`
-encoding rules; JamScript does not maintain an independent binary codec. See
+The release ABI uses one typed descriptor and the canonical JAM `jam-codec
+0.1.1` encoding rules; JamScript does not maintain an independent binary
+codec. See
 [`docs/release-conformance.md`](docs/release-conformance.md) for the type
 system and canonical vectors.
 
@@ -43,7 +44,8 @@ cargo run --locked --bin jamscript -- toolchain status
 cargo run --locked --bin jamscript -- doctor
 ```
 
-To run the real cross-process MiniJAM path:
+To run the optional cross-process MiniJAM compatibility path (it requires a
+separate MiniJAM checkout):
 
     ./scripts/minijam-network-e2e.sh
 
