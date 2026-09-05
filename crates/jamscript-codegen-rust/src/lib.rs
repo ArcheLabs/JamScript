@@ -168,7 +168,7 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
 
 #[no_mangle]
 pub extern "C" fn minijam_accumulate() {{
-    // Jambda places the accumulation init input in A memory and initializes
+    // The host runtime places the accumulation init input in A memory and initializes
     // a0/a1 to its pointer and length, while the SDK export still uses
     // input_regs=0 because this is invocation-context transport.
     let init_pointer: usize;
@@ -961,7 +961,11 @@ mod tests {
         for ir in services {
             let builder = generate_builder_application_rust(&ir, context).unwrap();
             let guest = generate_no_std_rust_with_context(&ir, context).unwrap();
-            assert!(guest.contains(&builder));
+            let builder_application = builder
+                .strip_prefix("pub const JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = 1;\n")
+                .unwrap();
+            assert!(guest.contains("pub const JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = 1;"));
+            assert!(guest.contains(builder_application));
             assert!(!builder.contains("minijam_payload"));
             assert!(!builder.contains("minijam_storage_write"));
             assert!(!builder.contains("read_fnencode"));
