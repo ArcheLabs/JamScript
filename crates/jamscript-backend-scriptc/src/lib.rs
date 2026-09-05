@@ -104,7 +104,9 @@ impl ScriptcCompiler {
         fs::write(
             &spec_path,
             serde_json::json!({
-                "source": source_path,
+                // Keep the persisted spec relocatable. The compiler process
+                // runs from output_dir, where this source file is written.
+                "source": "scriptc_service.ts",
                 "package_name": ir.package_name,
                 "states": ir.states,
                 "actions": ir.actions.iter().map(|action| serde_json::json!({
@@ -113,17 +115,14 @@ impl ScriptcCompiler {
                     "input": action.input,
                 })).collect::<Vec<_>>(),
                 "queries": ir.queries,
-                "output": output_dir,
+                "output": ".",
             })
             .to_string(),
         )?;
         verify_surface_manifest(&self.toolchain_root)?;
         let script = self.toolchain_root.join("m2/compile-service.mjs");
         let mut command = Command::new(&self.node);
-        command
-            .current_dir(&self.toolchain_root)
-            .arg(script)
-            .arg(&spec_path);
+        command.current_dir(&output_dir).arg(script).arg(&spec_path);
         let managed_bin = self.toolchain_root.parent().map(|root| root.join("bin"));
         if let Some(managed_bin) = managed_bin.filter(|path| path.is_dir()) {
             let mut path_entries = vec![managed_bin];

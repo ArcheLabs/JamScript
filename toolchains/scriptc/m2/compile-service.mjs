@@ -26,7 +26,9 @@ const exports = spec.actions.map((action) => ({
 await writeFile(profilePath, JSON.stringify({
   profile_format: 1,
   name: `jamscript-m2-${spec.package_name}`,
-  entry: transformedPath,
+  // Keep the persisted profile relocatable; compileLibrary resolves this
+  // profile-relative entry next to the profile itself.
+  entry: "scriptc_service.transformed.ts",
   emission: "c",
   optimization: "dev",
   abi: {
