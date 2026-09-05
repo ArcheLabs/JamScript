@@ -291,10 +291,22 @@ fn verify_managed_rustc(config: &PolkaVmBuildConfig, lock: &ToolchainLock) -> Re
     })?;
     let version = command_rustc_version(rustc)
         .with_context(|| format!("verifying managed rustc against {}", lock.rust))?;
-    let identity = lock.rust.strip_prefix("nightly-").unwrap_or(&lock.rust);
-    if !version.contains(identity) {
+    let sysroot = command_rustc_sysroot(rustc)?;
+    let channel_manifest = sysroot.join("lib/rustlib/multirust-channel-manifest.toml");
+    let channel = fs::read_to_string(&channel_manifest).with_context(|| {
+        format!(
+            "reading managed rust channel manifest {}",
+            channel_manifest.display()
+        )
+    })?;
+    let expected_date = lock.rust.strip_prefix("nightly-").unwrap_or(&lock.rust);
+    let expected_date_line = format!("date = \"{expected_date}\"");
+    if !channel
+        .lines()
+        .any(|line| line.trim() == expected_date_line)
+    {
         bail!(
-            "managed rustc version {version} does not match locked toolchain {}",
+            "managed rustc channel does not match locked toolchain {}",
             lock.rust
         );
     }
@@ -428,6 +440,22 @@ fn command_rustc_version(rustc: &Path) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn command_rustc_sysroot(rustc: &Path) -> Result<PathBuf> {
+    let output = Command::new(rustc)
+        .args(["--print", "sysroot"])
+        .output()
+        .with_context(|| format!("reading rustc sysroot from {}", rustc.display()))?;
+    if !output.status.success() {
+        bail!(
+            "rustc sysroot query failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
 }
 
 fn run(command: &mut Command, description: &str) -> Result<()> {

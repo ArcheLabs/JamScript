@@ -35,7 +35,9 @@ Job: pending hosted result.
 Target selection: rustc_1_91, sourced from toolchains/polkavm.lock.
 
 Managed Rust verification: implemented with the absolute managed rustc path;
-the locked nightly identity must be present in rustc --version.
+the reported sysroot must contain a Rustup channel manifest whose date matches
+the locked nightly channel. This avoids confusing the compiler build date with
+the Rustup channel date.
 
 Host Rust visibility: must remain hidden. The consumer PATH is not widened for
 Rust, Cargo, LLVM, Node, or ScriptC.
