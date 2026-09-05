@@ -1,0 +1,15 @@
+[package]
+name = "native-scriptc"
+version = "0.2.0"
+entry = "src/service.ts"
+language = "0.2"
+
+[compiler]
+backend = "scriptc"
+
+[target.minijam]
+genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+
+[native.math]
+language = "c"
+sources = ["native/native.c"]

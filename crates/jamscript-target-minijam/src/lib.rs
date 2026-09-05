@@ -272,7 +272,12 @@ impl MiniJamTarget {
         let mut archives = vec![compile_sdk_archive(&self.sdk_root, &clang, work.path())?];
         archives.push(compile_scriptc_archive(&scriptc, &clang, work.path())?);
         for module in native_modules {
-            archives.push(compile_native_archive(module, &clang, work.path())?);
+            archives.push(compile_native_archive(
+                module,
+                &self.sdk_root.join("service-toolchain/sdk/include"),
+                &clang,
+                work.path(),
+            )?);
         }
         let backend_output = work.path().join("polkavm");
         let artifacts = PolkaVmBuilder::new(PolkaVmBuildConfig {
@@ -342,6 +347,7 @@ impl MiniJamTarget {
             "scriptc/scriptc_service.transformed.ts",
             "scriptc/scriptc_runtime.ts",
             "scriptc/scriptc_service.profile.json",
+            "scriptc/scriptc_native_ffi.json",
             "scriptc/scriptc_service.lib.c",
             "scriptc/scriptc_service_adapter.c",
         ]);
@@ -561,13 +567,16 @@ fn compile_sdk_archive(sdk_root: &Path, clang: &Path, work: &Path) -> Result<Nat
 
 fn compile_native_archive(
     module: &NativeModule,
+    sdk_include: &Path,
     clang: &Path,
     work: &Path,
 ) -> Result<NativeArchive> {
+    let mut include_dirs = module.include_dirs.clone();
+    include_dirs.push(sdk_include.to_path_buf());
     compile_archive(
         &format!("native_{}", module.name),
         &module.sources,
-        &module.include_dirs,
+        &include_dirs,
         clang,
         work,
     )

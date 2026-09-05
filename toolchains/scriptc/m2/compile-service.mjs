@@ -1,7 +1,10 @@
 import { readFile, mkdir, writeFile, copyFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import ts from "typescript5/lib/typescript.js";
-import { compileLibrary } from "@scriptc/compiler";
+
+await ensureLibraryFfiSupport();
+const { compileLibrary } = await import("@scriptc/compiler");
 
 const specPath = resolve(process.argv[2] ?? "");
 if (!specPath) throw new Error("missing M2 ScriptC service spec");
@@ -14,6 +17,20 @@ await mkdir(output, { recursive: true });
 const transformedPath = resolve(output, "scriptc_service.transformed.ts");
 const runtimePath = resolve(output, "scriptc_runtime.ts");
 await copyFile(resolve(import.meta.dirname, "runtime.ts"), runtimePath);
+const nativeImports = spec.native_imports ?? [];
+const nativeBindings = nativeImports.map(({ module, function: functionName }) => ({
+  local: functionName,
+  binding: functionName,
+  symbol: `jamscript_ffi_${module}_${functionName}_v1`,
+}));
+if (nativeBindings.length > 0) process.env.SCRIPTC_NO_CACHE = "1";
+const nativeNames = new Set();
+for (const binding of nativeBindings) {
+  if (nativeNames.has(binding.local)) {
+    throw new Error(`native import binding \`${binding.local}\` is declared more than once`);
+  }
+  nativeNames.add(binding.local);
+}
 await writeFile(transformedPath, transformService(source, spec));
 
 const profilePath = resolve(output, "scriptc_service.profile.json");
@@ -23,6 +40,18 @@ const exports = spec.actions.map((action) => ({
   params: ["bytes", "bytes", "bytes"],
   returns: "bytes",
 }));
+const ffiProfilePath = resolve(output, "scriptc_native_ffi.json");
+await writeFile(ffiProfilePath, JSON.stringify({
+  ffi_format: 1,
+  functions: nativeBindings.map((binding) => ({
+    name: binding.binding,
+    symbol: binding.symbol,
+    params: ["bytes"],
+    returns: "f64",
+  })),
+  libraries: [],
+  system_libraries: [],
+}, null, 2));
 await writeFile(profilePath, JSON.stringify({
   profile_format: 1,
   name: `jamscript-m2-${spec.package_name}`,
@@ -46,12 +75,13 @@ const result = await compileLibrary({
   outDir: output,
   outPath: resolve(output, "scriptc_service.lib.a"),
   emitIr: true,
+  ffiProfilePath,
 });
 if (!result.ok) throw new Error(JSON.stringify(result.diagnostics, null, 2));
 
 function transformService(text, service) {
   const file = ts.createSourceFile("service.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  validateImports(file);
+  validateImports(file, service);
   validateDeterminism(file, service);
   const actionBodies = new Map();
   const stateNames = new Set(service.states.map((state) => state.name));
@@ -80,7 +110,7 @@ function transformService(text, service) {
     retained.push(printer.printNode(ts.EmitHint.Unspecified, statement, file));
   }
 
-  const sections = [runtimeImports(), codecRuntime(), ...retained];
+  const sections = [runtimeImports(), codecRuntime(), nativeDeclarations(nativeBindings), ...retained];
   for (const state of service.states) sections.push(generateStateBinding(state));
   for (const action of service.actions) {
     const execute = actionBodies.get(action.name);
@@ -90,11 +120,46 @@ function transformService(text, service) {
   return sections.join("\n\n") + "\n";
 }
 
-function validateImports(file) {
+function validateImports(file, service) {
+  const declared = new Set((service.native_imports ?? []).map(({ module, function: functionName }) => `${module}:${functionName}`));
   for (const statement of file.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
     const module = ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : "";
-    if (module !== "jam") throw new Error(`ScriptC M2 does not support runtime import \`${module}\``);
+    if (module === "jam") continue;
+    if (!module.startsWith("native:")) throw new Error(`ScriptC M2 does not support runtime import \`${module}\``);
+    for (const specifier of statement.importClause?.namedBindings?.elements ?? []) {
+      const functionName = specifier.propertyName?.text ?? specifier.name.text;
+      if (!declared.has(`${module.slice("native:".length)}:${functionName}`)) {
+        throw new Error(`native import \`${module}:${functionName}\` is missing from the parsed service manifest`);
+      }
+    }
+  }
+}
+
+function nativeDeclarations(bindings) {
+  return bindings.map((binding) =>
+    `declare function ${binding.binding}(input: Uint8Array): number;`
+  ).join("\n\n");
+}
+
+async function ensureLibraryFfiSupport() {
+  const compilerEntry = fileURLToPath(await import.meta.resolve("@scriptc/compiler"));
+  const compilerPath = compilerEntry.replace(/dist[\\/]index\.js$/, "dist/index.js");
+  let source = await readFile(compilerPath, "utf8");
+  if (!source.includes("const loadedFfi = loadFfiProfile(resolve(opts.ffiProfilePath));")) {
+    const profileMarker = "    const profile = loadedProfile.profile;\n";
+    const profilePatch = `${profileMarker}    let ffi = null;\n    if (opts.ffiProfilePath !== undefined) {\n        const loadedFfi = loadFfiProfile(resolve(opts.ffiProfilePath));\n        if (!loadedFfi.ok) {\n            return { ok: false, diagnostics: loadedFfi.diagnostics, sourceTexts: new Map() };\n        }\n        ffi = loadedFfi.profile;\n    }\n`;
+    if (!source.includes(profileMarker)) throw new Error("ScriptC compiler library FFI patch anchor is missing");
+    source = source.replace(profileMarker, profilePatch);
+    const callbackBlock = `        const cbImports = profile.callbacks.map((cb) => ({\n            name: cb.name,\n            symbol: cb.name,\n            params: [...cb.params],\n            returns: cb.returns,\n        }));\n`;
+    const callbackPatch = `${callbackBlock}        const ffiImports = [\n            ...(ffi?.functions ?? []),\n            ...cbImports,\n        ];\n`;
+    if (!source.includes(callbackBlock)) throw new Error("ScriptC compiler library callback anchor is missing");
+    source = source.replace(callbackBlock, callbackPatch);
+    const lowerBlock = `                ...(cbImports.length > 0 ? { ffiImports: cbImports, libraryCallbacks: true } : {}),`;
+    const lowerPatch = `                ...(ffiImports.length > 0 ? { ffiImports } : {}),\n                ...(cbImports.length > 0 ? { libraryCallbacks: true } : {}),`;
+    if (!source.includes(lowerBlock)) throw new Error("ScriptC compiler library lowerer anchor is missing");
+    source = source.replace(lowerBlock, lowerPatch);
+    await writeFile(compilerPath, source);
   }
 }
 

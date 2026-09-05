@@ -821,6 +821,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_declared_scriptc_native_import() {
+        let source = r#"import { action, wallet, bytes, stateMap, address, u32 } from "jam";
+            import { calculate } from "native:math";
+            const result = stateMap({ schema: "native/result/v1", key: address, value: u32 });
+            export const run = action({ auth: wallet(), input: { payload: bytes(32) }, execute(ctx, input) { result.set(ctx.sender, calculate(input.payload)); } });"#;
+        let ir = parse_service_v02(source, "native", "0.2.0", &["math".into()]).unwrap();
+        assert_eq!(
+            ir.native_imports,
+            vec![NativeImportIr {
+                module: "math".into(),
+                function: "calculate".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_scriptc_native_module() {
+        let source = r#"import { action, wallet, bytes } from "jam"; import { calculate } from "native:missing"; export const run = action({ auth: wallet(), input: { payload: bytes(32) }, execute(ctx, input) { calculate(input.payload); } });"#;
+        let error = parse_service_v02(source, "native", "0.2.0", &["math".into()]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unknown or invalid native module"));
+    }
+
+    #[test]
     fn keeps_top_level_scriptc_helpers_in_original_source() {
         let source = r#"import { action, wallet, u64 } from "jam";
 export function bump(value: number): number { return value + 1; }
