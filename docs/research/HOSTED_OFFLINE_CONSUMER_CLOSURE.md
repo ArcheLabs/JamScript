@@ -24,13 +24,15 @@ Managed rustc was already present and verified by doctor --json.
 
 Classification: managed target-selection resolver gap.
 
-## Run #16
+## Run #16 / #17
 
 Commit: 59d0044
 
 Run: [Build JamScript Toolchain Bundle #16](https://github.com/ArcheLabs/JamScript/actions/runs/33944913352)
 
-Job: pending hosted result.
+Job: failed in the final clean offline consumer smoke step. The earlier bundle
+build, verification, reproducibility, CLI preparation, and fixture preparation
+steps passed.
 
 Target selection: rustc_1_91, sourced from toolchains/polkavm.lock.
 
@@ -42,7 +44,26 @@ the Rustup channel date.
 Host Rust visibility: must remain hidden. The consumer PATH is not widened for
 Rust, Cargo, LLVM, Node, or ScriptC.
 
-Offline consumer build: pending hosted result.
+Offline consumer build: failed; the strict managed Rust channel verification
+was refined in commit 26a0084 because the compiler build date can differ from
+the Rustup channel date.
 
 Release publication remains disabled; this validation run does not promote a
 bundle.
+
+## Run #18
+
+Commit: 26a0084
+
+Run: [Build JamScript Toolchain Bundle #18](https://github.com/ArcheLabs/JamScript/actions/runs/33945454915)
+
+Job: [build-linux-x86_64-toolchain](https://github.com/ArcheLabs/JamScript/actions/runs/33945454915/job/101250590762)
+
+The bundle A/B build, both verification passes, byte comparison, prebuilt CLI
+preparation, and external fixture preparation all passed. The run failed only
+at the final clean offline consumer build.
+
+The hosted UI exposes the step failure and smoke log path but not the smoke log
+contents in the current access context. The exact next consumer-build error is
+therefore still a diagnostic blocker; no additional compiler-path relaxation
+has been made.
