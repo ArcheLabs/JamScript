@@ -21,12 +21,13 @@ and unpacked byte set; `verify-bundle.py` rejects any missing or modified file.
 | PolkaVM components | YES | bundled Rust dependencies, `toolchains/polkavm.lock`, target spec |
 | MiniJAM checkout | NO | forbidden by target and consumer checks |
 | Jambda | NO | not referenced or bundled |
+| Managed host linker | YES | `bin/jamscript-host-linker`, bundle-relative Clang and LLD execution |
 
 The bundle layout is:
 
 ```text
 manifest.json, Cargo.lock
-bin/{node,clang,llvm-ar,ar,ld.lld,rustc,cargo}
+bin/{node,clang,llvm-ar,ar,ld.lld,jamscript-host-linker,rustc,cargo}
 lib/{native runtime closure,rustlib}
 scriptc/{m2,node_modules,package-lock.json}
 runtime/{Cargo.lock,crates}
@@ -35,6 +36,11 @@ targets/jam/sdk/{include/jam,src}
 cargo/{config.toml,vendor}
 toolchains/polkavm.lock
 ```
+
+The bundle also contains `bin/jamscript-host-linker`. It is a relocatable
+wrapper that invokes the bundled Clang with the bundled `ld.lld`; the managed
+execution-closure verifier must pass before a second reproducibility bundle is
+built and before the bundle can be consumed by the offline smoke test.
 
 The installed consumer sets `CARGO_HOME` to an empty external directory. The
 guest build receives the bundle's own Cargo home and the ScriptC child process

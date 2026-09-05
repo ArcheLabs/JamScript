@@ -63,7 +63,10 @@ for host_tool in bash cp find grep mkdir python3 readelf sha256sum stat tar tee;
   ln -s -- "${host_tool_path}" "${HOST_TOOLS_ROOT}/${host_tool}"
 done
 export PATH="${HOST_TOOLS_ROOT}"
-for forbidden_tool in cargo clang ld.lld llvm-ar node rustc; do
+for forbidden_tool in cargo rustc \
+  clang cc gcc g++ c++ \
+  ld ld.lld llvm-ar ar \
+  node; do
   if command -v "${forbidden_tool}" >/dev/null 2>&1; then
     echo "forbidden host tool is visible on consumer PATH: ${forbidden_tool}" >&2
     exit 1
@@ -96,7 +99,7 @@ doctor = json.loads(pathlib.Path(sys.argv[1]).read_text())
 home = pathlib.Path(sys.argv[2]).resolve()
 assert doctor["canonical"] is True
 assert doctor["offline"] is True
-for key in ("node", "clang", "llvm_ar", "ar", "lld", "rustc", "cargo", "jam_sdk"):
+for key in ("node", "clang", "llvm_ar", "ar", "lld", "host_linker", "rustc", "cargo", "jam_sdk"):
     path = pathlib.Path(doctor[key]).resolve()
     assert path == home or home in path.parents, (key, path, home)
 print("MANAGED_PATHS_ONLY=PASS")

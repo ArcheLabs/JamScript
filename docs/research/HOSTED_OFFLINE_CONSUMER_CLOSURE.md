@@ -64,17 +64,19 @@ preparation, and external fixture preparation all passed. The run failed only
 at the final clean offline consumer build.
 
 Root cause: Cargo was building host-side build scripts and proc-macros with
-the default linker name cc. The consumer PATH intentionally hides host cc, so
-proc-macro2 failed before the PolkaVM guest linker phase.
+the default linker name `cc`. The consumer PATH intentionally hides host `cc`,
+so proc-macro2 failed before the PolkaVM guest linker phase.
 
-Fix: pass the managed Clang and archiver explicitly through PolkaVmBuildConfig,
-set CC/CXX/AR, and set the Linux x86_64 host Cargo linker to the absolute
-managed Clang path. The consumer PATH remains restricted.
+Fix: pass managed Clang, `llvm-ar`, and a bundle-relative host linker wrapper
+through `PolkaVmBuildConfig`. The wrapper invokes the bundled Clang with the
+bundled `ld.lld`, while the guest keeps its explicit PolkaVM linker selection.
+The consumer PATH remains restricted.
 
 The hosted UI exposed only the step failure and smoke log path; the supplied
 smoke output confirmed the cc ENOENT boundary.
 
 ## Next Hosted Run
 
-The next run will verify the managed host linker fix with host cc, Rust, Cargo,
-LLVM, Node, and ScriptC executables hidden from PATH.
+The next run will verify the managed host linker execution closure before the
+second reproducibility build and in the final consumer smoke test, with host
+`cc`, Rust, Cargo, LLVM, Node, and ScriptC executables hidden from PATH.

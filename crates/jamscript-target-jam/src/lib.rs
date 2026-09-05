@@ -361,6 +361,14 @@ impl JamTarget {
                 .toolchain
                 .as_ref()
                 .map(|toolchain| toolchain.llvm_ar.clone()),
+            lld_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.lld.clone()),
+            host_linker_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.host_linker.clone()),
             cargo_home: self
                 .toolchain
                 .as_ref()

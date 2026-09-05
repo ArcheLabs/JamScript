@@ -87,5 +87,12 @@ artifact is not a public distribution URL.
 The bundle contains only the JamScript-owned JAM target SDK under
 `targets/jam/sdk`; MiniJAM, Jambda, and deployment services are not bundled.
 
+The supported Linux x86_64 distribution is compiler-toolchain self-contained.
+It does not require host-installed Rust, Cargo, Node, GCC, Clang, LLD, LLVM
+binutils, or ScriptC. It may rely on the Ubuntu 24.04 Linux ABI boundary,
+including the system dynamic loader, glibc-compatible runtime libraries, and
+normal host CRT/startup objects. Native host Rust links use the bundle-relative
+managed host linker.
+
 The native bundle scope starts with `linux-x86_64`. Windows, macOS, and
 Linux ARM bundles use the same manifest and cache model when published.

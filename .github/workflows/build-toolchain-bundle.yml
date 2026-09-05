@@ -163,6 +163,14 @@ jobs:
           fi
           echo "BUNDLE_VERIFY_A=PASS" >> "${GITHUB_ENV}"
 
+      - name: Verify managed execution closure A
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/toolchain/verify-execution-closure.sh \
+            "$(<"${RUNNER_TEMP}/toolchain-verify-a/root.txt")"
+          echo "EXECUTION_CLOSURE_A=PASS" >> "${GITHUB_ENV}"
+
       - name: Build bundle B independently
         shell: bash
         run: |
@@ -195,6 +203,14 @@ jobs:
             exit 1
           fi
           echo "BUNDLE_VERIFY_B=PASS" >> "${GITHUB_ENV}"
+
+      - name: Verify managed execution closure B
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/toolchain/verify-execution-closure.sh \
+            "$(<"${RUNNER_TEMP}/toolchain-verify-b/root.txt")"
+          echo "EXECUTION_CLOSURE_B=PASS" >> "${GITHUB_ENV}"
 
       - name: Compare independent bundles
         shell: bash

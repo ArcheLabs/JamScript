@@ -129,6 +129,7 @@ required_files = [
     "bin/llvm-ar",
     "bin/ar",
     "bin/ld.lld",
+    "bin/jamscript-host-linker",
     "bin/rustc",
     "bin/cargo",
     "Cargo.lock",
@@ -163,6 +164,8 @@ if distribution["clang_version"] not in clang_version:
 for name in ["bin/llvm-ar", "bin/ld.lld", "bin/rustc", "bin/cargo"]:
     if not run_version(root / name):
         raise SystemExit(f"tool version query returned no output: {name}")
+if not os.access(root / "bin/jamscript-host-linker", os.X_OK):
+    raise SystemExit("managed host linker is not executable")
 if sha256(root / "bin/ar") != llvm_lock_values["llvm_ar_sha256"]:
     raise SystemExit("LLVM archiver lock hash mismatch: bin/ar")
 if "nightly" not in run_version(root / "bin/rustc"):

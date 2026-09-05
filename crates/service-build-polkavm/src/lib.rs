@@ -20,6 +20,8 @@ pub struct PolkaVmBuildConfig {
     pub rustc_path: Option<PathBuf>,
     pub clang_path: Option<PathBuf>,
     pub ar_path: Option<PathBuf>,
+    pub lld_path: Option<PathBuf>,
+    pub host_linker_path: Option<PathBuf>,
     pub cargo_home: Option<PathBuf>,
 }
 
@@ -35,6 +37,8 @@ impl Default for PolkaVmBuildConfig {
             rustc_path: None,
             clang_path: None,
             ar_path: None,
+            lld_path: None,
+            host_linker_path: None,
             cargo_home: None,
         }
     }
@@ -120,6 +124,7 @@ impl PolkaVmBuilder {
         }
         fs::create_dir_all(&request.output_dir)?;
 
+        validate_managed_host_toolchain(&self.config)?;
         let managed_rustc_version = if is_managed_mode(&self.config) {
             Some(verify_managed_rustc(&self.config, &lock)?)
         } else {
@@ -204,10 +209,13 @@ impl PolkaVmBuilder {
             cargo.env("CARGO_HOME", cargo_home);
         }
         if let Some(clang) = &self.config.clang_path {
+            let host_linker = self.config.host_linker_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("clang_path requires an explicit host_linker_path")
+            })?;
             cargo
                 .env("CC", clang)
                 .env("CXX", clang)
-                .env(host_linker_env_var(), clang);
+                .env(host_linker_env_var(), host_linker);
         }
         if let Some(ar) = &self.config.ar_path {
             cargo.env("AR", ar);
@@ -278,7 +286,22 @@ fn is_managed_mode(config: &PolkaVmBuildConfig) -> bool {
     config.rustc_path.is_some() || config.cargo_path.is_some()
 }
 
+fn validate_managed_host_toolchain(config: &PolkaVmBuildConfig) -> Result<()> {
+    if is_managed_mode(config)
+        && (config.clang_path.is_none()
+            || config.ar_path.is_none()
+            || config.lld_path.is_none()
+            || config.host_linker_path.is_none())
+    {
+        bail!(
+            "managed PolkaVM build requires explicit clang_path, ar_path, lld_path, and host_linker_path"
+        );
+    }
+    Ok(())
+}
+
 fn host_linker_env_var() -> &'static str {
+    // The v1 managed distribution currently ships Linux x86_64 only.
     "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
 }
 
@@ -684,6 +707,25 @@ mod tests {
         assert!(error
             .to_string()
             .contains("managed PolkaVM build cannot use target_selection=autodetect"));
+    }
+
+    #[test]
+    fn managed_mode_is_selected_by_an_explicit_cargo_or_rustc_path() {
+        let mut cargo_only = test_config(false);
+        cargo_only.cargo_path = Some(PathBuf::from("/managed/bin/cargo"));
+        assert!(is_managed_mode(&cargo_only));
+
+        let mut rustc_only = test_config(false);
+        rustc_only.rustc_path = Some(PathBuf::from("/managed/bin/rustc"));
+        assert!(is_managed_mode(&rustc_only));
+    }
+
+    #[test]
+    fn managed_host_linker_targets_the_shipping_linux_host() {
+        assert_eq!(
+            host_linker_env_var(),
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
+        );
     }
 
     #[test]

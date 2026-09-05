@@ -243,6 +243,7 @@ fn doctor(json: bool) -> Result<()> {
                 "llvm_ar": root.join("bin/llvm-ar"),
                 "ar": root.join("bin/ar"),
                 "lld": root.join("bin/ld.lld"),
+                "host_linker": root.join("bin/jamscript-host-linker"),
                 "rustc": root.join("bin/rustc"),
                 "cargo": root.join("bin/cargo"),
                 "jam_sdk": root.join("targets/jam/sdk"),
