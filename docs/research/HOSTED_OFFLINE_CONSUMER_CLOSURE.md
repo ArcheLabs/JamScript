@@ -63,7 +63,18 @@ The bundle A/B build, both verification passes, byte comparison, prebuilt CLI
 preparation, and external fixture preparation all passed. The run failed only
 at the final clean offline consumer build.
 
-The hosted UI exposes the step failure and smoke log path but not the smoke log
-contents in the current access context. The exact next consumer-build error is
-therefore still a diagnostic blocker; no additional compiler-path relaxation
-has been made.
+Root cause: Cargo was building host-side build scripts and proc-macros with
+the default linker name cc. The consumer PATH intentionally hides host cc, so
+proc-macro2 failed before the PolkaVM guest linker phase.
+
+Fix: pass the managed Clang and archiver explicitly through PolkaVmBuildConfig,
+set CC/CXX/AR, and set the Linux x86_64 host Cargo linker to the absolute
+managed Clang path. The consumer PATH remains restricted.
+
+The hosted UI exposed only the step failure and smoke log path; the supplied
+smoke output confirmed the cc ENOENT boundary.
+
+## Next Hosted Run
+
+The next run will verify the managed host linker fix with host cc, Rust, Cargo,
+LLVM, Node, and ScriptC executables hidden from PATH.

@@ -353,6 +353,14 @@ impl JamTarget {
                 .toolchain
                 .as_ref()
                 .map(|toolchain| toolchain.rustc.clone()),
+            clang_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.clang.clone()),
+            ar_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.llvm_ar.clone()),
             cargo_home: self
                 .toolchain
                 .as_ref()

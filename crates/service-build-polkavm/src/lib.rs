@@ -18,6 +18,8 @@ pub struct PolkaVmBuildConfig {
     /// for contributor-facing callers that use rustup.
     pub cargo_path: Option<PathBuf>,
     pub rustc_path: Option<PathBuf>,
+    pub clang_path: Option<PathBuf>,
+    pub ar_path: Option<PathBuf>,
     pub cargo_home: Option<PathBuf>,
 }
 
@@ -31,6 +33,8 @@ impl Default for PolkaVmBuildConfig {
             rustflags: None,
             cargo_path: None,
             rustc_path: None,
+            clang_path: None,
+            ar_path: None,
             cargo_home: None,
         }
     }
@@ -199,6 +203,15 @@ impl PolkaVmBuilder {
         if let Some(cargo_home) = &self.config.cargo_home {
             cargo.env("CARGO_HOME", cargo_home);
         }
+        if let Some(clang) = &self.config.clang_path {
+            cargo
+                .env("CC", clang)
+                .env("CXX", clang)
+                .env(host_linker_env_var(), clang);
+        }
+        if let Some(ar) = &self.config.ar_path {
+            cargo.env("AR", ar);
+        }
         if let Some(rustflags) = &self.config.rustflags {
             cargo.env("RUSTFLAGS", rustflags);
         }
@@ -263,6 +276,10 @@ struct ElfDiagnostics {
 
 fn is_managed_mode(config: &PolkaVmBuildConfig) -> bool {
     config.rustc_path.is_some() || config.cargo_path.is_some()
+}
+
+fn host_linker_env_var() -> &'static str {
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
 }
 
 fn resolve_target_args(
