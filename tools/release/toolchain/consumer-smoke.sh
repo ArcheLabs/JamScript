@@ -54,7 +54,7 @@ export XDG_CACHE_HOME="${RUN_ROOT}/cache"
 export CARGO_HOME="${CARGO_HOME_ROOT}"
 export RUSTUP_HOME="${RUSTUP_HOME_ROOT}"
 export npm_config_cache="${NODE_CACHE_ROOT}"
-for host_tool in bash cp find grep mkdir python3 readelf sha256sum stat tar tee; do
+for host_tool in bash cp dirname find grep mkdir python3 readelf sha256sum stat tar tee; do
   host_tool_path="$(type -P "${host_tool}" || true)"
   test -x "${host_tool_path}" || {
     echo "consumer prerequisite is missing: ${host_tool}" >&2
