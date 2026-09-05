@@ -119,7 +119,10 @@ if [[ -n "$(find "${CARGO_HOME_ROOT}" -mindepth 1 -print -quit 2>/dev/null)" ]];
   echo "consumer Cargo home was unexpectedly populated" >&2
   exit 1
 fi
-if grep -R -E -n '/home/runner/work/|/home/libingjiang/|JamScript/targets/|minijam-client|Jambda|JAMSCRIPT_MINIJAM_SDK' "${OUTPUT}"; then
+# The deployable outputs include ELF/PolkaVM binaries. GNU grep treats those
+# as binary data and reports a match even when the only occurrence is in a
+# non-text section, so restrict this source-path check to text artifacts.
+if grep -R -I -E -n '/home/runner/work/|/home/libingjiang/|JamScript/targets/|minijam-client|Jambda|JAMSCRIPT_MINIJAM_SDK' "${OUTPUT}"; then
   echo "SOURCE_CHECKOUT_LEAK=FAIL" >&2
   exit 1
 fi
