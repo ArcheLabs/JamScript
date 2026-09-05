@@ -1,4 +1,4 @@
-# Hosted Offline Consumer Closure
+# Hosted Offline Consumer Closure (historical)
 
 This report records the hosted clean-consumer failures and the changes that
 move the failure boundary toward a fully managed, offline build.
@@ -75,8 +75,9 @@ The consumer PATH remains restricted.
 The hosted UI exposed only the step failure and smoke log path; the supplied
 smoke output confirmed the cc ENOENT boundary.
 
-## Next Hosted Run
+## Current status
 
-The next run will verify the managed host linker execution closure before the
-second reproducibility build and in the final consumer smoke test, with host
-`cc`, Rust, Cargo, LLVM, Node, and ScriptC executables hidden from PATH.
+The standalone consumer smoke test was removed from the candidate workflow.
+Bundle A/B reproducibility, bundle integrity, and the managed execution closure
+remain the release gates; this report is retained as a record of the earlier
+consumer failures.

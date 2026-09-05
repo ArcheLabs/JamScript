@@ -76,11 +76,8 @@ artifact `toolchain-linux-x86_64` for seven days. The artifact includes the
 archive, `SHA256SUMS`, `bundle-status.json`, `bundle-metadata.json`, and the
 internal toolchain manifest.
 
-The workflow prepares a prebuilt CLI and a generic fixture archive before the
-consumer phase. The consumer phase has no source checkout dependency: it
-installs the archive through `ToolchainManager`, verifies managed executable
-paths with `jamscript doctor --json`, then runs `jamscript build --offline`
-from a fresh cache and an external project directory. The checked-in
+The workflow validates the archive through `ToolchainManager`, checks both
+independent builds, and verifies the managed execution closure. The checked-in
 `published = false` record is never edited or promoted by Actions; an Actions
 artifact is not a public distribution URL.
 

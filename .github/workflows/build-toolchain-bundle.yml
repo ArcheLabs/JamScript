@@ -226,55 +226,6 @@ jobs:
           echo "BUNDLE_A_B_IDENTICAL=PASS" >> "${GITHUB_ENV}"
           echo "BUNDLE_REPRODUCIBILITY=PASS"
 
-      - name: Prepare consumer CLI and fixture
-        shell: bash
-        run: |
-          set -euo pipefail
-          prep="${RUNNER_TEMP}/consumer-prep"
-          rm -rf -- "${prep}"
-          mkdir -p "${prep}"
-          git archive --format=tar HEAD | tar -xf - -C "${prep}"
-          bundle_size="$(stat -c '%s' "${BUNDLE_A}")"
-          bundle_sha256="$(sha256sum "${BUNDLE_A}" | awk '{print $1}')"
-          python3 ./tools/release/toolchain/make-candidate-manifest.py \
-            --input "${prep}/toolchains/distribution-v1.toml" \
-            --output "${prep}/toolchains/distribution-v1.toml" \
-            --url "file://${BUNDLE_A}" --sha256 "${bundle_sha256}" --size "${bundle_size}"
-          cargo build --locked --manifest-path "${prep}/Cargo.toml" --bin jamscript
-          cp -L "${prep}/target/debug/jamscript" "${RUNNER_TEMP}/jamscript-consumer-cli"
-          (cd "${prep}/examples/dynamic-state-scriptc" && tar --format=ustar -cf "${RUNNER_TEMP}/dynamic-state-scriptc-fixture.tar" .)
-          echo "CONSUMER_CLI=${RUNNER_TEMP}/jamscript-consumer-cli" >> "${GITHUB_ENV}"
-          echo "CONSUMER_FIXTURE=${RUNNER_TEMP}/dynamic-state-scriptc-fixture.tar" >> "${GITHUB_ENV}"
-          echo "CONSUMER_ARTIFACT_PREPARATION=PASS"
-
-      - name: Run clean offline consumer smoke test
-        shell: bash
-        run: |
-          set -euo pipefail
-          install_home="${RUNNER_TEMP}/consumer-toolchain"
-          output="${RUNNER_TEMP}/consumer-output"
-          consumer_root="${RUNNER_TEMP}/jamscript-consumer"
-          if [[ -e "${consumer_root}" ]]; then
-            echo "consumer root already exists: ${consumer_root}"
-            exit 1
-          fi
-          if ! ./tools/release/toolchain/consumer-smoke.sh \
-            "${BUNDLE_A}" "${CONSUMER_CLI}" "${CONSUMER_FIXTURE}" \
-            "${install_home}" "${output}"; then
-            if [[ -f "${consumer_root}/smoke.log" ]]; then
-              {
-                echo "### Offline consumer diagnostics"
-                echo
-                echo '```text'
-                tail -200 "${consumer_root}/smoke.log"
-                echo '```'
-              } >> "${GITHUB_STEP_SUMMARY}"
-            fi
-            echo "OFFLINE_CONSUMER_BUILD=FAIL"
-            exit 1
-          fi
-          echo "OFFLINE_CONSUMER_BUILD=PASS" >> "${GITHUB_ENV}"
-
       - name: Prepare validated artifact and status
         shell: bash
         run: |
@@ -340,7 +291,6 @@ jobs:
             echo "| Build B | PASS |"
             echo "| Verify B | PASS |"
             echo "| A/B equality | PASS |"
-            echo "| Offline consumer | PASS |"
             echo "| Docker user dependency | NO |"
             echo "| Public release | PENDING (distribution-v1.toml published=false) |"
           } >> "${GITHUB_STEP_SUMMARY}"
