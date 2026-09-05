@@ -1,4 +1,4 @@
-import { readFile, mkdir, writeFile, copyFile } from "node:fs/promises";
+import { readFile, mkdir, writeFile, copyFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import ts from "typescript5/lib/typescript.js";
 import { compileLibrary } from "@scriptc/compiler";
@@ -50,6 +50,19 @@ const result = await compileLibrary({
   emitIr: true,
 });
 if (!result.ok) throw new Error(JSON.stringify(result.diagnostics, null, 2));
+
+// The compiler's public C and optional IR diagnostics identify the canonical
+// source file with its absolute path. Keep only the consumer-facing C TU,
+// rebased to the output directory, and discard build-only files that would
+// otherwise leak machine-specific paths into the deployment artifact.
+const generatedC = await readFile(result.cPath, "utf8");
+await writeFile(
+  resolve(output, "scriptc_service.lib.c"),
+  generatedC.split(output).join("."),
+);
+await rm(result.cPath, { force: true });
+if (result.irPath) await rm(result.irPath, { force: true });
+if (result.archivePath) await rm(result.archivePath, { force: true });
 
 function transformService(text, service) {
   const file = ts.createSourceFile("service.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
