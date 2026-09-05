@@ -1,0 +1,324 @@
+name: Build JamScript Toolchain Bundle
+
+on:
+  push:
+    branches:
+      - codex/toolchain-distribution-v1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-x86_64-toolchain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TZ: UTC
+      LANG: C
+      LC_ALL: C
+      JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING: "1"
+
+    steps:
+      - name: Checkout exact workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          submodules: false
+
+      - name: Verify runner architecture and source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -m)" != "x86_64" ]]; then
+            echo "TOOLCHAIN_PLATFORM=FAIL (expected x86_64, got $(uname -m))"
+            exit 1
+          fi
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "${source_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "SOURCE_IDENTITY=FAIL: HEAD=${source_sha} GITHUB_SHA=${GITHUB_SHA}"
+            exit 1
+          fi
+          echo "TOOLCHAIN_PLATFORM=linux-x86_64"
+          echo "JAMSCRIPT_SOURCE_SHA=${source_sha}"
+          echo "JAMSCRIPT_SOURCE_SHA=${source_sha}" >> "${GITHUB_ENV}"
+          echo "SOURCE_IDENTITY=PASS"
+
+      - name: Install exact Node release
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: toolchains/scriptc/NODE_VERSION
+
+      - name: Install release engineering prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zstd patchelf jq curl xz-utils
+          node --version
+          zstd --version | head -1
+
+      - name: Install exact Rust release
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src
+
+      - name: Check pinned source locks
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          test "${rust_toolchain}" = "nightly-2026-05-02"
+          echo "RUST_TOOLCHAIN=${rust_toolchain}"
+          node_version="$(tr -d '\r\n' < toolchains/scriptc/NODE_VERSION)"
+          test "$(node --version | tr -d '\r\n' | sed 's/^v//')" = "${node_version}"
+          echo "NODE_VERSION=${node_version}"
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "${GITHUB_ENV}"
+
+      - name: Install locked ScriptC packages
+        working-directory: toolchains/scriptc
+        shell: bash
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run focused toolchain tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo test --locked -p jamscript-toolchain; then
+            echo "TOOLCHAIN_TESTS=FAIL"
+            exit 1
+          fi
+          if ! cargo test --locked -p jamscript-cli; then
+            echo "TOOLCHAIN_TESTS=FAIL"
+            exit 1
+          fi
+          if ! cargo clippy --locked -p jamscript-toolchain -- -D warnings; then
+            echo "TOOLCHAIN_TESTS=FAIL"
+            exit 1
+          fi
+          ./scripts/check-toolchain-distribution.sh
+          python3 ./tools/release/toolchain/test-llvm-lock.py
+          echo "TOOLCHAIN_TESTS=PASS"
+
+      - name: Bootstrap exact LLVM distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          llvm_out="${RUNNER_TEMP}/jamscript-llvm"
+          ./tools/release/toolchain/bootstrap-llvm-linux.sh "${llvm_out}"
+          while IFS= read -r line; do
+            echo "${line}" >> "${GITHUB_ENV}"
+          done < "${llvm_out}/llvm.env"
+
+      - name: Verify exact LLVM identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/toolchain/verify-llvm-linux.sh "${LLVM_ROOT}"
+
+      - name: Record hosted runner disk before production
+        shell: bash
+        run: df -h
+
+      - name: Build bundle A
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/toolchain-build-a"
+          mkdir -p "${out}"
+          export SCRIPTC_NODE="$(command -v node)"
+          build_log="${RUNNER_TEMP}/toolchain-build-a.log"
+          if ! ./tools/release/toolchain/build-linux.sh "${out}" 2>&1 | tee "${build_log}"; then
+            echo "PRODUCER_FAIL=A"
+            {
+              echo "### Bundle A producer diagnostics"
+              echo
+              echo '```text'
+              tail -200 "${build_log}"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          bundle="$(jq -er '.archive' "${out}/bundle-metadata.json")"
+          test "${bundle}" = "jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+          test -f "${out}/${bundle}"
+          test "$(jq -er '.sourceRevision' "${out}/bundle-metadata.json")" = "${JAMSCRIPT_SOURCE_SHA}"
+          echo "BUNDLE_A=${out}/${bundle}" >> "${GITHUB_ENV}"
+          echo "BUNDLE_A_SHA256=$(sha256sum "${out}/${bundle}" | awk '{print $1}')" >> "${GITHUB_ENV}"
+          echo "BUNDLE_A_SIZE=$(stat -c '%s' "${out}/${bundle}")" >> "${GITHUB_ENV}"
+          echo "BUNDLE_METADATA_A=${out}/bundle-metadata.json" >> "${GITHUB_ENV}"
+          echo "BUNDLE_BUILD_A=PASS"
+
+      - name: Verify bundle A through ToolchainManager
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify_dir="${RUNNER_TEMP}/toolchain-verify-a"
+          mkdir -p "${verify_dir}"
+          if ! ./tools/release/toolchain/verify-bundle.sh "${BUNDLE_A}" "${verify_dir}" "${verify_dir}/root.txt"; then
+            echo "VERIFIER_FAIL=A"
+            exit 1
+          fi
+          echo "BUNDLE_VERIFY_A=PASS" >> "${GITHUB_ENV}"
+
+      - name: Verify managed execution closure A
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/toolchain/verify-execution-closure.sh \
+            "$(<"${RUNNER_TEMP}/toolchain-verify-a/root.txt")"
+          echo "EXECUTION_CLOSURE_A=PASS" >> "${GITHUB_ENV}"
+
+      - name: Build bundle B independently
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/toolchain-build-b"
+          mkdir -p "${out}"
+          export SCRIPTC_NODE="$(command -v node)"
+          if ! ./tools/release/toolchain/build-linux.sh "${out}"; then
+            echo "PRODUCER_FAIL=B"
+            exit 1
+          fi
+          bundle="$(jq -er '.archive' "${out}/bundle-metadata.json")"
+          test "${bundle}" = "jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+          test -f "${out}/${bundle}"
+          test "$(jq -er '.sourceRevision' "${out}/bundle-metadata.json")" = "${JAMSCRIPT_SOURCE_SHA}"
+          echo "BUNDLE_B=${out}/${bundle}" >> "${GITHUB_ENV}"
+          echo "BUNDLE_B_SHA256=$(sha256sum "${out}/${bundle}" | awk '{print $1}')" >> "${GITHUB_ENV}"
+          echo "BUNDLE_B_SIZE=$(stat -c '%s' "${out}/${bundle}")" >> "${GITHUB_ENV}"
+          echo "BUNDLE_METADATA_B=${out}/bundle-metadata.json" >> "${GITHUB_ENV}"
+          echo "BUNDLE_BUILD_B=PASS"
+
+      - name: Verify bundle B through ToolchainManager
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify_dir="${RUNNER_TEMP}/toolchain-verify-b"
+          mkdir -p "${verify_dir}"
+          if ! ./tools/release/toolchain/verify-bundle.sh "${BUNDLE_B}" "${verify_dir}" "${verify_dir}/root.txt"; then
+            echo "VERIFIER_FAIL=B"
+            exit 1
+          fi
+          echo "BUNDLE_VERIFY_B=PASS" >> "${GITHUB_ENV}"
+
+      - name: Verify managed execution closure B
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/toolchain/verify-execution-closure.sh \
+            "$(<"${RUNNER_TEMP}/toolchain-verify-b/root.txt")"
+          echo "EXECUTION_CLOSURE_B=PASS" >> "${GITHUB_ENV}"
+
+      - name: Compare independent bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cmp -s "${BUNDLE_A}" "${BUNDLE_B}"; then
+            echo "BUNDLE_REPRODUCIBILITY=FAIL"
+            python3 ./tools/release/toolchain/compare-bundles.py \
+              "$(<"${RUNNER_TEMP}/toolchain-verify-a/root.txt")" \
+              "$(<"${RUNNER_TEMP}/toolchain-verify-b/root.txt")" || true
+            exit 1
+          fi
+          echo "BUNDLE_A_B_IDENTICAL=PASS" >> "${GITHUB_ENV}"
+          echo "BUNDLE_REPRODUCIBILITY=PASS"
+
+      - name: Prepare validated artifact and status
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${RUNNER_TEMP}/toolchain-artifact"
+          mkdir -p "${artifact_dir}"
+          bundle_file="$(basename -- "${BUNDLE_A}")"
+          bundle_sha256="$(sha256sum "${BUNDLE_A}" | awk '{print $1}')"
+          bundle_size="$(stat -c '%s' "${BUNDLE_A}")"
+          toolchain_id="$(jq -er '.toolchainId' "${BUNDLE_METADATA_A}")"
+          test "${toolchain_id}" = "scriptc-m2-v1"
+          cp -L "${BUNDLE_A}" "${artifact_dir}/${bundle_file}"
+          cp -L "${BUNDLE_METADATA_A}" "${artifact_dir}/bundle-metadata.json"
+          cp -L "${RUNNER_TEMP}/toolchain-build-a/toolchain-manifest.json" "${artifact_dir}/toolchain-manifest.json"
+          (cd "${artifact_dir}" && sha256sum "${bundle_file}" > SHA256SUMS)
+          python3 ./tools/release/toolchain/write-bundle-status.py \
+            --output "${artifact_dir}/bundle-status.json" \
+            --source-sha "${JAMSCRIPT_SOURCE_SHA}" \
+            --toolchain-id "${toolchain_id}" --platform linux-x86_64 \
+            --bundle "${bundle_file}" --sha256 "${bundle_sha256}" \
+            --size "${bundle_size}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          echo "BUNDLE_FILE=${bundle_file}" >> "${GITHUB_ENV}"
+          echo "BUNDLE_SHA256=${bundle_sha256}" >> "${GITHUB_ENV}"
+          echo "BUNDLE_SIZE=${bundle_size}" >> "${GITHUB_ENV}"
+          echo "TOOLCHAIN_ID=${toolchain_id}" >> "${GITHUB_ENV}"
+          echo "ARTIFACT_DIR=${artifact_dir}" >> "${GITHUB_ENV}"
+          du -sh "${RUNNER_TEMP}/toolchain-build-a" "${RUNNER_TEMP}/toolchain-build-b" "${artifact_dir}"
+          installed_root="$(<"${RUNNER_TEMP}/toolchain-verify-a/root.txt")"
+          file_count="$(find "${installed_root}" -type f -printf '.' | wc -c)"
+          unpacked_bytes="$(du -sb "${installed_root}" | awk '{print $1}')"
+          {
+            echo "### Validated bundle inventory"
+            echo
+            echo "- File count: ${file_count}"
+            echo "- Unpacked bytes: ${unpacked_bytes}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Write production summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## JamScript Linux x86_64 toolchain bundle"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Source SHA | ${JAMSCRIPT_SOURCE_SHA} |"
+            echo "| Hosted run/job | ${GITHUB_RUN_ID} / ${GITHUB_JOB} |"
+            echo "| Toolchain ID | ${TOOLCHAIN_ID} |"
+            echo "| Platform | linux-x86_64 |"
+            echo "| Bundle | ${BUNDLE_FILE} |"
+            echo "| Size | ${BUNDLE_SIZE} bytes |"
+            echo "| SHA256 | ${BUNDLE_SHA256} |"
+            echo "| LLVM distribution | ${LLVM_DISTRIBUTION} |"
+            echo "| LLVM version | ${LLVM_VERSION} |"
+            echo "| LLVM archive SHA256 | ${LLVM_ARCHIVE_SHA256} |"
+            echo "| Host apt LLVM | NOT USED |"
+            echo "| Bundle A SHA256 / size | ${BUNDLE_A_SHA256} / ${BUNDLE_A_SIZE} bytes |"
+            echo "| Bundle B SHA256 / size | ${BUNDLE_B_SHA256} / ${BUNDLE_B_SIZE} bytes |"
+            echo "| Build A | PASS |"
+            echo "| Verify A | PASS |"
+            echo "| Build B | PASS |"
+            echo "| Verify B | PASS |"
+            echo "| A/B equality | PASS |"
+            echo "| Docker user dependency | NO |"
+            echo "| Public release | PENDING (distribution-v1.toml published=false) |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload validated toolchain artifact
+        id: upload-toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolchain-linux-x86_64
+          path: ${{ env.ARTIFACT_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Record successful upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ACTIONS_ARTIFACT_UPLOAD=PASS"
+          echo "TOOLCHAIN_BUNDLE_WORKFLOW=PASS"
+          {
+            echo
+            echo "TOOLCHAIN_BUNDLE_WORKFLOW=PASS"
+            echo "ACTIONS_ARTIFACT_UPLOAD=PASS"
+            echo "Artifact: toolchain-linux-x86_64"
+            echo "Artifact ID: ${{ steps.upload-toolchain.outputs.artifact-id }}"
+            echo
+            echo "PUBLIC_TOOLCHAIN_RELEASE=PENDING"
+            echo "DISTRIBUTION_MANIFEST_PUBLISHED=FALSE"
+            echo "HOSTED_PUBLIC_DOWNLOAD_TEST=PENDING"
+            echo "CROSS_HOST_REPRODUCIBILITY=PENDING"
+          } >> "${GITHUB_STEP_SUMMARY}"

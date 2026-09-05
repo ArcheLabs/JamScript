@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use polkavm_linker::{target_json_path, TargetJsonArgs};
+use polkavm_linker::{target_json_path, RustcVersion, TargetJsonArgs};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
@@ -14,6 +14,15 @@ pub struct PolkaVmBuildConfig {
     pub diagnostic: bool,
     pub lock_path: PathBuf,
     pub rustflags: Option<String>,
+    /// Managed distributions pass these explicitly. `None` is retained only
+    /// for contributor-facing callers that use rustup.
+    pub cargo_path: Option<PathBuf>,
+    pub rustc_path: Option<PathBuf>,
+    pub clang_path: Option<PathBuf>,
+    pub ar_path: Option<PathBuf>,
+    pub lld_path: Option<PathBuf>,
+    pub host_linker_path: Option<PathBuf>,
+    pub cargo_home: Option<PathBuf>,
 }
 
 impl Default for PolkaVmBuildConfig {
@@ -24,6 +33,13 @@ impl Default for PolkaVmBuildConfig {
             diagnostic: false,
             lock_path: repo_root().join("toolchains/polkavm.lock"),
             rustflags: None,
+            cargo_path: None,
+            rustc_path: None,
+            clang_path: None,
+            ar_path: None,
+            lld_path: None,
+            host_linker_path: None,
+            cargo_home: None,
         }
     }
 }
@@ -108,10 +124,15 @@ impl PolkaVmBuilder {
         }
         fs::create_dir_all(&request.output_dir)?;
 
-        // 0.30's non-exhaustive default is deliberately the public API for
-        // `is_64_bit = true` plus RustcVersion::Autodetect. Do not infer a
-        // target variant from the installed compiler here.
-        let target_json = target_json_path(TargetJsonArgs::default())
+        validate_managed_host_toolchain(&self.config)?;
+        let managed_rustc_version = if is_managed_mode(&self.config) {
+            Some(verify_managed_rustc(&self.config, &lock)?)
+        } else {
+            None
+        };
+        let target_args = resolve_target_args(&self.config, &lock)?;
+        let target_selection = lock.target_selection.as_str();
+        let target_json = target_json_path(target_args)
             .map_err(|error| anyhow::anyhow!("selecting official PolkaVM target: {error}"))?
             .canonicalize()
             .context("canonicalizing official PolkaVM target")?;
@@ -129,14 +150,39 @@ impl PolkaVmBuilder {
             .to_string();
         let target_hash = hash_file(&target_json)?;
 
+        if self.config.diagnostic {
+            eprintln!(
+                "PolkaVM Rust mode: {}",
+                if is_managed_mode(&self.config) {
+                    "managed"
+                } else {
+                    "contributor"
+                }
+            );
+            if let Some(rustc) = &self.config.rustc_path {
+                eprintln!("PolkaVM Rustc path: {}", rustc.display());
+            }
+            eprintln!("PolkaVM Rust lock: {}", lock.rust);
+            eprintln!("PolkaVM target selection: {target_selection}");
+            eprintln!("PolkaVM target variant: {target_variant}");
+            eprintln!("PolkaVM target hash: {target_hash}");
+        }
+
         let target_dir = request
             .manifest_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("target-polkavm");
-        let mut cargo = Command::new("cargo");
+        let mut cargo = Command::new(
+            self.config
+                .cargo_path
+                .as_deref()
+                .unwrap_or_else(|| Path::new("cargo")),
+        );
+        if self.config.cargo_path.is_none() {
+            cargo.arg(format!("+{}", self.config.rust_toolchain));
+        }
         cargo
-            .arg(format!("+{}", self.config.rust_toolchain))
             .args([
                 "-Z",
                 "build-std=core,alloc",
@@ -156,6 +202,24 @@ impl PolkaVmBuilder {
                 "SERVICE_BUILD_POLKAVM_NATIVE_ARCHIVES",
                 encode_archives(&request.native_archives),
             );
+        if let Some(rustc) = &self.config.rustc_path {
+            cargo.env("RUSTC", rustc);
+        }
+        if let Some(cargo_home) = &self.config.cargo_home {
+            cargo.env("CARGO_HOME", cargo_home);
+        }
+        if let Some(clang) = &self.config.clang_path {
+            let host_linker = self.config.host_linker_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("clang_path requires an explicit host_linker_path")
+            })?;
+            cargo
+                .env("CC", clang)
+                .env("CXX", clang)
+                .env(host_linker_env_var(), host_linker);
+        }
+        if let Some(ar) = &self.config.ar_path {
+            cargo.env("AR", ar);
+        }
         if let Some(rustflags) = &self.config.rustflags {
             cargo.env("RUSTFLAGS", rustflags);
         }
@@ -183,7 +247,10 @@ impl PolkaVmBuilder {
             fs::write(request.output_dir.join("symbols.txt"), &diagnostics.symbols)?;
         }
 
-        let rustc_version = rustc_version(&self.config.rust_toolchain)?;
+        let rustc_version = match managed_rustc_version {
+            Some(version) => version,
+            None => rustc_version(&self.config.rust_toolchain)?,
+        };
         validate_resolved_guest_versions(&request.manifest_path, &lock)?;
         Ok(GuestBuildArtifacts {
             elf: output_elf,
@@ -213,6 +280,77 @@ struct ElfDiagnostics {
     header: String,
     relocations: String,
     symbols: String,
+}
+
+fn is_managed_mode(config: &PolkaVmBuildConfig) -> bool {
+    config.rustc_path.is_some() || config.cargo_path.is_some()
+}
+
+fn validate_managed_host_toolchain(config: &PolkaVmBuildConfig) -> Result<()> {
+    if is_managed_mode(config)
+        && (config.clang_path.is_none()
+            || config.ar_path.is_none()
+            || config.lld_path.is_none()
+            || config.host_linker_path.is_none())
+    {
+        bail!(
+            "managed PolkaVM build requires explicit clang_path, ar_path, lld_path, and host_linker_path"
+        );
+    }
+    Ok(())
+}
+
+fn host_linker_env_var() -> &'static str {
+    // The v1 managed distribution currently ships Linux x86_64 only.
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
+}
+
+fn resolve_target_args(
+    config: &PolkaVmBuildConfig,
+    lock: &ToolchainLock,
+) -> Result<TargetJsonArgs> {
+    let mut args = TargetJsonArgs::default();
+    args.is_64_bit = config.is_64_bit;
+    args.rustc_version = match lock.target_selection.as_str() {
+        "rustc_1_91" => RustcVersion::Rustc_1_91,
+        "legacy" => RustcVersion::Legacy,
+        "autodetect" if is_managed_mode(config) => {
+            bail!("managed PolkaVM build cannot use target_selection=autodetect")
+        }
+        "autodetect" => RustcVersion::Autodetect,
+        value => bail!("unsupported PolkaVM target_selection: {value}"),
+    };
+    Ok(args)
+}
+
+fn verify_managed_rustc(config: &PolkaVmBuildConfig, lock: &ToolchainLock) -> Result<String> {
+    let rustc = config.rustc_path.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "managed PolkaVM build requires an explicit rustc_path when cargo_path is configured"
+        )
+    })?;
+    let version = command_rustc_version(rustc)
+        .with_context(|| format!("verifying managed rustc against {}", lock.rust))?;
+    let sysroot = command_rustc_sysroot(rustc)?;
+    let channel_manifest = sysroot.join("lib/rustlib/multirust-channel-manifest.toml");
+    let channel = fs::read_to_string(&channel_manifest).with_context(|| {
+        format!(
+            "reading managed rust channel manifest {}",
+            channel_manifest.display()
+        )
+    })?;
+    let expected_date = lock.rust.strip_prefix("nightly-").unwrap_or(&lock.rust);
+    let expected_date_line = format!("date = \"{expected_date}\"");
+    if !channel
+        .lines()
+        .any(|line| line.trim() == expected_date_line)
+    {
+        bail!(
+            "managed rustc channel does not match locked toolchain {}",
+            lock.rust
+        );
+    }
+    Ok(version)
 }
 
 fn validate_elf(
@@ -330,6 +468,36 @@ fn rustc_version(toolchain: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn command_rustc_version(rustc: &Path) -> Result<String> {
+    let output = Command::new(rustc)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("reading rustc version from {}", rustc.display()))?;
+    if !output.status.success() {
+        bail!(
+            "rustc version query failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn command_rustc_sysroot(rustc: &Path) -> Result<PathBuf> {
+    let output = Command::new(rustc)
+        .args(["--print", "sysroot"])
+        .output()
+        .with_context(|| format!("reading rustc sysroot from {}", rustc.display()))?;
+    if !output.status.success() {
+        bail!(
+            "rustc sysroot query failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
 fn run(command: &mut Command, description: &str) -> Result<()> {
     let output = command
         .stdout(Stdio::piped())
@@ -378,6 +546,8 @@ struct ToolchainLock {
     target_source: String,
     target_selection: String,
     clang_major: u32,
+    #[serde(default)]
+    clang_version: Option<String>,
 }
 
 impl ToolchainLock {
@@ -390,10 +560,19 @@ impl ToolchainLock {
             || lock.architecture != "riscv64"
             || lock.abi != "lp64e"
             || lock.target_source != "polkavm-linker"
-            || lock.target_selection != "autodetect"
             || lock.clang_major != 20
+            || lock.clang_version.as_deref() != Some("20.1.8")
         {
             bail!("unsupported PolkaVM toolchain lock {}", path.display());
+        }
+        if !matches!(
+            lock.target_selection.as_str(),
+            "rustc_1_91" | "legacy" | "autodetect"
+        ) {
+            bail!(
+                "unsupported PolkaVM target_selection: {}",
+                lock.target_selection
+            );
         }
         let cargo_lock = path
             .parent()
@@ -459,11 +638,11 @@ fn repo_root() -> PathBuf {
 
 fn default_toolchain() -> String {
     let path = repo_root().join("toolchains/polkavm.lock");
-    let contents = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
-    toml::from_str::<ToolchainLock>(&contents)
-        .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
-        .rust
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|contents| toml::from_str::<ToolchainLock>(&contents).ok())
+        .map(|lock| lock.rust)
+        .unwrap_or_else(|| "nightly-2026-05-02".into())
 }
 
 #[cfg(test)]
@@ -493,5 +672,93 @@ mod tests {
         assert_eq!(lock.rust, PolkaVmBuildConfig::default().rust_toolchain);
         assert_eq!(lock.polkavm_linker, "0.30.0");
         assert_eq!(lock.polkavm_derive, "0.30.0");
+        assert_eq!(lock.target_selection, "rustc_1_91");
+    }
+
+    fn test_config(managed: bool) -> PolkaVmBuildConfig {
+        PolkaVmBuildConfig {
+            rustc_path: managed.then(|| PathBuf::from("/managed/bin/rustc")),
+            cargo_path: managed.then(|| PathBuf::from("/managed/bin/cargo")),
+            ..Default::default()
+        }
+    }
+
+    fn test_lock(target_selection: &str) -> ToolchainLock {
+        ToolchainLock {
+            version: 1,
+            rust: "nightly-2026-05-02".into(),
+            polkavm_linker: "0.30.0".into(),
+            polkavm_derive: "0.30.0".into(),
+            architecture: "riscv64".into(),
+            abi: "lp64e".into(),
+            target_source: "polkavm-linker".into(),
+            target_selection: target_selection.into(),
+            clang_major: 20,
+            clang_version: Some("20.1.8".into()),
+        }
+    }
+
+    #[test]
+    fn managed_mode_rejects_autodetect() {
+        let error = match resolve_target_args(&test_config(true), &test_lock("autodetect")) {
+            Ok(_) => panic!("managed autodetect must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("managed PolkaVM build cannot use target_selection=autodetect"));
+    }
+
+    #[test]
+    fn managed_mode_is_selected_by_an_explicit_cargo_or_rustc_path() {
+        let mut cargo_only = test_config(false);
+        cargo_only.cargo_path = Some(PathBuf::from("/managed/bin/cargo"));
+        assert!(is_managed_mode(&cargo_only));
+
+        let mut rustc_only = test_config(false);
+        rustc_only.rustc_path = Some(PathBuf::from("/managed/bin/rustc"));
+        assert!(is_managed_mode(&rustc_only));
+    }
+
+    #[test]
+    fn managed_host_linker_targets_the_shipping_linux_host() {
+        assert_eq!(
+            host_linker_env_var(),
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
+        );
+    }
+
+    #[test]
+    fn contributor_mode_keeps_autodetect() {
+        let args = resolve_target_args(&test_config(false), &test_lock("autodetect"))
+            .expect("contributor autodetect should remain supported");
+        let target = target_json_path(args).expect("autodetect resolves with host rustc");
+        assert!(target.ends_with("riscv64emac-unknown-none-polkavm.json"));
+    }
+
+    #[test]
+    fn explicit_rustc_1_91_selection_does_not_need_path_rustc() {
+        let args = resolve_target_args(&test_config(true), &test_lock("rustc_1_91"))
+            .expect("explicit target selection should resolve");
+        let target = target_json_path(args).expect("explicit target does not autodetect rustc");
+        assert!(target.to_string_lossy().contains("/1_91/"));
+        let contents = fs::read_to_string(&target).expect("target JSON is readable");
+        assert!(contents.contains("\"arch\": \"riscv64\""));
+        assert!(contents.contains("\"llvm-abiname\": \"lp64e\""));
+        assert_eq!(
+            hash_file(&target).expect("target JSON hash is readable"),
+            "0x228b0990d1360dfaf346f90a1e8d8a35620e179ee81f46d21ed1900150a12c1e"
+        );
+    }
+
+    #[test]
+    fn unsupported_target_selection_fails_closed() {
+        let error = match resolve_target_args(&test_config(false), &test_lock("whatever")) {
+            Ok(_) => panic!("unknown target selection must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("unsupported PolkaVM target_selection: whatever"));
     }
 }

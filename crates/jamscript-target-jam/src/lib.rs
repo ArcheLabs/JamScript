@@ -1,10 +1,12 @@
 use anyhow::{bail, Context, Result};
+use jam_program_blob_common::ProgramBlob;
 use jamscript_backend_scriptc::{ScriptcArtifact, ScriptcBuildMetadata, ScriptcCompiler};
 use jamscript_codegen_rust::{
     generate_builder_application_rust, generate_no_std_rust_with_scriptc_context,
     ManagementPolicyConfig, PortableServiceContext,
 };
 use jamscript_ir::{abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
+use jamscript_toolchain::InstalledToolchain;
 use serde::{Deserialize, Serialize};
 use service_build_polkavm::{
     GuestBuildArtifacts, NativeArchive, PolkaVmBuildConfig, PolkaVmBuildRequest, PolkaVmBuilder,
@@ -13,6 +15,7 @@ use service_runtime_core::{
     MANAGED_STATE_LAYOUT_VERSION, MANAGED_STATE_PROTOCOL_VERSION, RECOVERY_FORMAT_VERSION,
 };
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
@@ -22,6 +25,10 @@ use tempfile::tempdir;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct BuildMetadata {
+    pub jamscript_toolchain_id: String,
+    pub jamscript_toolchain_platform: String,
+    pub jamscript_toolchain_sha256: String,
+    pub canonical_toolchain: bool,
     #[serde(rename = "serviceKey")]
     pub service_key: String,
     #[serde(rename = "serviceInstanceId")]
@@ -43,7 +50,11 @@ pub struct BuildMetadata {
     #[serde(rename = "recoveryFormatVersion")]
     pub recovery_format_version: u8,
     pub abi_version: u32,
-    pub target_adapter_version: String,
+    pub jam_target_version: String,
+    #[serde(rename = "jamBlobEncoder")]
+    pub jam_blob_encoder: String,
+    #[serde(rename = "jamBlobEncoderVersion")]
+    pub jam_blob_encoder_version: String,
     pub pvm_toolchain: String,
     #[serde(rename = "rustToolchain")]
     pub rust_toolchain: String,
@@ -70,9 +81,6 @@ pub struct BuildMetadata {
     #[serde(rename = "minimumStackBytes")]
     pub minimum_stack_bytes: u64,
     pub clang_version: String,
-    pub minijam_sdk_revision: String,
-    #[serde(rename = "minijamConverterRevision")]
-    pub converter_revision: String,
     pub source_hash: String,
     pub abi_hash: String,
     pub code_hash: Option<String>,
@@ -167,19 +175,29 @@ pub fn verify_deployment_bundle(bundle: &Path) -> Result<BTreeMap<String, String
     Ok(manifest.files)
 }
 
-pub struct MiniJamTarget {
+pub struct JamTarget {
     pub sdk_root: PathBuf,
-    pub converter_manifest: PathBuf,
+    pub toolchain: Option<InstalledToolchain>,
 }
 
-impl MiniJamTarget {
-    pub fn from_sdk_root(sdk_root: impl Into<PathBuf>) -> Self {
-        let sdk_root = sdk_root.into();
+impl JamTarget {
+    pub fn new() -> Self {
+        let sdk_root = workspace_root().join("crates/jamscript-target-jam/sdk");
         Self {
-            converter_manifest: sdk_root
-                .join("service-toolchain/compiler/polkavm-to-jam/Cargo.toml"),
             sdk_root,
+            toolchain: None,
         }
+    }
+
+    pub fn from_installed_toolchain(toolchain: &InstalledToolchain) -> Self {
+        Self {
+            sdk_root: toolchain.jam_target.clone(),
+            toolchain: Some(toolchain.clone()),
+        }
+    }
+
+    pub fn target_sdk_root(&self) -> &Path {
+        &self.sdk_root
     }
 
     pub fn build_scriptc_probe(
@@ -190,8 +208,15 @@ impl MiniJamTarget {
         output_dir: &Path,
         native_modules: &[NativeModule],
     ) -> Result<BuildMetadata> {
-        let toolchain_root = workspace_root().join("toolchains/scriptc");
-        let compiler = ScriptcCompiler::from_toolchain(&toolchain_root)?;
+        let scriptc_root = self
+            .toolchain
+            .as_ref()
+            .map(|toolchain| toolchain.scriptc.clone())
+            .unwrap_or_else(|| workspace_root().join("toolchains/scriptc"));
+        let compiler = match self.toolchain.as_ref() {
+            Some(toolchain) => ScriptcCompiler::from_paths(&scriptc_root, &toolchain.node)?,
+            None => ScriptcCompiler::from_toolchain(&scriptc_root)?,
+        };
         let artifact = compiler.compile_service(ir, &output_dir.join("scriptc"))?;
         self.build_probe_inner(
             project_root,
@@ -252,32 +277,107 @@ impl MiniJamTarget {
 
         let guest_project = tempdir().context("creating Rust guest project")?;
         fs::create_dir_all(guest_project.path().join("src"))?;
-        let runtime_core = workspace_crate("jamscript-runtime-core")?;
-        let service_runtime_core = workspace_crate("service-runtime-core")?;
-        let service_runtime_guest = workspace_crate("service-runtime-guest")?;
+        let runtime_root = self
+            .toolchain
+            .as_ref()
+            .map(|toolchain| toolchain.runtime.clone());
+        let runtime_crate = |name: &str| -> Result<PathBuf> {
+            match &runtime_root {
+                Some(root) => root
+                    .join("crates")
+                    .join(name)
+                    .canonicalize()
+                    .with_context(|| format!("locating managed runtime crate {name}")),
+                None => workspace_crate(name),
+            }
+        };
+        let runtime_core = runtime_crate("jamscript-runtime-core")?;
+        let service_runtime_core = runtime_crate("service-runtime-core")?;
+        let service_runtime_guest = runtime_crate("service-runtime-guest")?;
         let diagnostic_feature = if context.diagnostic {
             ", features = [\"diagnostic\"]"
         } else {
             ""
         };
         fs::write(guest_project.path().join("Cargo.toml"), format!(
-            "[package]\nname = \"jamscript_guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\njamscript-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-guest = {{ path = \"{}\", default-features = false{} }}\n[workspace]\n",
+            "[package]\nname = \"jamscript_guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\njamscript-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-guest = {{ path = \"{}\", default-features = false{} }}\n[workspace]\nresolver = \"2\"\n",
             runtime_core.display(), service_runtime_core.display(), service_runtime_guest.display(), diagnostic_feature
         ))?;
         fs::copy(&generated, guest_project.path().join("src/lib.rs"))?;
         fs::write(guest_project.path().join("build.rs"), build_script())?;
 
-        let work = tempdir().context("creating MiniJAM native build directory")?;
-        let clang = pinned_clang()?;
-        let mut archives = vec![compile_sdk_archive(&self.sdk_root, &clang, work.path())?];
-        archives.push(compile_scriptc_archive(&scriptc, &clang, work.path())?);
+        let work = tempdir().context("creating JAM target native build directory")?;
+        let clang = pinned_clang(self.toolchain.as_ref())?;
+        let ar = self
+            .toolchain
+            .as_ref()
+            .map(|toolchain| toolchain.llvm_ar.as_path());
+        let mut archives = vec![compile_jam_archive(
+            &self.sdk_root,
+            &clang,
+            ar,
+            work.path(),
+        )?];
+        let scriptc_root = self
+            .toolchain
+            .as_ref()
+            .map(|toolchain| toolchain.scriptc.clone())
+            .unwrap_or_else(|| workspace_root().join("toolchains/scriptc"));
+        archives.push(compile_scriptc_archive(
+            &scriptc,
+            &scriptc_root,
+            self.toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.runtime_scriptc.as_path()),
+            &clang,
+            ar,
+            work.path(),
+        )?);
         for module in native_modules {
-            archives.push(compile_native_archive(module, &clang, work.path())?);
+            archives.push(compile_native_archive(module, &clang, ar, work.path())?);
         }
         let backend_output = work.path().join("polkavm");
         let artifacts = PolkaVmBuilder::new(PolkaVmBuildConfig {
+            rust_toolchain: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.rust_toolchain.clone())
+                .unwrap_or_else(|| "nightly-2026-05-02".into()),
             diagnostic: context.diagnostic,
             rustflags: Some(jam_rustflags()),
+            cargo_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.cargo.clone()),
+            rustc_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.rustc.clone()),
+            clang_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.clang.clone()),
+            ar_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.llvm_ar.clone()),
+            lld_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.lld.clone()),
+            host_linker_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.host_linker.clone()),
+            cargo_home: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.cargo_home.clone()),
+            lock_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.polkavm_lock.clone())
+                .unwrap_or_else(|| workspace_root().join("toolchains/polkavm.lock")),
             ..Default::default()
         })
         .build(&PolkaVmBuildRequest {
@@ -291,39 +391,7 @@ impl MiniJamTarget {
 
         let blob = output_dir.join("service.blob");
         let polkavm = output_dir.join("service.polkavm");
-        let converter = self.sdk_root.join(
-            "service-toolchain/compiler/polkavm-to-jam/target/release/minijam-polkavm-to-jam",
-        );
-        if converter.is_file() {
-            let mut command = Command::new(converter);
-            command.args([
-                artifacts.elf.to_str().unwrap(),
-                blob.to_str().unwrap(),
-                polkavm.to_str().unwrap(),
-            ]);
-            run(
-                &mut command,
-                "converting the guest ELF to PolkaVM/JAM artifacts",
-            )?;
-        } else {
-            let mut command = Command::new("cargo");
-            command.args([
-                "run",
-                "--quiet",
-                "--locked",
-                "--release",
-                "--manifest-path",
-                self.converter_manifest.to_str().unwrap(),
-                "--",
-                artifacts.elf.to_str().unwrap(),
-                blob.to_str().unwrap(),
-                polkavm.to_str().unwrap(),
-            ]);
-            run(
-                &mut command,
-                "building and running the pinned PolkaVM converter",
-            )?;
-        }
+        link_elf_to_jam(&artifacts.elf, &blob, &polkavm)?;
         fs::copy(&polkavm, output_dir.join("service.pvm"))?;
         let mut checksum_files = vec![
             "service.blob",
@@ -358,7 +426,6 @@ impl MiniJamTarget {
             })?,
         )?;
         let clang_version = command_version(&clang)?;
-        let sdk_revision = git_revision(&self.sdk_root)?;
         let native_metadata = native_metadata(project_root, native_modules)?;
         Ok(build_metadata(
             context,
@@ -366,13 +433,47 @@ impl MiniJamTarget {
             abi_hash,
             hash_file(&blob)?,
             clang_version,
-            sdk_revision.clone(),
             native_metadata,
             artifacts,
             Some(scriptc.metadata.clone()),
             "0.2",
+            self.toolchain.as_ref(),
         ))
     }
+}
+
+impl Default for JamTarget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Convert a RISC-V guest ELF into a PolkaVM debug artifact and canonical JAM
+/// ProgramBlob using the locked JamV1 conversion semantics.
+pub fn elf_to_jam_blob(elf: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut config = polkavm_linker::Config::default();
+    config.set_strip(true);
+    config.set_dispatch_table(vec![
+        b"minijam_refine".to_vec(),
+        b"minijam_accumulate".to_vec(),
+    ]);
+    let linked =
+        polkavm_linker::program_from_elf(config, polkavm_linker::TargetInstructionSet::JamV1, elf)
+            .map_err(|error| anyhow::anyhow!("link ELF for JAM target: {error}"))?;
+    let parts = polkavm_linker::ProgramParts::from_bytes(linked.clone().into())
+        .map_err(|error| anyhow::anyhow!("decode linked PolkaVM program: {error}"))?;
+    let blob = ProgramBlob::from_pvm(&parts, Cow::Borrowed(&[]))
+        .to_vec()
+        .map_err(|error| anyhow::anyhow!("materialize JAM ProgramBlob: {error}"))?;
+    Ok((linked, blob))
+}
+
+pub fn link_elf_to_jam(elf: &Path, blob: &Path, polkavm: &Path) -> Result<()> {
+    let input = fs::read(elf).with_context(|| format!("reading {}", elf.display()))?;
+    let (linked, encoded_blob) = elf_to_jam_blob(&input)?;
+    fs::write(polkavm, linked).with_context(|| format!("writing {}", polkavm.display()))?;
+    fs::write(blob, encoded_blob).with_context(|| format!("writing {}", blob.display()))?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -382,14 +483,24 @@ fn build_metadata(
     abi_hash: String,
     code_hash: String,
     clang_version: String,
-    sdk_revision: String,
     native_modules: Vec<NativeModuleMetadata>,
     artifacts: GuestBuildArtifacts,
     scriptc: Option<ScriptcBuildMetadata>,
     language_version: &str,
+    managed_toolchain: Option<&InstalledToolchain>,
 ) -> BuildMetadata {
     let toolchain = artifacts.metadata;
     BuildMetadata {
+        jamscript_toolchain_id: managed_toolchain
+            .map(|toolchain| toolchain.toolchain_id.clone())
+            .unwrap_or_else(|| "development".into()),
+        jamscript_toolchain_platform: managed_toolchain
+            .map(|toolchain| toolchain.platform.clone())
+            .unwrap_or_else(|| "development".into()),
+        jamscript_toolchain_sha256: managed_toolchain
+            .map(|toolchain| toolchain.bundle_sha256.clone())
+            .unwrap_or_default(),
+        canonical_toolchain: managed_toolchain.is_some(),
         service_key: format!(
             "0x{}",
             context
@@ -432,7 +543,9 @@ fn build_metadata(
         signed_action_version: 1,
         recovery_format_version: RECOVERY_FORMAT_VERSION,
         abi_version: 1,
-        target_adapter_version: "minijam-0.2".into(),
+        jam_target_version: "jam-v1".into(),
+        jam_blob_encoder: "jam-program-blob-common".into(),
+        jam_blob_encoder_version: "0.1.28".into(),
         pvm_toolchain: format!(
             "official polkavm-linker {} target + rust-lld",
             toolchain.polkavm_linker_version
@@ -450,8 +563,6 @@ fn build_metadata(
         target_environment: toolchain.target_environment,
         minimum_stack_bytes: toolchain.minimum_stack_bytes,
         clang_version,
-        minijam_sdk_revision: sdk_revision.clone(),
-        converter_revision: sdk_revision,
         source_hash,
         abi_hash,
         code_hash: Some(code_hash),
@@ -539,10 +650,13 @@ fn build_script() -> &'static str {
 "#
 }
 
-fn pinned_clang() -> Result<PathBuf> {
-    let clang = std::env::var_os("JAMSCRIPT_CLANG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-20/bin/clang"));
+fn pinned_clang(toolchain: Option<&InstalledToolchain>) -> Result<PathBuf> {
+    let clang = match toolchain {
+        Some(toolchain) => toolchain.clang.clone(),
+        None => std::env::var_os("JAMSCRIPT_CLANG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-20/bin/clang")),
+    };
     if !clang.is_file() {
         bail!(
             "pinned Clang 20 was not found at {}; set JAMSCRIPT_CLANG",
@@ -552,16 +666,22 @@ fn pinned_clang() -> Result<PathBuf> {
     Ok(clang)
 }
 
-fn compile_sdk_archive(sdk_root: &Path, clang: &Path, work: &Path) -> Result<NativeArchive> {
-    let include = sdk_root.join("service-toolchain/sdk/include");
-    let source_root = sdk_root.join("service-toolchain/sdk/src");
+fn compile_jam_archive(
+    sdk_root: &Path,
+    clang: &Path,
+    ar: Option<&Path>,
+    work: &Path,
+) -> Result<NativeArchive> {
+    let include = sdk_root.join("include");
+    let source_root = sdk_root.join("src");
     let sources = ["host", "minijam", "crypto"].map(|unit| source_root.join(format!("{unit}.c")));
-    compile_archive("minijam_guest", &sources, &[include], clang, work)
+    compile_archive("jam_target_guest", &sources, &[include], clang, ar, work)
 }
 
 fn compile_native_archive(
     module: &NativeModule,
     clang: &Path,
+    ar: Option<&Path>,
     work: &Path,
 ) -> Result<NativeArchive> {
     compile_archive(
@@ -569,30 +689,45 @@ fn compile_native_archive(
         &module.sources,
         &module.include_dirs,
         clang,
+        ar,
         work,
     )
 }
 
 fn compile_scriptc_archive(
     artifact: &ScriptcArtifact,
+    toolchain_root: &Path,
+    managed_runtime_root: Option<&Path>,
     clang: &Path,
+    ar: Option<&Path>,
     work: &Path,
 ) -> Result<NativeArchive> {
-    let toolchain = workspace_root().join("toolchains/scriptc");
-    let runtime = toolchain.join("node_modules/@scriptc/runtime/src");
+    let runtime = toolchain_root.join("node_modules/@scriptc/runtime/src");
     if !runtime.is_dir() {
         bail!("ScriptC runtime is not installed at {}", runtime.display());
     }
-    let runtime_include = workspace_root().join("crates/jamscript-runtime-scriptc/include");
+    let runtime_include = managed_runtime_root
+        .map(|root| root.join("include"))
+        .unwrap_or_else(|| workspace_root().join("crates/jamscript-runtime-scriptc/include"));
     let mut sources = vec![artifact.generated_c.clone(), artifact.adapter_c.clone()];
     sources.extend(
         jamscript_runtime_scriptc::selected_runtime_units()
             .iter()
             .map(|name| {
                 if *name == "scr_lib_cleanup.c" {
-                    workspace_root().join("crates/jamscript-runtime-scriptc/src/scr_lib_cleanup.c")
+                    managed_runtime_root
+                        .map(|root| root.join("src/scr_lib_cleanup.c"))
+                        .unwrap_or_else(|| {
+                            workspace_root()
+                                .join("crates/jamscript-runtime-scriptc/src/scr_lib_cleanup.c")
+                        })
                 } else if *name == "freestanding.c" {
-                    workspace_root().join("crates/jamscript-runtime-scriptc/src/freestanding.c")
+                    managed_runtime_root
+                        .map(|root| root.join("src/freestanding.c"))
+                        .unwrap_or_else(|| {
+                            workspace_root()
+                                .join("crates/jamscript-runtime-scriptc/src/freestanding.c")
+                        })
                 } else {
                     runtime.join(name)
                 }
@@ -629,9 +764,13 @@ fn compile_scriptc_archive(
         )?;
         objects.push(object);
     }
-    let ar = std::env::var_os("JAMSCRIPT_LLVM_AR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-20/bin/llvm-ar"));
+    let ar = match ar.map(Path::to_path_buf) {
+        Some(path) if path.is_file() => path,
+        Some(path) => bail!("managed llvm-ar is missing at {}", path.display()),
+        None => std::env::var_os("JAMSCRIPT_LLVM_AR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-20/bin/llvm-ar")),
+    };
     let archive = work.join("libscriptc_runtime.a");
     let mut command = Command::new(ar);
     command.arg("crs").arg(&archive).args(&objects);
@@ -647,6 +786,7 @@ fn compile_archive(
     sources: &[PathBuf],
     include_dirs: &[PathBuf],
     clang: &Path,
+    ar: Option<&Path>,
     work: &Path,
 ) -> Result<NativeArchive> {
     let common = [
@@ -680,13 +820,19 @@ fn compile_archive(
         run(&mut command, &format!("compiling {}", source.display()))?;
         objects.push(object);
     }
-    let ar = std::env::var_os("JAMSCRIPT_LLVM_AR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-20/bin/llvm-ar"));
-    let ar = if ar.is_file() {
-        ar
-    } else {
-        PathBuf::from("ar")
+    let ar = match ar.map(Path::to_path_buf) {
+        Some(path) if path.is_file() => path,
+        Some(path) => bail!("managed llvm-ar is missing at {}", path.display()),
+        None => {
+            let path = std::env::var_os("JAMSCRIPT_LLVM_AR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-20/bin/llvm-ar"));
+            if path.is_file() {
+                path
+            } else {
+                PathBuf::from("ar")
+            }
+        }
     };
     let archive = work.join(format!("lib{name}.a"));
     let mut command = Command::new(ar);
@@ -788,17 +934,6 @@ fn hash_file(path: &Path) -> Result<String> {
             .map(|b| format!("{b:02x}"))
             .collect::<String>()
     ))
-}
-
-fn git_revision(path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["-C", path.to_str().unwrap(), "rev-parse", "HEAD"])
-        .output()
-        .with_context(|| format!("reading git revision for {}", path.display()))?;
-    if !output.status.success() {
-        bail!("{} is not a git checkout", path.display());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(test)]

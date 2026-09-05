@@ -5,7 +5,8 @@ use jamscript_codegen_rust::{
 };
 use jamscript_ir::abi_for_language;
 use jamscript_parser::parse_service_v02;
-use jamscript_target_minijam::{verify_deployment_bundle, MiniJamTarget, NativeModule};
+use jamscript_target_jam::{verify_deployment_bundle, JamTarget, NativeModule};
+use jamscript_toolchain::ToolchainManager;
 use serde::Deserialize;
 use service_runtime_core::ServiceKeyV1;
 use std::{
@@ -43,11 +44,32 @@ enum CommandKind {
         path: PathBuf,
         #[arg(long, default_value = "dist")]
         output: PathBuf,
+        #[arg(long)]
+        offline: bool,
+    },
+    Toolchain {
+        #[command(subcommand)]
+        command: ToolchainCommand,
+    },
+    Doctor {
+        #[arg(long)]
+        json: bool,
     },
     Inspect {
         #[arg(default_value = "dist")]
         bundle: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum ToolchainCommand {
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Install,
+    Verify,
+    Path,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,17 +121,12 @@ struct Package {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Target {
-    minijam: Option<MiniJamConfig>,
+    jam: Option<JamConfig>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MiniJamConfig {
-    sdk_root: Option<String>,
-    /// Legacy deployment/routing identifier. It is never embedded in
-    /// SignedActionV1 or generated Service identity.
-    #[allow(dead_code)]
-    service_id: Option<u32>,
-    /// Legacy manifest spelling for the network domain (genesis hash).
+struct JamConfig {
+    /// Optional deployment domain used by the runtime signing context.
     genesis_hash: Option<String>,
 }
 
@@ -142,8 +159,147 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&abi)?);
             Ok(())
         }
-        CommandKind::Build { path, output } => build(&path, &output),
+        CommandKind::Build {
+            path,
+            output,
+            offline,
+        } => {
+            if offline {
+                std::env::set_var("JAMSCRIPT_OFFLINE", "1");
+            }
+            build(&path, &output)
+        }
+        CommandKind::Toolchain { command } => toolchain_command(command),
+        CommandKind::Doctor { json } => doctor(json),
         CommandKind::Inspect { bundle } => inspect(&bundle),
+    }
+}
+
+fn toolchain_command(command: ToolchainCommand) -> Result<()> {
+    let manager = ToolchainManager::new()?;
+    match command {
+        ToolchainCommand::Status { json } => {
+            let status = manager.status();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                println!("Toolchain: {}", status.toolchain_id);
+                println!("Platform: {}", status.platform);
+                println!("Installed: {}", yes_no(status.installed));
+                println!("Verified: {}", yes_no(status.verified));
+                if let Some(error) = status.error {
+                    println!("Status: {error}");
+                }
+            }
+            Ok(())
+        }
+        ToolchainCommand::Install => {
+            let toolchain = manager.install()?;
+            println!("Toolchain verified at {}", toolchain.root.display());
+            Ok(())
+        }
+        ToolchainCommand::Verify => {
+            let toolchain = manager.verify()?;
+            println!("Toolchain verified at {}", toolchain.root.display());
+            Ok(())
+        }
+        ToolchainCommand::Path => {
+            println!("{}", manager.path()?.display());
+            Ok(())
+        }
+    }
+}
+
+fn doctor(json: bool) -> Result<()> {
+    let manager = ToolchainManager::new()?;
+    let status = manager.status();
+    if json {
+        let root = status
+            .path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("managed toolchain is not installed"))?;
+        if !status.verified {
+            bail!(
+                "managed toolchain is not verified: {}",
+                status
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown verification error")
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "toolchain_id": status.toolchain_id,
+                "platform": status.platform,
+                "canonical": status.verified,
+                "offline": matches!(
+                    std::env::var("JAMSCRIPT_OFFLINE").as_deref(),
+                    Ok("1") | Ok("true") | Ok("yes")
+                ),
+                "toolchain_home": root,
+                "node": root.join("bin/node"),
+                "clang": root.join("bin/clang"),
+                "llvm_ar": root.join("bin/llvm-ar"),
+                "ar": root.join("bin/ar"),
+                "lld": root.join("bin/ld.lld"),
+                "host_linker": root.join("bin/jamscript-host-linker"),
+                "rustc": root.join("bin/rustc"),
+                "cargo": root.join("bin/cargo"),
+                "jam_sdk": root.join("targets/jam/sdk"),
+            }))?
+        );
+        return Ok(());
+    }
+    println!("JamScript CLI: {}", env!("CARGO_PKG_VERSION"));
+    println!("Language: 0.2\n");
+    println!("Host:\n{}\n", status.platform);
+    println!(
+        "Toolchain:\n{}\ninstalled: {}\nverified: {}\n",
+        status.toolchain_id,
+        yes_no(status.installed),
+        yes_no(status.verified)
+    );
+    println!(
+        "Node:\n{} {}",
+        manager.manifest().node_version,
+        check_marker(status.verified)
+    );
+    println!(
+        "\nLLVM:\n{} {}",
+        manager.manifest().clang_version,
+        check_marker(status.verified)
+    );
+    println!(
+        "\nRust:\n{} {}",
+        manager.manifest().rust_toolchain,
+        check_marker(status.verified)
+    );
+    println!(
+        "\nPolkaVM:\n{} {}",
+        manager.manifest().polkavm_linker,
+        check_marker(status.verified)
+    );
+    println!(
+        "\nJAM target:\n{} {}",
+        manager.manifest().jam_target_version,
+        check_marker(status.verified)
+    );
+    Ok(())
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+fn check_marker(value: bool) -> &'static str {
+    if value {
+        "PASS"
+    } else {
+        "FAIL"
     }
 }
 
@@ -289,17 +445,31 @@ fn new_project(name: &str) -> Result<()> {
 
 fn build(path: &Path, output: &Path) -> Result<()> {
     let (manifest, ir) = load(path)?;
-    let minijam = manifest
+    let managed_toolchain = if std::env::var("JAMSCRIPT_DEV_TOOLCHAIN").as_deref() == Ok("1") {
+        None
+    } else {
+        let manager = ToolchainManager::new()?;
+        let status = manager.status();
+        if !status.installed {
+            println!(
+                "JamScript toolchain is not installed for {}.",
+                status.platform
+            );
+            println!("Installing the exact managed toolchain...");
+        }
+        Some(manager.resolve()?)
+    };
+    let jam = manifest
         .target
         .as_ref()
-        .and_then(|target| target.minijam.as_ref());
+        .and_then(|target| target.jam.as_ref());
     let (service_key, service_instance_id) = load_service_identity(path)?;
     let management_policy = resolve_management_policy(manifest.management.as_ref(), &service_key)?;
     let context = PortableServiceContext {
         service_key: service_key.into_bytes(),
         service_instance_id,
         management_policy,
-        genesis_hash: minijam
+        genesis_hash: jam
             .and_then(|target| target.genesis_hash.as_deref())
             .map(parse_hash)
             .transpose()?
@@ -321,32 +491,17 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         output.join("generated_builder_application.rs"),
         generate_builder_application_rust(&ir, context).map_err(|e| anyhow::anyhow!(e))?,
     )?;
-    let sdk_root = minijam
-        .and_then(|target| target.sdk_root.as_deref())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("JAMSCRIPT_MINIJAM_SDK").map(PathBuf::from))
-        .or_else(|| {
-            [
-                path.join("../../../minijam-client"),
-                path.join("../../minijam-client"),
-                std::env::current_dir().ok()?.join("../minijam-client"),
-            ]
-            .into_iter()
-            .find(|candidate| candidate.join("service-toolchain/sdk").is_dir())
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "MiniJAM SDK not found; set target.minijam.sdk_root or JAMSCRIPT_MINIJAM_SDK"
-            )
-        })?;
     let project_root = path
         .canonicalize()
         .with_context(|| format!("canonicalizing project root {}", path.display()))?;
     let native_modules = resolve_native_modules(&project_root, manifest.native.as_ref())?;
-    let target = MiniJamTarget::from_sdk_root(sdk_root);
+    let target = match managed_toolchain.as_ref() {
+        Some(toolchain) => JamTarget::from_installed_toolchain(toolchain),
+        None => JamTarget::new(),
+    };
     let metadata = target
         .build_scriptc_probe(&project_root, &ir, context, output, &native_modules)
-        .context("MiniJAM target build")?;
+        .context("JAM target build")?;
     fs::write(
         output.join("build.json"),
         serde_json::to_vec_pretty(&metadata)?,

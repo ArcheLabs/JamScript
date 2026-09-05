@@ -1,0 +1,12 @@
+[package]
+name = "jamscript-toolchain-release-helper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0.100"
+jamscript-toolchain = { path = "../../../crates/jamscript-toolchain" }
+toml = "0.8.23"

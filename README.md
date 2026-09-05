@@ -10,7 +10,9 @@ state, queries, and clients.
 
 The supported path uses imports from the `jam` standard library, bounded
 primitive input schemas, ABI generation, and generated `no_std` Rust for the
-MiniJAM target. With the pinned Rust target and Clang 20 installed, `build` emits `service.blob`,
+canonical JAM target. JamScript manages its compiler toolchain automatically: the
+first canonical build installs the exact platform bundle and verifies its
+checksum. `build` emits `service.blob`,
 `service.polkavm`, `service.pvm`, and a portable Builder host artifact. The
 PVM guest and Builder artifact embed the same compiler-generated
 `ServiceApplication`; native imports use the same declared C sources compiled
@@ -22,8 +24,9 @@ verification, sender derivation, expiry, and nonce-context validation.
 Formal V1 is the first supported wire/runtime protocol; development generations
 before it are not compatibility contracts.
 
-The release ABI uses one typed descriptor and Jambda's `jam-codec 0.1.1`
-encoding rules; JamScript does not maintain an independent binary codec. See
+The release ABI uses one typed descriptor and the canonical JAM `jam-codec
+0.1.1` encoding rules; JamScript does not maintain an independent binary
+codec. See
 [`docs/release-conformance.md`](docs/release-conformance.md) for the type
 system and canonical vectors.
 
@@ -37,14 +40,20 @@ cargo build --locked --bin jamscript
 cargo run --locked --bin jamscript -- new hello-jam
 cargo run --locked --bin jamscript -- check examples/counter
 cargo run --locked --bin jamscript -- build examples/counter
+cargo run --locked --bin jamscript -- toolchain status
+cargo run --locked --bin jamscript -- doctor
 ```
 
-To run the real cross-process MiniJAM path:
+To run the optional cross-process MiniJAM compatibility path (it requires a
+separate MiniJAM checkout):
 
     ./scripts/minijam-network-e2e.sh
 
-The target adapter uses the MiniJAM SDK beside this repository by default. Set
-`JAMSCRIPT_MINIJAM_SDK` or `target.minijam.sdk_root` for another checkout.
+For contributors building from this repository, use
+`JAMSCRIPT_DEV_TOOLCHAIN=1` with the repository's target SDK. Canonical user
+builds use the managed bundle and do not require host Node, LLVM, Rust, Docker,
+or a MiniJAM checkout. See
+[`docs/toolchain-distribution.md`](docs/toolchain-distribution.md).
 
 Managed-state architecture details are in
 [`docs/service-runtime-architecture.md`](docs/service-runtime-architecture.md),

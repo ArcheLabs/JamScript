@@ -4,7 +4,7 @@ use jamscript_ir::{action_selector, ActionBodyIr, ServiceIr};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -57,6 +57,15 @@ impl ScriptcCompiler {
         let node = std::env::var_os("SCRIPTC_NODE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("node"));
+        Self::from_paths(toolchain_root, node)
+    }
+
+    pub fn from_paths(
+        toolchain_root: impl Into<PathBuf>,
+        node: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let toolchain_root = toolchain_root.into();
+        let node = node.into();
         let version = command_output(&node, &["--version"], &toolchain_root)?;
         let pinned_node = read_trim(&toolchain_root.join("NODE_VERSION"))?;
         let actual_node = version.trim().trim_start_matches('v');
@@ -95,7 +104,9 @@ impl ScriptcCompiler {
         fs::write(
             &spec_path,
             serde_json::json!({
-                "source": source_path,
+                // Keep the persisted spec relocatable. The compiler process
+                // runs from output_dir, where this source file is written.
+                "source": "scriptc_service.ts",
                 "package_name": ir.package_name,
                 "states": ir.states,
                 "actions": ir.actions.iter().map(|action| serde_json::json!({
@@ -104,18 +115,26 @@ impl ScriptcCompiler {
                     "input": action.input,
                 })).collect::<Vec<_>>(),
                 "queries": ir.queries,
-                "output": output_dir,
+                "output": ".",
             })
             .to_string(),
         )?;
         verify_surface_manifest(&self.toolchain_root)?;
         let script = self.toolchain_root.join("m2/compile-service.mjs");
-        let status = Command::new(&self.node)
-            .current_dir(&self.toolchain_root)
-            .arg(script)
-            .arg(&spec_path)
-            .status()
-            .context("starting ScriptC M2 compiler")?;
+        let mut command = Command::new(&self.node);
+        command.current_dir(&output_dir).arg(script).arg(&spec_path);
+        let managed_bin = self.toolchain_root.parent().map(|root| root.join("bin"));
+        if let Some(managed_bin) = managed_bin.filter(|path| path.is_dir()) {
+            let mut path_entries = vec![managed_bin];
+            if let Some(path) = env::var_os("PATH") {
+                path_entries.extend(env::split_paths(&path));
+            }
+            command.env(
+                "PATH",
+                env::join_paths(path_entries).context("constructing ScriptC managed PATH")?,
+            );
+        }
+        let status = command.status().context("starting ScriptC M2 compiler")?;
         if !status.success() {
             bail!("ScriptC failed to compile service `{}`", ir.package_name);
         }
