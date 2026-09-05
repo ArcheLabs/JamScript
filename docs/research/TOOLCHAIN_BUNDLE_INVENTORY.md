@@ -48,6 +48,23 @@ receives the bundle's `bin` directory, so bare `clang`/`ar` resolution cannot
 fall through to the host. `doctor --json` asserts that every managed path is
 under `JAMSCRIPT_TOOLCHAIN_HOME`.
 
+## Managed process-tree audit
+
+| Parent | Child executable | Managed? | Resolution |
+| --- | --- | ---: | --- |
+| JamScript | Node | YES | absolute installed bundle path |
+| ScriptC | clang | YES | managed `bin/clang` |
+| ScriptC | ar | YES | managed `bin/ar` |
+| JamScript | Cargo | YES | absolute installed bundle path |
+| Cargo | rustc | YES | `RUSTC` absolute installed bundle path |
+| host rustc | host linker | YES | `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER` to `bin/jamscript-host-linker` |
+| host linker | clang | YES | wrapper-relative `bin/clang` |
+| clang | ld.lld | YES | wrapper-relative `bin/ld.lld` via `--ld-path` |
+| Cargo build.rs | native executable | generated | linked by the managed host chain |
+| Cargo proc-macro | native dylib | generated | linked by the managed host chain |
+| guest rustc | rust-lld | YES / sysroot | Rust sysroot and locked PolkaVM target |
+| JAM conversion | polkavm-linker library | YES | locked vendored Rust dependency |
+
 ## Audit commands
 
 ```bash
