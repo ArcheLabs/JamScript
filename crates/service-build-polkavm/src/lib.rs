@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use polkavm_linker::{target_json_path, TargetJsonArgs};
+use polkavm_linker::{target_json_path, RustcVersion, TargetJsonArgs};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
@@ -116,10 +116,14 @@ impl PolkaVmBuilder {
         }
         fs::create_dir_all(&request.output_dir)?;
 
-        // 0.30's non-exhaustive default is deliberately the public API for
-        // `is_64_bit = true` plus RustcVersion::Autodetect. Do not infer a
-        // target variant from the installed compiler here.
-        let target_json = target_json_path(TargetJsonArgs::default())
+        let managed_rustc_version = if is_managed_mode(&self.config) {
+            Some(verify_managed_rustc(&self.config, &lock)?)
+        } else {
+            None
+        };
+        let target_args = resolve_target_args(&self.config, &lock)?;
+        let target_selection = lock.target_selection.as_str();
+        let target_json = target_json_path(target_args)
             .map_err(|error| anyhow::anyhow!("selecting official PolkaVM target: {error}"))?
             .canonicalize()
             .context("canonicalizing official PolkaVM target")?;
@@ -136,6 +140,24 @@ impl PolkaVmBuilder {
             .trim_end_matches(".json")
             .to_string();
         let target_hash = hash_file(&target_json)?;
+
+        if self.config.diagnostic {
+            eprintln!(
+                "PolkaVM Rust mode: {}",
+                if is_managed_mode(&self.config) {
+                    "managed"
+                } else {
+                    "contributor"
+                }
+            );
+            if let Some(rustc) = &self.config.rustc_path {
+                eprintln!("PolkaVM Rustc path: {}", rustc.display());
+            }
+            eprintln!("PolkaVM Rust lock: {}", lock.rust);
+            eprintln!("PolkaVM target selection: {target_selection}");
+            eprintln!("PolkaVM target variant: {target_variant}");
+            eprintln!("PolkaVM target hash: {target_hash}");
+        }
 
         let target_dir = request
             .manifest_path
@@ -204,8 +226,8 @@ impl PolkaVmBuilder {
             fs::write(request.output_dir.join("symbols.txt"), &diagnostics.symbols)?;
         }
 
-        let rustc_version = match &self.config.rustc_path {
-            Some(rustc) => command_rustc_version(rustc)?,
+        let rustc_version = match managed_rustc_version {
+            Some(version) => version,
             None => rustc_version(&self.config.rust_toolchain)?,
         };
         validate_resolved_guest_versions(&request.manifest_path, &lock)?;
@@ -237,6 +259,46 @@ struct ElfDiagnostics {
     header: String,
     relocations: String,
     symbols: String,
+}
+
+fn is_managed_mode(config: &PolkaVmBuildConfig) -> bool {
+    config.rustc_path.is_some() || config.cargo_path.is_some()
+}
+
+fn resolve_target_args(
+    config: &PolkaVmBuildConfig,
+    lock: &ToolchainLock,
+) -> Result<TargetJsonArgs> {
+    let mut args = TargetJsonArgs::default();
+    args.is_64_bit = config.is_64_bit;
+    args.rustc_version = match lock.target_selection.as_str() {
+        "rustc_1_91" => RustcVersion::Rustc_1_91,
+        "legacy" => RustcVersion::Legacy,
+        "autodetect" if is_managed_mode(config) => {
+            bail!("managed PolkaVM build cannot use target_selection=autodetect")
+        }
+        "autodetect" => RustcVersion::Autodetect,
+        value => bail!("unsupported PolkaVM target_selection: {value}"),
+    };
+    Ok(args)
+}
+
+fn verify_managed_rustc(config: &PolkaVmBuildConfig, lock: &ToolchainLock) -> Result<String> {
+    let rustc = config.rustc_path.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "managed PolkaVM build requires an explicit rustc_path when cargo_path is configured"
+        )
+    })?;
+    let version = command_rustc_version(rustc)
+        .with_context(|| format!("verifying managed rustc against {}", lock.rust))?;
+    let identity = lock.rust.strip_prefix("nightly-").unwrap_or(&lock.rust);
+    if !version.contains(identity) {
+        bail!(
+            "managed rustc version {version} does not match locked toolchain {}",
+            lock.rust
+        );
+    }
+    Ok(version)
 }
 
 fn validate_elf(
@@ -430,11 +492,19 @@ impl ToolchainLock {
             || lock.architecture != "riscv64"
             || lock.abi != "lp64e"
             || lock.target_source != "polkavm-linker"
-            || lock.target_selection != "autodetect"
             || lock.clang_major != 20
             || lock.clang_version.as_deref() != Some("20.1.8")
         {
             bail!("unsupported PolkaVM toolchain lock {}", path.display());
+        }
+        if !matches!(
+            lock.target_selection.as_str(),
+            "rustc_1_91" | "legacy" | "autodetect"
+        ) {
+            bail!(
+                "unsupported PolkaVM target_selection: {}",
+                lock.target_selection
+            );
         }
         let cargo_lock = path
             .parent()
@@ -534,5 +604,74 @@ mod tests {
         assert_eq!(lock.rust, PolkaVmBuildConfig::default().rust_toolchain);
         assert_eq!(lock.polkavm_linker, "0.30.0");
         assert_eq!(lock.polkavm_derive, "0.30.0");
+        assert_eq!(lock.target_selection, "rustc_1_91");
+    }
+
+    fn test_config(managed: bool) -> PolkaVmBuildConfig {
+        PolkaVmBuildConfig {
+            rustc_path: managed.then(|| PathBuf::from("/managed/bin/rustc")),
+            cargo_path: managed.then(|| PathBuf::from("/managed/bin/cargo")),
+            ..Default::default()
+        }
+    }
+
+    fn test_lock(target_selection: &str) -> ToolchainLock {
+        ToolchainLock {
+            version: 1,
+            rust: "nightly-2026-05-02".into(),
+            polkavm_linker: "0.30.0".into(),
+            polkavm_derive: "0.30.0".into(),
+            architecture: "riscv64".into(),
+            abi: "lp64e".into(),
+            target_source: "polkavm-linker".into(),
+            target_selection: target_selection.into(),
+            clang_major: 20,
+            clang_version: Some("20.1.8".into()),
+        }
+    }
+
+    #[test]
+    fn managed_mode_rejects_autodetect() {
+        let error = match resolve_target_args(&test_config(true), &test_lock("autodetect")) {
+            Ok(_) => panic!("managed autodetect must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("managed PolkaVM build cannot use target_selection=autodetect"));
+    }
+
+    #[test]
+    fn contributor_mode_keeps_autodetect() {
+        let args = resolve_target_args(&test_config(false), &test_lock("autodetect"))
+            .expect("contributor autodetect should remain supported");
+        let target = target_json_path(args).expect("autodetect resolves with host rustc");
+        assert!(target.ends_with("riscv64emac-unknown-none-polkavm.json"));
+    }
+
+    #[test]
+    fn explicit_rustc_1_91_selection_does_not_need_path_rustc() {
+        let args = resolve_target_args(&test_config(true), &test_lock("rustc_1_91"))
+            .expect("explicit target selection should resolve");
+        let target = target_json_path(args).expect("explicit target does not autodetect rustc");
+        assert!(target.to_string_lossy().contains("/1_91/"));
+        let contents = fs::read_to_string(&target).expect("target JSON is readable");
+        assert!(contents.contains("\"arch\": \"riscv64\""));
+        assert!(contents.contains("\"llvm-abiname\": \"lp64e\""));
+        assert_eq!(
+            hash_file(&target).expect("target JSON hash is readable"),
+            "0x228b0990d1360dfaf346f90a1e8d8a35620e179ee81f46d21ed1900150a12c1e"
+        );
+    }
+
+    #[test]
+    fn unsupported_target_selection_fails_closed() {
+        let error = match resolve_target_args(&test_config(false), &test_lock("whatever")) {
+            Ok(_) => panic!("unknown target selection must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("unsupported PolkaVM target_selection: whatever"));
     }
 }

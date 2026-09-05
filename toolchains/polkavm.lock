@@ -5,6 +5,6 @@ polkavm_derive = "0.30.0"
 architecture = "riscv64"
 abi = "lp64e"
 target_source = "polkavm-linker"
-target_selection = "autodetect"
+target_selection = "rustc_1_91"
 clang_major = 20
 clang_version = "20.1.8"
