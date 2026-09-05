@@ -96,6 +96,7 @@ run_gate MANAGED_CARGO_BUILD_SCRIPT \
   "$BUNDLE_ROOT/bin/cargo" build --offline \
   --manifest-path "$RUN_ROOT/cargo-probe/app/Cargo.toml"
 test -n "$(find "$RUN_ROOT/cargo-probe/target/debug/build" -type f -name '*-build-script-build' -print -quit 2>/dev/null)"
+test -n "$(find "$RUN_ROOT/cargo-probe/target/debug/deps" -maxdepth 1 -type f -name 'libprobe_macro-*.so' -print -quit 2>/dev/null)"
 echo "MANAGED_CARGO_PROC_MACRO=PASS"
 
 TARGET_JSON="$RUN_ROOT/riscv64emac-unknown-none-polkavm.json"
