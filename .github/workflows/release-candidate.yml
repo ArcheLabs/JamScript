@@ -73,8 +73,8 @@ jobs:
           set -euo pipefail
           out="${RUNNER_TEMP}/jamscript-llvm"
           ./tools/release/toolchain/bootstrap-llvm-linux.sh "${out}"
+          ./tools/release/toolchain/verify-llvm-linux.sh "${out}/llvm"
           cat "${out}/llvm.env" >> "${GITHUB_ENV}"
-          ./tools/release/toolchain/verify-llvm-linux.sh "${LLVM_ROOT}"
 
       - name: Build and verify managed toolchain
         shell: bash
