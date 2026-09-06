@@ -17,12 +17,19 @@ target_dir="${OUT}/cargo-target"
 stage="${OUT}/cli-stage"
 rm -rf "${target_dir}" "${stage}"
 mkdir -p "${stage}"
-(cd "${SOURCE_ROOT}" && CARGO_TARGET_DIR="${target_dir}" cargo build --release --locked --bin jamscript)
-cp -L "${target_dir}/release/jamscript" "${stage}/jamscript"
-chmod 0755 "${stage}/jamscript"
+(cd "${SOURCE_ROOT}" && CARGO_TARGET_DIR="${target_dir}" cargo build --release --locked --bin jams)
+test -x "${target_dir}/release/jams"
+test ! -e "${target_dir}/release/jamscript"
+cp -L "${target_dir}/release/jams" "${stage}/jams"
+chmod 0755 "${stage}/jams"
 cp -L "${SOURCE_ROOT}/LICENSE" "${stage}/LICENSE"
 cp -L "${SOURCE_ROOT}/README.md" "${stage}/README.md"
 find "${stage}" -type f -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
 (cd "${stage}" && tar --sort=name --numeric-owner --owner=0 --group=0 --mtime="@${SOURCE_DATE_EPOCH}" --zstd -cf "${OUT}/${archive}" .)
+tar --zstd -tf "${OUT}/${archive}" | grep -qx './jams'
+if tar --zstd -tf "${OUT}/${archive}" | grep -qx './jamscript'; then
+  echo "legacy jamscript executable unexpectedly present" >&2
+  exit 1
+fi
 sha256sum "${OUT}/${archive}"
 echo "CLI_ARCHIVE=${OUT}/${archive}"

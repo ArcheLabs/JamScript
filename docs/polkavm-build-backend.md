@@ -26,7 +26,7 @@ regression test for its two flags. Generic PolkaVM guests do not inherit it.
 ```text
 cargo test --workspace --locked --offline
 JAMSCRIPT_DEV_TOOLCHAIN=1 \
-  cargo run -p jamscript -- build examples/counter --output /tmp/counter-polkavm
+  cargo run -p jamscript-cli --bin jams -- build examples/counter --output /tmp/counter-polkavm
 bash tools/pvm-minimal-probe/run.sh
 ```
 

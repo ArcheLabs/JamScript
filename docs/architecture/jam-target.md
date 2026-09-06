@@ -12,7 +12,7 @@ JamScript source -> IR -> backend -> RISC-V ELF
 The target implementation is owned by
 [`crates/jamscript-target-jam`](../../crates/jamscript-target-jam). It owns the
 JAM target SDK and calls the locked `polkavm-linker` and
-`jam-program-blob-common` APIs directly. `jamscript build` therefore produces
+`jam-program-blob-common` APIs directly. `jams build` therefore produces
 `service.elf`, `service.polkavm`, and `service.blob` without a node checkout,
 RPC connection, or deployment environment.
 

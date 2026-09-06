@@ -6,7 +6,7 @@ sdk_root="${JAMSCRIPT_MINIJAM_SDK:?set JAMSCRIPT_MINIJAM_SDK to the MiniJAM chec
 output="${1:-$(mktemp -d /tmp/jamscript-pvm-minimal.XXXXXX)}"
 
 JAMSCRIPT_MINIJAM_SDK="$sdk_root" \
-  cargo run --manifest-path "$repo_root/Cargo.toml" -p jamscript-cli --offline -- \
+  cargo run --manifest-path "$repo_root/Cargo.toml" -p jamscript-cli --bin jams --offline -- \
   build "$repo_root/examples/counter" --output "$output"
 
 test "$(jq -r .finalElfLinker "$output/build.json")" = rust-lld

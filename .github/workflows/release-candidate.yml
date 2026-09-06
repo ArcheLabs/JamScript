@@ -168,8 +168,16 @@ jobs:
             echo "release already exists; immutable publication refuses replacement: ${tag}" >&2
             exit 1
           fi
-          gh release create "${tag}" --verify-tag --title "JamScript ${tag}" \
+          release_args=(
+            "${tag}"
+            --verify-tag
+            --title "JamScript ${tag}"
             --notes "Immutable JamScript release assets for ${tag}."
+          )
+          if [[ "${tag}" == *-rc.* ]]; then
+            release_args+=(--prerelease --latest=false)
+          fi
+          gh release create "${release_args[@]}"
           gh release upload "${tag}" "${RELEASE_ASSETS}"/*
           echo "IMMUTABLE_RELEASE_PUBLICATION=PASS"
 

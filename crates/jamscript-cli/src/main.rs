@@ -20,7 +20,7 @@ use std::{
 
 #[derive(Parser)]
 #[command(
-    name = "jamscript",
+    name = "jams",
     version,
     about = "Deterministic TypeScript-like JAM Service toolchain"
 )]
@@ -230,7 +230,7 @@ fn doctor(json: bool) -> Result<()> {
     let manager = ToolchainManager::new()?;
     let status = manager.status();
     let root = status.path.clone();
-    let jamscript_binary = std::env::current_exe().ok();
+    let jams_binary = std::env::current_exe().ok();
     let tool_paths = root.as_ref().map(|root| {
         serde_json::json!({
             "rustc": root.join("bin/rustc"),
@@ -244,7 +244,7 @@ fn doctor(json: bool) -> Result<()> {
             "polkavm": root.join("toolchains/polkavm.lock"),
             "jam_sdk": root.join("targets/jam/sdk"),
             "toolchain_root": root,
-            "jamscript": jamscript_binary,
+            "jams": jams_binary,
         })
     });
     let managed_paths_only = root.as_ref().is_some_and(|root| {
@@ -269,7 +269,7 @@ fn doctor(json: bool) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "jamscript": { "version": env!("CARGO_PKG_VERSION") },
-                "jamscript_binary": jamscript_binary,
+                "jams_binary": jams_binary,
                 "toolchain": {
                     "id": status.toolchain_id,
                     "platform": status.platform,
@@ -296,7 +296,9 @@ fn doctor(json: bool) -> Result<()> {
             }))?
         );
         if !canonical_ready {
-            bail!("canonical build readiness failed; run `jamscript toolchain install` and `jamscript doctor`");
+            bail!(
+                "canonical build readiness failed; run `jams toolchain install` and `jams doctor`"
+            );
         }
         return Ok(());
     }
@@ -368,7 +370,7 @@ fn doctor(json: bool) -> Result<()> {
         check_marker(status.verified)
     );
     if !canonical_ready {
-        bail!("canonical build readiness failed; run `jamscript toolchain install` and `jamscript doctor`");
+        bail!("canonical build readiness failed; run `jams toolchain install` and `jams doctor`");
     }
     Ok(())
 }

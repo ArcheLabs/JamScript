@@ -20,5 +20,5 @@ service-runtime-core = { path = "../service-runtime-core" }
 getrandom = "0.3.4"
 
 [[bin]]
-name = "jamscript"
+name = "jams"
 path = "src/main.rs"

@@ -79,7 +79,7 @@ echo "[prepare] MiniJAM revision: ${actual_revision}"
 "${MINIJAM_ROOT}/scripts/stage0-native.sh" deps
 "${MINIJAM_ROOT}/scripts/stage0-native.sh" build
 
-(cd "${JAMSCRIPT_ROOT}" && cargo build --locked --bin jamscript)
+(cd "${JAMSCRIPT_ROOT}" && cargo build --locked --bin jams)
 npm --prefix "${JAMSCRIPT_ROOT}/packages/client" ci --no-audit
 npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run build
 
@@ -132,8 +132,8 @@ sed -i \
   -e "s/^genesis_hash = .*/genesis_hash = \"${genesis_hash}\"/" \
   "${E2E_PROJECT}/jamscript.toml"
 
-(cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jamscript -- check "${E2E_PROJECT}")
-(cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jamscript -- build "${E2E_PROJECT}" --output "${ARTIFACTS}")
+(cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jams -- check "${E2E_PROJECT}")
+(cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jams -- build "${E2E_PROJECT}" --output "${ARTIFACTS}")
 code_hash="$(
   node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).code_hash));' < "${ARTIFACTS}/build.json"
 )"

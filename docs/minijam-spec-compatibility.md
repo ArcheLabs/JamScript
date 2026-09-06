@@ -83,7 +83,7 @@ required for a release:
 cargo fmt --check
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo build --locked --bin jamscript
+cargo build --locked --bin jams
 ./scripts/minijam-network-e2e.sh
 ```
 

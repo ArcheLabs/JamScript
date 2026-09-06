@@ -16,7 +16,7 @@ JamScript source
 The Formal V1 release freezes `SignedActionV1`, `RuntimeRefineInputV1`,
 `RuntimeRefineOutputV1`, `ManagedStateWitnessV1`, the generated ABI/state descriptors, Polkadot
 `LayoutV1<Blake2Hasher>`, managed-state recovery v1, and Builder artifact v1. A release bundle
-contains `protocol-v0.json` and `checksums.json`; `jamscript inspect <bundle>` verifies every
+contains `protocol-v0.json` and `checksums.json`; `jams inspect <bundle>` verifies every
 listed artifact before displaying its metadata.
 
 MiniJamSpec compatibility is an execution-boundary property. JamScript does
@@ -39,12 +39,12 @@ The compiler distribution is a JamScript responsibility. Release engineering
 produces versioned, checksum-addressed bundles with
 [`tools/release/toolchain/build-linux.sh`](../tools/release/toolchain/build-linux.sh)
 and publishes them as GitHub Release assets. Users install JamScript and run
-`jamscript build`; Docker, LLVM, Rust, Node, and a MiniJAM checkout are not
+`jams build`; Docker, LLVM, Rust, Node, and a MiniJAM checkout are not
 user requirements. The candidate distribution workflow is
 [`build-toolchain-bundle.yml`](../.github/workflows/build-toolchain-bundle.yml).
 It produces and verifies two identical Linux x86_64 archives and uploads a
-short-lived Actions validation artifact. The separate
-The tag workflow [`release-candidate.yml`](../.github/workflows/release-candidate.yml)
+short-lived Actions validation artifact. The tag workflow
+[`release-candidate.yml`](../.github/workflows/release-candidate.yml)
 is the only publication path; there is no mutable “latest toolchain” workflow.
 
 The checked-in distribution record is intentionally marked unpublished until
@@ -60,8 +60,8 @@ required `20.1.8`. The canonical fix is the JamScript-owned official LLVM
 paths. The historical failure remains part of the release record and is not
 rewritten as a successful run.
 
-1. Build the Service with `jamscript build`.
-2. Verify the deployment bundle with `jamscript inspect <bundle>`.
+1. Build the Service with `jams build`.
+2. Verify the deployment bundle with `jams inspect <bundle>`.
 3. Provision or upgrade the Service through the network operator's deployment control plane.
 4. Compile and run the generated Builder application as a per-Service Formal RPC sidecar.
 5. Configure the browser client with separate node, work, and managed-state Provider endpoints.
@@ -86,6 +86,10 @@ downloads the published bytes from the release URL and runs
 It emits `RELEASE_READY` only after the remote-byte test passes; the local asset
 test never substitutes for this R4 check.
 
+For `v0.1.0-rc.*`, publication passes both `--prerelease` and
+`--latest=false` to GitHub CLI. The stable `v0.1.0` path does not set
+`--prerelease`; an existing release is always rejected before upload.
+
 The kill test starts with isolated `HOME`, Cargo, Rustup, and JamScript cache
 directories. It hides host Rust, Cargo, rustup, Node, npm, Clang, LLVM, and Zig
 behind a restricted `PATH`, installs the digest-pinned bundle, runs `doctor`,
@@ -109,9 +113,13 @@ either target as supported without matching immutable assets.
 
 ## Promotion protocol
 
-The intended sequence is `main` green, tag `v0.1.0-rc.1`, build and publish the
-immutable assets, download them from the release URL, pass Release Kill Test
-001, and only then promote the same source and toolchain state to `v0.1.0`.
+The intended sequence is branch validation, merge to `main`, main validation,
+then tag `v0.1.0-rc.1`. The tag workflow checks out the exact source, builds
+the managed toolchain and `jams` CLI, runs the compiler-builtins regression,
+assembles the immutable assets, runs Release Kill Test 001 with `--asset-dir`,
+and only then creates the GitHub prerelease. A fresh runner downloads the
+published bytes and runs the same test with `--release-url` before the workflow
+emits `RELEASE_READY`.
 The checked-in distribution record stays unpublished until a reviewed release
 promotion records the exact URL, digest, and byte size; changing it to
 `published = true` without those bytes is rejected by the toolchain manager.

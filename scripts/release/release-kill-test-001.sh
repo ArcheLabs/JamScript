@@ -113,7 +113,8 @@ echo "K2_CLI_CHECKSUM=PASS"
 echo "K4_TOOLCHAIN_CHECKSUM=PASS"
 
 tar --zstd -xf "${bootstrap}/${cli_asset}" -C "${install}"
-test -x "${install}/jamscript"
+test -x "${install}/jams"
+test ! -e "${install}/jamscript"
 echo "K3_CLI_DOWNLOAD=PASS"
 tar --zstd -tf "${bootstrap}/${toolchain_asset}" >/dev/null
 echo "K5_TOOLCHAIN_DOWNLOAD=PASS"
@@ -187,17 +188,17 @@ export JAMSCRIPT_OFFLINE=1
 unset JAMSCRIPT_DEV_TOOLCHAIN JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING
 unset JAMSCRIPT_MINIJAM_SDK JAMSCRIPT_CLANG JAMSCRIPT_LLVM_ROOT JAMSCRIPT_LLVM_AR JAMSCRIPT_LLVM_LD
 
-"${install}/jamscript" toolchain install
+"${install}/jams" toolchain install
 doctor_json="${work_dir}/doctor.json"
-"${install}/jamscript" doctor --json >"${doctor_json}"
+"${install}/jams" doctor --json >"${doctor_json}"
 grep -q '"canonical_build_readiness": "PASS"' "${doctor_json}"
 grep -q '"host_dependency_leakage": "PASS"' "${doctor_json}"
 grep -q "${JAMSCRIPT_TOOLCHAIN_HOME}" "${doctor_json}"
 echo "K7_DOCTOR=PASS"
 echo "K8_MANAGED_PATHS=PASS"
 
-"${install}/jamscript" build "${fixture_dir}" --offline --output "${output_a}"
-"${install}/jamscript" build "${fixture_dir}" --offline --output "${output_b}"
+"${install}/jams" build "${fixture_dir}" --offline --output "${output_a}"
+"${install}/jams" build "${fixture_dir}" --offline --output "${output_b}"
 for output in "${output_a}" "${output_b}"; do
   test -s "${output}/service.pvm"
   test -s "${output}/service.polkavm"
@@ -212,10 +213,10 @@ run_result="${work_dir}/pvm-result.bin"
 run_result_b="${work_dir}/pvm-result-b.bin"
 run_log="${work_dir}/pvm-run.log"
 run_log_b="${work_dir}/pvm-run-b.log"
-"${install}/jamscript" run "${output_a}/service.pvm" --result "${run_result}" >"${run_log}"
+"${install}/jams" run "${output_a}/service.pvm" --result "${run_result}" >"${run_log}"
 grep -q '^PVM_EXECUTION=PASS$' "${run_log}"
 test -s "${run_result}"
-"${install}/jamscript" run "${output_a}/service.pvm" --result "${run_result_b}" >"${run_log_b}"
+"${install}/jams" run "${output_a}/service.pvm" --result "${run_result_b}" >"${run_log_b}"
 grep -q '^PVM_EXECUTION=PASS$' "${run_log_b}"
 test -s "${run_result_b}"
 cmp -s "${run_result}" "${run_result_b}"

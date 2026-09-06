@@ -21,7 +21,7 @@ grep -q 'triple = "macos-arm64"' toolchains/release-targets.toml
 grep -q 'supported = false' toolchains/release-targets.toml
 
 cargo test --locked -p jamscript-toolchain
-cargo run --quiet --locked --bin jamscript -- toolchain status --json > "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
+cargo run --quiet --locked --bin jams -- toolchain status --json > "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
 grep -q '"toolchainId": "scriptc-m2-v1"' "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
 grep -q '"platform": "linux-x86_64"' "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
 grep -q 'canonical_toolchain' crates/jamscript-target-jam/src/lib.rs
