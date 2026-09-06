@@ -55,6 +55,10 @@ jobs:
         with:
           node-version-file: toolchains/scriptc/NODE_VERSION
 
+      - name: Install locked ScriptC packages
+        working-directory: toolchains/scriptc
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-05-02
