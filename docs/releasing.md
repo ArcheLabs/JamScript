@@ -78,9 +78,13 @@ standard `signRaw` request and private keys never enter the CLI.
 The tag workflow [`release-candidate.yml`](../.github/workflows/release-candidate.yml)
 builds the CLI and managed bundle from the exact tag commit, writes an immutable
 `release-manifest.json` and `SHA256SUMS`, creates the GitHub Release, and refuses
-to replace an existing tag's assets. A second job downloads those published
-bytes from the release URL and runs
+to replace an existing tag's assets. Before publication, the same job runs
+Release Kill Test 001 with `--asset-dir` against the exact assembled bytes and
+emits `RELEASE_CANDIDATE_READY` only after that test passes. A second job then
+downloads the published bytes from the release URL and runs
 [`JamScript Release Kill Test 001`](../scripts/release/release-kill-test-001.sh).
+It emits `RELEASE_READY` only after the remote-byte test passes; the local asset
+test never substitutes for this R4 check.
 
 The kill test starts with isolated `HOME`, Cargo, Rustup, and JamScript cache
 directories. It hides host Rust, Cargo, rustup, Node, npm, Clang, LLVM, and Zig

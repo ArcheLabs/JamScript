@@ -3,7 +3,18 @@ name: Build JamScript Toolchain Bundle
 on:
   push:
     branches:
+      - main
       - codex/toolchain-distribution-v1
+  pull_request:
+    paths:
+      - '.github/workflows/build-toolchain-bundle.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/**'
+      - 'scripts/release/**'
+      - 'scripts/check-toolchain-distribution.sh'
+      - 'toolchains/**'
+      - 'tools/release/toolchain/**'
   workflow_dispatch:
 
 permissions:

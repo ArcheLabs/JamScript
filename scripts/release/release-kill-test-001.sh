@@ -69,15 +69,36 @@ if [[ -n "${release_url}" ]]; then
   curl --fail --location --retry 3 --silent --show-error "${release_url}/release-manifest.json" -o "${bootstrap}/release-manifest.json"
   curl --fail --location --retry 3 --silent --show-error "${release_url}/${cli_asset}" -o "${bootstrap}/${cli_asset}"
   curl --fail --location --retry 3 --silent --show-error "${release_url}/${toolchain_asset}" -o "${bootstrap}/${toolchain_asset}"
+  curl --fail --location --retry 3 --silent --show-error "${release_url}/toolchain-manifest.json" -o "${bootstrap}/toolchain-manifest.json"
   curl --fail --location --retry 3 --silent --show-error "${release_url}/SHA256SUMS" -o "${bootstrap}/SHA256SUMS"
 else
   cp -L "${asset_dir}/release-manifest.json" "${bootstrap}/release-manifest.json"
   cp -L "${asset_dir}/${cli_asset}" "${bootstrap}/${cli_asset}"
   cp -L "${asset_dir}/${toolchain_asset}" "${bootstrap}/${toolchain_asset}"
+  cp -L "${asset_dir}/toolchain-manifest.json" "${bootstrap}/toolchain-manifest.json"
   cp -L "${asset_dir}/SHA256SUMS" "${bootstrap}/SHA256SUMS"
 fi
 echo "K0_BOOTSTRAP=PASS"
 
+# SHA256SUMS is a release-asset index. Reject both missing entries and
+# references to files that this protocol did not acquire before verification.
+declare -A checksum_seen=()
+while read -r checksum filename; do
+  [[ "${checksum}" =~ ^[[:xdigit:]]{64}$ ]] || { echo "invalid SHA256SUMS entry" >&2; exit 1; }
+  filename="${filename#\*}"
+  case "${filename}" in
+    "${cli_asset}"|"${toolchain_asset}"|toolchain-manifest.json|release-manifest.json) ;;
+    *) echo "SHA256SUMS references unavailable release asset: ${filename}" >&2; exit 1 ;;
+  esac
+  test -f "${bootstrap}/${filename}" || { echo "checksum asset was not acquired: ${filename}" >&2; exit 1; }
+  checksum_seen["${filename}"]=1
+done < "${bootstrap}/SHA256SUMS"
+for required_asset in "${cli_asset}" "${toolchain_asset}" toolchain-manifest.json release-manifest.json; do
+  [[ "${checksum_seen[${required_asset}]:-}" == 1 ]] || {
+    echo "SHA256SUMS is missing acquired release asset: ${required_asset}" >&2
+    exit 1
+  }
+done
 (cd "${bootstrap}" && sha256sum -c SHA256SUMS)
 test "$(jq -er '.releaseVersion' "${bootstrap}/release-manifest.json")" = "${release_version}"
 test "$(jq -er '.targets[0].triple' "${bootstrap}/release-manifest.json")" = "${target}"
@@ -141,7 +162,7 @@ fi
 
 host_tools="${work_dir}/host-tools"
 mkdir -p "${host_tools}"
-for tool in awk bash basename cat cp dirname find grep mkdir mktemp readelf rm sed sha256sum stat tar tee tr touch zstd; do
+for tool in awk bash basename cat cmp cp dirname find grep mkdir mktemp readelf rm sed sha256sum stat tar tee tr touch zstd; do
   tool_path="$(type -P "${tool}" || true)"
   test -x "${tool_path}"
   ln -s "${tool_path}" "${host_tools}/${tool}"

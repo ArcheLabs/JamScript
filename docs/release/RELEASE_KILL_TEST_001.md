@@ -7,8 +7,9 @@ the official release and compile and execute a program?
 The implementation is
 [`scripts/release/release-kill-test-001.sh`](../../scripts/release/release-kill-test-001.sh).
 The bootstrap phase downloads `release-manifest.json`, the CLI archive, the
-managed toolchain bundle, and `SHA256SUMS`. It verifies both the checksum file
-and the per-target digests embedded in the release manifest before extraction.
+managed toolchain bundle, `toolchain-manifest.json`, and `SHA256SUMS`. It first
+asserts that every checksum entry names an acquired release asset, then verifies
+the checksum file and the per-target digests embedded in the release manifest.
 
 The build phase uses isolated `HOME`, Cargo, Rustup, and XDG cache directories,
 sets `CARGO_NET_OFFLINE` through the canonical builder, and restricts `PATH` so

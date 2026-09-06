@@ -13,9 +13,10 @@ marked pending is not silently treated as supported.
 
 ## Installation
 
-Download the matching CLI archive, managed toolchain bundle, `SHA256SUMS`, and
-`release-manifest.json` from the immutable GitHub Release tag. Verify the
-checksums, extract the CLI, and install the pinned bundle:
+Download the matching CLI archive, managed toolchain bundle,
+`toolchain-manifest.json`, `SHA256SUMS`, and `release-manifest.json` from the
+immutable GitHub Release tag. Verify the checksums, extract the CLI, and install
+the pinned bundle:
 
 ```bash
 sha256sum -c SHA256SUMS
