@@ -1,0 +1,191 @@
+name: JamScript Release Candidate
+
+on:
+  push:
+    tags:
+      - "v0.1.0-rc.*"
+      - "v0.1.0"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing semver tag to publish (normally use a tag push)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  TZ: UTC
+  LANG: C
+  LC_ALL: C
+  JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING: "1"
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+    steps:
+      - name: Checkout exact tag commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+          submodules: false
+
+      - name: Verify tag and source identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          [[ "${tag}" =~ ^v0\.1\.0(-rc\.[0-9]+)?$ ]]
+          [[ "${GITHUB_REF_TYPE}" == "tag" || -n "${{ github.event.inputs.tag }}" ]]
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            test "${source_sha}" = "${GITHUB_SHA}"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
+          echo "RELEASE_SOURCE_IDENTITY=PASS"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: toolchains/scriptc/NODE_VERSION
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src
+
+      - name: Install release engineering tools
+        run: sudo apt-get update && sudo apt-get install -y zstd patchelf jq curl xz-utils
+
+      - name: Bootstrap and verify locked LLVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/jamscript-llvm"
+          ./tools/release/toolchain/bootstrap-llvm-linux.sh "${out}"
+          cat "${out}/llvm.env" >> "${GITHUB_ENV}"
+          ./tools/release/toolchain/verify-llvm-linux.sh "${LLVM_ROOT}"
+
+      - name: Build and verify managed toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/toolchain"
+          export SCRIPTC_NODE="$(command -v node)"
+          ./tools/release/toolchain/build-linux.sh "${out}"
+          bundle="${out}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+          ./tools/release/toolchain/verify-bundle.sh "${bundle}" "${RUNNER_TEMP}/toolchain-verify" "${RUNNER_TEMP}/toolchain-root.txt"
+          ./scripts/release/compiler-builtins-regression.sh "$(<"${RUNNER_TEMP}/toolchain-root.txt")"
+          echo "BUNDLE=${bundle}" >> "${GITHUB_ENV}"
+          echo "BUNDLE_METADATA=${out}/bundle-metadata.json" >> "${GITHUB_ENV}"
+          echo "TOOLCHAIN_MANIFEST=${out}/toolchain-manifest.json" >> "${GITHUB_ENV}"
+
+      - name: Build CLI with pinned release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_copy="${RUNNER_TEMP}/release-source"
+          mkdir -p "${source_copy}"
+          git archive --format=tar "${{ steps.identity.outputs.source_sha }}" | tar -xf - -C "${source_copy}"
+          bundle_name="$(basename -- "${BUNDLE}")"
+          bundle_sha="$(sha256sum "${BUNDLE}" | awk '{print $1}')"
+          bundle_size="$(stat -c '%s' "${BUNDLE}")"
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.identity.outputs.tag }}"
+          python3 ./tools/release/toolchain/make-candidate-manifest.py \
+            --input "${source_copy}/toolchains/distribution-v1.toml" \
+            --output "${source_copy}/toolchains/distribution-v1.toml" \
+            --url "${release_url}/${bundle_name}" --sha256 "${bundle_sha}" --size "${bundle_size}"
+          cli_out="${RUNNER_TEMP}/cli"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${{ steps.identity.outputs.source_sha }}")" \
+            ./tools/release/build-cli-archive.sh "${source_copy}" "${cli_out}" "${{ steps.identity.outputs.tag }}"
+          echo "CLI_ARCHIVE=${cli_out}/jamscript-${{ steps.identity.outputs.tag }}-linux-x86_64.tar.zst" >> "${GITHUB_ENV}"
+
+      - name: Assemble immutable release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="${RUNNER_TEMP}/release-assets"
+          mkdir -p "${assets}"
+          cp -L "${CLI_ARCHIVE}" "${assets}/"
+          cp -L "${BUNDLE}" "${assets}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+          cp -L "${TOOLCHAIN_MANIFEST}" "${assets}/toolchain-manifest.json"
+          python3 ./tools/release/write-release-manifest.py \
+            --output "${assets}/release-manifest.json" \
+            --release-version "${{ steps.identity.outputs.tag }}" \
+            --source-commit "${{ steps.identity.outputs.source_sha }}" --repository "${GITHUB_REPOSITORY}" \
+            --target linux-x86_64 \
+            --unsupported-target macos-arm64 --unsupported-target windows-x86_64 \
+            --cli "${assets}/$(basename -- "${CLI_ARCHIVE}")" \
+            --toolchain "${assets}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst" \
+            --toolchain-manifest "${assets}/toolchain-manifest.json" \
+            --bundle-metadata "${BUNDLE_METADATA}"
+          (cd "${assets}" && sha256sum \
+            "$(basename -- "${CLI_ARCHIVE}")" \
+            jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst \
+            toolchain-manifest.json release-manifest.json > SHA256SUMS)
+          echo "RELEASE_ASSETS=${assets}" >> "${GITHUB_ENV}"
+          cat "${assets}/release-manifest.json"
+
+      - name: Create immutable GitHub Release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.identity.outputs.tag }}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "release already exists; immutable publication refuses replacement: ${tag}" >&2
+            exit 1
+          fi
+          gh release create "${tag}" --verify-tag --title "JamScript ${tag}" \
+            --notes "Immutable JamScript release assets for ${tag}."
+          gh release upload "${tag}" "${RELEASE_ASSETS}"/*
+          echo "IMMUTABLE_RELEASE_PUBLICATION=PASS"
+
+      - name: Upload builder evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-builder-evidence-${{ steps.identity.outputs.tag }}
+          path: ${{ env.RELEASE_ASSETS }}
+          if-no-files-found: error
+          retention-days: 30
+
+  validate-published-release:
+    needs: build-and-publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build-and-publish.outputs.tag }}
+
+      - name: Install bootstrap tools
+        run: sudo apt-get update && sudo apt-get install -y zstd curl jq
+
+      - name: Run Release Kill Test 001 against GitHub Release bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/kill-test"
+          ./scripts/release/release-kill-test-001.sh \
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ needs.build-and-publish.outputs.tag }}" \
+            --release-version "${{ needs.build-and-publish.outputs.tag }}" \
+            --result-json "${RUNNER_TEMP}/kill-test/result.json" \
+            --work-dir "${RUNNER_TEMP}/kill-test/work"
+          cat "${RUNNER_TEMP}/kill-test/result.json"
+
+      - name: Upload published-artifact validation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-kill-test-001-${{ needs.build-and-publish.outputs.tag }}
+          path: ${{ runner.temp }}/kill-test/result.json
+          if-no-files-found: error
+          retention-days: 30

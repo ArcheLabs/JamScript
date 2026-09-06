@@ -3,6 +3,7 @@
 debug
 target
 **/target-polkavm/
+release-kill-test-001.json
 tools/pvm-conformance/Cargo.lock
 tools/pvm-*-probe/Cargo.lock
 

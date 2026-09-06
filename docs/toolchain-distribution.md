@@ -96,3 +96,20 @@ managed host linker.
 
 The native bundle scope starts with `linux-x86_64`. Windows, macOS, and
 Linux ARM bundles use the same manifest and cache model when published.
+
+## Published bytes and consumer validation
+
+The release workflow builds the CLI archive and managed bundle from a semver
+tag, embeds the exact bundle URL and SHA-256 in the CLI's distribution
+manifest, and publishes `release-manifest.json`, `toolchain-manifest.json`, and
+`SHA256SUMS` as immutable release assets. It refuses to upload into an existing
+release tag.
+
+After publication, a separate job downloads those assets from the GitHub
+Release URL. [`release-kill-test-001.sh`](../scripts/release/release-kill-test-001.sh)
+verifies the release manifest against the downloaded bytes, isolates HOME and
+all compiler caches, hides host toolchains, runs `jamscript doctor`, and builds
+the external consumer fixture twice with `JAMSCRIPT_OFFLINE=1`. The test then
+executes `service.pvm` through the CLI interpreter and records a JSON result.
+This is the R1/R4 gate; an Actions artifact passed directly between jobs is not
+used as a substitute for the published bytes.

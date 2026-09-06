@@ -1,9 +1,9 @@
-name: Developer Preview Release
+name: Developer Preview Checks
 
 on:
   push:
     tags:
-      - "v0.*"
+      - "v0.0.*"
 
 jobs:
   verify:

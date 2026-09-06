@@ -1,0 +1,15 @@
+release_version = "0.1.0"
+
+[[target]]
+triple = "linux-x86_64"
+supported = true
+
+[[target]]
+triple = "macos-arm64"
+supported = false
+reason = "The v0.1 branch has no reproducible Apple Silicon LLVM bundle producer yet."
+
+[[target]]
+triple = "windows-x86_64"
+supported = false
+reason = "Windows is outside the v0.1 release scope."

@@ -1889,6 +1889,7 @@ dependencies = [
  "jamscript-parser",
  "jamscript-target-jam",
  "jamscript-toolchain",
+ "polkavm",
  "serde",
  "serde_json",
  "service-runtime-core",

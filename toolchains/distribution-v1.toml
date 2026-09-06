@@ -13,7 +13,7 @@ jam_blob_encoder_version = "0.1.28"
 scriptc_revision = "d7b4480"
 
 # This is intentionally an explicit promotion record. Release engineering
-# replaces the bundle fields with the values emitted by publish-toolchain.yml;
+# replaces the bundle fields with the values emitted by release-candidate.yml;
 # the CLI rejects incomplete records instead of resolving "latest" or using a
 # host compiler.
 [platforms.linux-x86_64]
@@ -22,3 +22,17 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 size = 1
 archive = "tar.zst"
 published = false
+
+[[target]]
+triple = "linux-x86_64"
+supported = true
+
+[[target]]
+triple = "macos-arm64"
+supported = false
+reason = "No reproducible Apple Silicon bundle producer is available on this branch."
+
+[[target]]
+triple = "windows-x86_64"
+supported = false
+reason = "Windows is outside the v0.1 release scope."

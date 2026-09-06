@@ -77,7 +77,16 @@ smoke output confirmed the cc ENOENT boundary.
 
 ## Current status
 
-The standalone consumer smoke test was removed from the candidate workflow.
-Bundle A/B reproducibility, bundle integrity, and the managed execution closure
-remain the release gates; this report is retained as a record of the earlier
-consumer failures.
+The old repository-copy consumer smoke test was removed from the candidate
+workflow because it compiled the CLI with the runner's Cargo and scanned binary
+PVM outputs as text. Actions run
+[33971140720](https://github.com/ArcheLabs/JamScript/actions/runs/33971140720)
+therefore failed on `grep: ...service.pvm: binary file matches`, which was a
+test defect rather than a compiler dependency result.
+
+It is replaced by the release-level
+[`JamScript Release Kill Test 001`](../../scripts/release/release-kill-test-001.sh).
+That test downloads the immutable release assets, verifies their SHA-256 values,
+hides host toolchains, builds an external fixture offline, and executes the
+published PVM bytes. The managed execution closure and the explicit
+`compiler-builtins` source assertion remain permanent producer gates.

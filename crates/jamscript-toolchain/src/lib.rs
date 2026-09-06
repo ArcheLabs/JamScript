@@ -34,6 +34,16 @@ pub struct DistributionManifest {
     #[serde(default)]
     pub scriptc_revision: String,
     pub platforms: BTreeMap<String, PlatformBundle>,
+    #[serde(default, rename = "target")]
+    pub targets: Vec<ReleaseTarget>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReleaseTarget {
+    pub triple: String,
+    pub supported: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -178,7 +188,18 @@ impl ToolchainManager {
             .cache_home
             .join(format!(".tmp-{}-{token}", std::process::id()));
         let result = (|| {
-            download(&bundle.url, &archive_path)?;
+            // Release validation may provide the bytes it downloaded during
+            // bootstrap. This explicit override is test-only plumbing; the
+            // embedded release URL and digest remain authoritative.
+            let download_url = if let Some(path) = env::var_os("JAMSCRIPT_TOOLCHAIN_BUNDLE") {
+                if env::var("JAMSCRIPT_RELEASE_TEST").as_deref() != Ok("1") {
+                    bail!("JAMSCRIPT_TOOLCHAIN_BUNDLE requires JAMSCRIPT_RELEASE_TEST=1");
+                }
+                format!("file://{}", PathBuf::from(path).display())
+            } else {
+                bundle.url.clone()
+            };
+            download(&download_url, &archive_path)?;
             verify_archive(&archive_path, bundle)?;
             fs::create_dir_all(&staging)?;
             extract_archive(&archive_path, &staging, &bundle.archive)?;
@@ -456,6 +477,14 @@ fn validate_manifest(manifest: &DistributionManifest) -> Result<()> {
     }
     if manifest.platforms.is_empty() {
         bail!("toolchain distribution has no platform bundles");
+    }
+    if !manifest.targets.is_empty()
+        && !manifest
+            .targets
+            .iter()
+            .any(|target| target.triple == "linux-x86_64" && target.supported)
+    {
+        bail!("toolchain distribution does not declare linux-x86_64 support");
     }
     for bundle in manifest.platforms.values() {
         if bundle.url.is_empty()

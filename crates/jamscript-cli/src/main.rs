@@ -7,6 +7,9 @@ use jamscript_ir::abi_for_language;
 use jamscript_parser::parse_service_v02;
 use jamscript_target_jam::{verify_deployment_bundle, JamTarget, NativeModule};
 use jamscript_toolchain::ToolchainManager;
+use polkavm::{
+    BackendKind, Config as PvmConfig, Engine, Linker, MemoryAccessError, Module, ModuleConfig, Reg,
+};
 use serde::Deserialize;
 use service_runtime_core::ServiceKeyV1;
 use std::{
@@ -54,6 +57,14 @@ enum CommandKind {
     Doctor {
         #[arg(long)]
         json: bool,
+    },
+    Run {
+        #[arg(default_value = "dist/service.pvm")]
+        artifact: PathBuf,
+        #[arg(long, default_value = "minijam_refine")]
+        export: String,
+        #[arg(long)]
+        result: Option<PathBuf>,
     },
     Inspect {
         #[arg(default_value = "dist")]
@@ -171,6 +182,11 @@ fn main() -> Result<()> {
         }
         CommandKind::Toolchain { command } => toolchain_command(command),
         CommandKind::Doctor { json } => doctor(json),
+        CommandKind::Run {
+            artifact,
+            export,
+            result,
+        } => run_artifact(&artifact, &export, result.as_deref()),
         CommandKind::Inspect { bundle } => inspect(&bundle),
     }
 }
@@ -213,42 +229,75 @@ fn toolchain_command(command: ToolchainCommand) -> Result<()> {
 fn doctor(json: bool) -> Result<()> {
     let manager = ToolchainManager::new()?;
     let status = manager.status();
+    let root = status.path.clone();
+    let jamscript_binary = std::env::current_exe().ok();
+    let tool_paths = root.as_ref().map(|root| {
+        serde_json::json!({
+            "rustc": root.join("bin/rustc"),
+            "cargo": root.join("bin/cargo"),
+            "node": root.join("bin/node"),
+            "scriptc": root.join("scriptc"),
+            "clang": root.join("bin/clang"),
+            "llvm_ar": root.join("bin/llvm-ar"),
+            "lld": root.join("bin/ld.lld"),
+            "host_linker": root.join("bin/jamscript-host-linker"),
+            "polkavm": root.join("toolchains/polkavm.lock"),
+            "jam_sdk": root.join("targets/jam/sdk"),
+            "toolchain_root": root,
+            "jamscript": jamscript_binary,
+        })
+    });
+    let managed_paths_only = root.as_ref().is_some_and(|root| {
+        [
+            root.join("bin/rustc"),
+            root.join("bin/cargo"),
+            root.join("bin/node"),
+            root.join("scriptc"),
+            root.join("bin/clang"),
+            root.join("bin/llvm-ar"),
+            root.join("bin/ld.lld"),
+            root.join("bin/jamscript-host-linker"),
+            root.join("toolchains/polkavm.lock"),
+            root.join("targets/jam/sdk"),
+        ]
+        .iter()
+        .all(|path| path.starts_with(root) && (path.is_file() || path.is_dir()))
+    });
+    let canonical_ready = status.installed && status.verified && managed_paths_only;
     if json {
-        let root = status
-            .path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("managed toolchain is not installed"))?;
-        if !status.verified {
-            bail!(
-                "managed toolchain is not verified: {}",
-                status
-                    .error
-                    .as_deref()
-                    .unwrap_or("unknown verification error")
-            );
-        }
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "toolchain_id": status.toolchain_id,
-                "platform": status.platform,
-                "canonical": status.verified,
+                "jamscript": { "version": env!("CARGO_PKG_VERSION") },
+                "jamscript_binary": jamscript_binary,
+                "toolchain": {
+                    "id": status.toolchain_id,
+                    "platform": status.platform,
+                    "root": root,
+                    "manifest": root.as_ref().map(|path| path.join("manifest.json")),
+                    "digest": status.sha256,
+                    "verified": status.verified,
+                },
+                "resolved_tools": tool_paths,
+                "host_dependency_leakage": if managed_paths_only { "PASS" } else { "FAIL" },
+                "canonical_build_readiness": if canonical_ready { "PASS" } else { "FAIL" },
+                "canonical": canonical_ready,
+                "toolchain_home": root,
+                "node": root.as_ref().map(|path| path.join("bin/node")),
+                "rustc": root.as_ref().map(|path| path.join("bin/rustc")),
+                "cargo": root.as_ref().map(|path| path.join("bin/cargo")),
+                "clang": root.as_ref().map(|path| path.join("bin/clang")),
+                "scriptc": root.as_ref().map(|path| path.join("scriptc")),
                 "offline": matches!(
                     std::env::var("JAMSCRIPT_OFFLINE").as_deref(),
                     Ok("1") | Ok("true") | Ok("yes")
                 ),
-                "toolchain_home": root,
-                "node": root.join("bin/node"),
-                "clang": root.join("bin/clang"),
-                "llvm_ar": root.join("bin/llvm-ar"),
-                "ar": root.join("bin/ar"),
-                "lld": root.join("bin/ld.lld"),
-                "host_linker": root.join("bin/jamscript-host-linker"),
-                "rustc": root.join("bin/rustc"),
-                "cargo": root.join("bin/cargo"),
-                "jam_sdk": root.join("targets/jam/sdk"),
+                "error": status.error,
             }))?
         );
+        if !canonical_ready {
+            bail!("canonical build readiness failed; run `jamscript toolchain install` and `jamscript doctor`");
+        }
         return Ok(());
     }
     println!("JamScript CLI: {}", env!("CARGO_PKG_VERSION"));
@@ -259,6 +308,39 @@ fn doctor(json: bool) -> Result<()> {
         status.toolchain_id,
         yes_no(status.installed),
         yes_no(status.verified)
+    );
+    if let Some(root) = &root {
+        println!("Bundle root:\n{}", root.display());
+        println!("Manifest:\n{}", root.join("manifest.json").display());
+        println!("Digest:\n{}", status.sha256);
+        for (name, path) in [
+            ("Rust compiler", root.join("bin/rustc")),
+            ("Cargo", root.join("bin/cargo")),
+            ("Node", root.join("bin/node")),
+            ("ScriptC", root.join("scriptc")),
+            ("Clang", root.join("bin/clang")),
+            ("LLVM/Clang linker", root.join("bin/ld.lld")),
+            (
+                "Managed host linker",
+                root.join("bin/jamscript-host-linker"),
+            ),
+            ("PolkaVM lock", root.join("toolchains/polkavm.lock")),
+            ("JAM SDK", root.join("targets/jam/sdk")),
+        ] {
+            println!(
+                "{name}:\n{} {}",
+                path.display(),
+                check_marker(path.is_file() || path.is_dir())
+            );
+        }
+    }
+    println!(
+        "\nHost dependency leakage: {}",
+        check_marker(managed_paths_only)
+    );
+    println!(
+        "Canonical build readiness: {}",
+        check_marker(canonical_ready)
     );
     println!(
         "Node:\n{} {}",
@@ -285,7 +367,97 @@ fn doctor(json: bool) -> Result<()> {
         manager.manifest().jam_target_version,
         check_marker(status.verified)
     );
+    if !canonical_ready {
+        bail!("canonical build readiness failed; run `jamscript toolchain install` and `jamscript doctor`");
+    }
     Ok(())
+}
+
+fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Result<()> {
+    let bytes = fs::read(artifact)
+        .with_context(|| format!("reading PVM artifact {}", artifact.display()))?;
+    let mut config = PvmConfig::new();
+    config.set_backend(Some(BackendKind::Interpreter));
+    let engine = Engine::new(&config).context("creating PolkaVM interpreter")?;
+    let module =
+        Module::new(&engine, &ModuleConfig::new(), bytes.into()).context("loading PVM artifact")?;
+    let payload = empty_refine_input();
+    let mut linker: Linker<(), MemoryAccessError> = Linker::new();
+    linker
+        .define_typed(
+            "minijam_host_call",
+            move |caller: polkavm::Caller<'_, ()>,
+                  call: u32,
+                  args: u32|
+                  -> Result<u64, MemoryAccessError> {
+                let raw = caller.instance.read_memory(args, 48)?;
+                let mut values = [0u64; 6];
+                for (index, value) in values.iter_mut().enumerate() {
+                    let offset = index * 8;
+                    *value = u64::from_le_bytes(raw[offset..offset + 8].try_into().unwrap());
+                }
+                if call == 1 && values[3] == 13 {
+                    caller.instance.write_memory(values[0] as u32, &payload)?;
+                    return Ok(payload.len() as u64);
+                }
+                Ok(u64::MAX)
+            },
+        )
+        .context("registering deterministic JAM host shim")?;
+    linker.define_fallback(|caller, _| {
+        caller.instance.set_reg(Reg::A0, u64::MAX);
+        Ok(())
+    });
+    let pre = linker
+        .instantiate_pre(&module)
+        .context("linking PVM artifact")?;
+    let mut instance = pre.instantiate().context("instantiating PVM artifact")?;
+    instance.set_gas(5_000_000);
+    if export == "minijam_accumulate" {
+        instance
+            .call_typed_and_get_result::<(), _>(&mut (), export, ())
+            .map_err(|error| anyhow::anyhow!("PVM execution: {error:?}"))?;
+    } else if export == "minijam_refine" {
+        instance
+            .call_typed_and_get_result::<u64, _>(&mut (), export, ())
+            .map_err(|error| anyhow::anyhow!("PVM execution: {error:?}"))?;
+        let pointer = instance.reg(Reg::A0) as u32;
+        let size = instance.reg(Reg::A1) as u32;
+        let output = instance
+            .read_memory(pointer, size)
+            .context("reading PVM execution result")?;
+        if output.is_empty() {
+            bail!("PVM execution returned an empty result");
+        }
+        if let Some(path) = result_path {
+            fs::write(path, &output).with_context(|| format!("writing {}", path.display()))?;
+        }
+        println!("PVM_RESULT_BYTES={}", output.len());
+    } else {
+        let value = instance
+            .call_typed_and_get_result::<u64, _>(&mut (), export, ())
+            .map_err(|error| anyhow::anyhow!("PVM execution: {error:?}"))?;
+        println!("PVM_RESULT={value}");
+    }
+    println!("PVM_EXPORT={export}");
+    println!("PVM_EXECUTION=PASS");
+    Ok(())
+}
+
+fn empty_refine_input() -> Vec<u8> {
+    let plan = [1u8, 0, 0, 0, 0];
+    let mut witness = Vec::with_capacity(46);
+    witness.push(1);
+    witness.extend_from_slice(&[0; 32]);
+    witness.extend_from_slice(&(plan.len() as u32).to_le_bytes());
+    witness.extend_from_slice(&plan);
+    witness.extend_from_slice(&0u32.to_le_bytes());
+    let mut input = Vec::with_capacity(55);
+    input.push(1);
+    input.extend_from_slice(&(witness.len() as u32).to_le_bytes());
+    input.extend_from_slice(&witness);
+    input.extend_from_slice(&0u32.to_le_bytes());
+    input
 }
 
 fn yes_no(value: bool) -> &'static str {
