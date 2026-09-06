@@ -26,8 +26,9 @@ cp -L "${SOURCE_ROOT}/LICENSE" "${stage}/LICENSE"
 cp -L "${SOURCE_ROOT}/README.md" "${stage}/README.md"
 find "${stage}" -type f -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
 (cd "${stage}" && tar --sort=name --numeric-owner --owner=0 --group=0 --mtime="@${SOURCE_DATE_EPOCH}" --zstd -cf "${OUT}/${archive}" .)
-tar --zstd -tf "${OUT}/${archive}" | grep -qx './jams'
-if tar --zstd -tf "${OUT}/${archive}" | grep -qx './jamscript'; then
+archive_entries="$(tar --zstd -tf "${OUT}/${archive}")"
+printf '%s\n' "${archive_entries}" | sed 's#^\./##' | grep -qx 'jams'
+if printf '%s\n' "${archive_entries}" | sed 's#^\./##' | grep -qx 'jamscript'; then
   echo "legacy jamscript executable unexpectedly present" >&2
   exit 1
 fi
