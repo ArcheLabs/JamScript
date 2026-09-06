@@ -113,8 +113,9 @@ either target as supported without matching immutable assets.
 
 ## Promotion protocol
 
-The intended sequence is branch validation, merge to `main`, main validation,
-then tag `v0.1.0-rc.1`. The tag workflow checks out the exact source, builds
+The pre-installer tag `v0.1.0-rc.1` remains immutable. The intended sequence
+for this installer release is branch validation, merge to `main`, main
+validation, then tag `v0.1.0-rc.2`. The tag workflow checks out the exact source, builds
 the managed toolchain and `jams` CLI, runs the compiler-builtins regression,
 assembles the immutable assets, runs Release Kill Test 001 with `--asset-dir`,
 and only then creates the GitHub prerelease. A fresh runner downloads the
@@ -123,6 +124,12 @@ emits `RELEASE_READY`.
 The checked-in distribution record stays unpublished until a reviewed release
 promotion records the exact URL, digest, and byte size; changing it to
 `published = true` without those bytes is rejected by the toolchain manager.
+
+The installer published in user documentation must be fetched from the exact
+release tag and request that same release version. Since `v0.1.0-rc.1` already
+exists, the installer will ship in `v0.1.0-rc.2`; its RC path uses
+`v0.1.0-rc.2/install.sh` and `--version v0.1.0-rc.2`. Documentation must not
+combine a mutable branch installer with a different release tag.
 
 ## Explicit exclusions
 

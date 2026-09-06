@@ -5,6 +5,14 @@ on:
   pull_request:
 
 jobs:
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install.sh
+      - run: bash -n scripts/test-installer.sh
+      - run: ./scripts/test-installer.sh
+
   toolchain-distribution:
     runs-on: ubuntu-latest
     steps:
