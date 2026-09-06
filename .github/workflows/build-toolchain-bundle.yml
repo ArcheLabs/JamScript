@@ -182,6 +182,13 @@ jobs:
             "$(<"${RUNNER_TEMP}/toolchain-verify-a/root.txt")"
           echo "EXECUTION_CLOSURE_A=PASS" >> "${GITHUB_ENV}"
 
+      - name: Run compiler-builtins PolkaVM regression A
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/release/compiler-builtins-regression.sh \
+            "$(<"${RUNNER_TEMP}/toolchain-verify-a/root.txt")"
+
       - name: Build bundle B independently
         shell: bash
         run: |
