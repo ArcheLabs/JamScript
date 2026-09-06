@@ -13,19 +13,21 @@ marked pending is not silently treated as supported.
 
 ## Installation
 
-Download the matching CLI archive, managed toolchain bundle, `SHA256SUMS`, and
-`release-manifest.json` from the immutable GitHub Release tag. Verify the
-checksums, extract the CLI, and install the pinned bundle:
+Download the matching CLI archive, managed toolchain bundle,
+`toolchain-manifest.json`, `SHA256SUMS`, and `release-manifest.json` from the
+immutable GitHub Release tag. Verify the checksums, extract the CLI, and install
+the pinned bundle:
 
 ```bash
 sha256sum -c SHA256SUMS
 tar --zstd -xf jamscript-v0.1.0-linux-x86_64.tar.zst
-./jamscript toolchain install
-./jamscript doctor
+./jams toolchain install
+./jams doctor
 ```
 
 The release archive embeds the exact toolchain URL and digest; no repository
-checkout or developer toolchain is needed.
+checkout or developer toolchain is needed. The public executable is `jams`; the
+release does not provide a `jamscript` compatibility alias.
 
 ## Hello World
 
@@ -33,8 +35,8 @@ Create a project containing an entry TypeScript file and a `.jamscript`
 service identity, then run:
 
 ```bash
-./jamscript build ./hello --offline --output ./dist
-./jamscript run ./dist/service.pvm
+./jams build ./hello --offline --output ./dist
+./jams run ./dist/service.pvm
 ```
 
 `run` executes the generated PVM artifact with the deterministic local
@@ -43,7 +45,7 @@ interpreter and prints `PVM_EXECUTION=PASS` on success.
 ## Build
 
 The canonical build installs the managed bundle once and then compiles without
-network access. `jamscript doctor` reports every resolved compiler path and
+network access. `jams doctor` reports every resolved compiler path and
 fails when a canonical build cannot be satisfied.
 
 The release ABI uses a single typed descriptor for actions, managed state,
@@ -77,12 +79,12 @@ nonce keys, proof-backed guest interfaces, and a reference host provider.
 `jamscript-runtime` exposes the formal runtime wrapper.
 
 ```bash
-cargo build --locked --bin jamscript
-cargo run --locked --bin jamscript -- new hello-jam
-cargo run --locked --bin jamscript -- check examples/counter
-cargo run --locked --bin jamscript -- build examples/counter
-cargo run --locked --bin jamscript -- toolchain status
-cargo run --locked --bin jamscript -- doctor
+cargo build --locked --bin jams
+cargo run --locked --bin jams -- new hello-jam
+cargo run --locked --bin jams -- check examples/counter
+cargo run --locked --bin jams -- build examples/counter
+cargo run --locked --bin jams -- toolchain status
+cargo run --locked --bin jams -- doctor
 ```
 
 ## Run

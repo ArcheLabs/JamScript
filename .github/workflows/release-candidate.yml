@@ -55,6 +55,10 @@ jobs:
         with:
           node-version-file: toolchains/scriptc/NODE_VERSION
 
+      - name: Install locked ScriptC packages
+        working-directory: toolchains/scriptc
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-05-02
@@ -132,6 +136,27 @@ jobs:
           echo "RELEASE_ASSETS=${assets}" >> "${GITHUB_ENV}"
           cat "${assets}/release-manifest.json"
 
+      - name: Run Release Kill Test 001 before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          prepublish_dir="${RUNNER_TEMP}/release-kill-prepublish"
+          mkdir -p "${prepublish_dir}"
+          ./scripts/release/release-kill-test-001.sh \
+            --asset-dir "${RELEASE_ASSETS}" \
+            --release-version "${{ steps.identity.outputs.tag }}" \
+            --result-json "${prepublish_dir}/result.json" \
+            --work-dir "${prepublish_dir}/work"
+          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == false and .gates.R3_immutable_github_release == false and .gates.R4_published_artifact_validation == false' "${prepublish_dir}/result.json"
+          echo "RELEASE_CANDIDATE_READY=PASS"
+          {
+            echo "## Release candidate readiness"
+            echo
+            echo "RELEASE_CANDIDATE_READY=PASS"
+            echo "Pre-publication Kill Test 001 passed against the exact assembled assets."
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "PREPUBLISH_KILL_RESULT=${prepublish_dir}/result.json" >> "${GITHUB_ENV}"
+
       - name: Create immutable GitHub Release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -143,8 +168,16 @@ jobs:
             echo "release already exists; immutable publication refuses replacement: ${tag}" >&2
             exit 1
           fi
-          gh release create "${tag}" --verify-tag --title "JamScript ${tag}" \
+          release_args=(
+            "${tag}"
+            --verify-tag
+            --title "JamScript ${tag}"
             --notes "Immutable JamScript release assets for ${tag}."
+          )
+          if [[ "${tag}" == *-rc.* ]]; then
+            release_args+=(--prerelease --latest=false)
+          fi
+          gh release create "${release_args[@]}"
           gh release upload "${tag}" "${RELEASE_ASSETS}"/*
           echo "IMMUTABLE_RELEASE_PUBLICATION=PASS"
 
@@ -152,7 +185,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-builder-evidence-${{ steps.identity.outputs.tag }}
-          path: ${{ env.RELEASE_ASSETS }}
+          path: |
+            ${{ env.RELEASE_ASSETS }}
+            ${{ env.PREPUBLISH_KILL_RESULT }}
           if-no-files-found: error
           retention-days: 30
 
@@ -181,6 +216,14 @@ jobs:
             --result-json "${RUNNER_TEMP}/kill-test/result.json" \
             --work-dir "${RUNNER_TEMP}/kill-test/work"
           cat "${RUNNER_TEMP}/kill-test/result.json"
+          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == true and .gates.R3_immutable_github_release == true and .gates.R4_published_artifact_validation == true' "${RUNNER_TEMP}/kill-test/result.json"
+          echo "RELEASE_READY=PASS"
+          {
+            echo "## Released artifact readiness"
+            echo
+            echo "RELEASE_READY=PASS"
+            echo "Release Kill Test 001 passed against downloaded GitHub Release bytes."
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload published-artifact validation evidence
         uses: actions/upload-artifact@v4

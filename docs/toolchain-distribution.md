@@ -24,13 +24,13 @@ extraction, and `ldd` must report a complete LLVM runtime closure.
 ## User commands
 
 ```bash
-jamscript build
-jamscript build --offline
-jamscript toolchain status --json
-jamscript toolchain install
-jamscript toolchain verify
-jamscript toolchain path
-jamscript doctor
+jams build
+jams build --offline
+jams toolchain status --json
+jams toolchain install
+jams toolchain verify
+jams toolchain path
+jams doctor
 ```
 
 Installation may use the network once. Compilation uses the installed bundle;
@@ -108,7 +108,7 @@ release tag.
 After publication, a separate job downloads those assets from the GitHub
 Release URL. [`release-kill-test-001.sh`](../scripts/release/release-kill-test-001.sh)
 verifies the release manifest against the downloaded bytes, isolates HOME and
-all compiler caches, hides host toolchains, runs `jamscript doctor`, and builds
+all compiler caches, hides host toolchains, runs `jams doctor`, and builds
 the external consumer fixture twice with `JAMSCRIPT_OFFLINE=1`. The test then
 executes `service.pvm` through the CLI interpreter and records a JSON result.
 This is the R1/R4 gate; an Actions artifact passed directly between jobs is not

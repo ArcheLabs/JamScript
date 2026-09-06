@@ -4,17 +4,23 @@ This is the canonical external-consumer test for v0.1. It answers one
 question: can a developer with no JamScript development environment download
 the official release and compile and execute a program?
 
+JamScript is the product name. `jams` is the public executable name; the
+release contains no `jamscript` compatibility executable or alias.
+
 The implementation is
 [`scripts/release/release-kill-test-001.sh`](../../scripts/release/release-kill-test-001.sh).
 The bootstrap phase downloads `release-manifest.json`, the CLI archive, the
-managed toolchain bundle, and `SHA256SUMS`. It verifies both the checksum file
-and the per-target digests embedded in the release manifest before extraction.
+managed toolchain bundle, `toolchain-manifest.json`, and `SHA256SUMS`. It first
+asserts that every checksum entry names an acquired release asset, then verifies
+the checksum file and the per-target digests embedded in the release manifest.
+After extraction it requires an executable `jams` and rejects any `jamscript`
+executable, so the archive structure itself enforces the public command rename.
 
 The build phase uses isolated `HOME`, Cargo, Rustup, and XDG cache directories,
 sets `CARGO_NET_OFFLINE` through the canonical builder, and restricts `PATH` so
 host Rust, Cargo, rustup, Node, npm, Clang, LLVM, and Zig cannot be resolved.
 The managed bundle is the only compiler input. An external hello fixture is
-built twice, the generated `service.pvm` is executed with `jamscript run`, and
+built twice, the generated `service.pvm` is executed with `jams run`, and
 the two artifact hashes must match.
 
 The script writes a machine-readable result:

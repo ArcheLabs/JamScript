@@ -13,10 +13,10 @@ fi
 test "$(node --version)" = "v24.15.0"
 
 cd "$root"
-cargo run --locked --offline -p jamscript-cli -- build examples/counter --output "$output"
+cargo run --locked --offline -p jamscript-cli --bin jams -- build examples/counter --output "$output"
 
 dynamic_output="$output/dynamic"
-cargo run --locked --offline -p jamscript-cli -- build examples/dynamic-state-scriptc --output "$dynamic_output"
+cargo run --locked --offline -p jamscript-cli --bin jams -- build examples/dynamic-state-scriptc --output "$dynamic_output"
 
 for artifact in service.blob service.polkavm service.pvm service.abi.json build.json; do
   test -s "$output/$artifact"

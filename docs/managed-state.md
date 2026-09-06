@@ -97,7 +97,7 @@ builder entrypoint.
 
 ## Generated Builder application
 
-`jamscript build` emits both `generated_service.rs` for the PolkaVM guest and
+`jams build` emits both `generated_service.rs` for the PolkaVM guest and
 `generated_builder_application.rs` for producer-side witness discovery. Both
 embed the same generated `ServiceApplication` semantics: selector, application
 ABI decoder, wallet authentication, nonce transitions, state keys, business
