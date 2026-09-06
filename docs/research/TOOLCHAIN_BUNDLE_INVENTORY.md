@@ -40,7 +40,7 @@ toolchains/polkavm.lock
 The bundle also contains `bin/jamscript-host-linker`. It is a relocatable
 wrapper that invokes the bundled Clang with the bundled `ld.lld`; the managed
 execution-closure verifier must pass before a second reproducibility bundle is
-built and before the bundle can be consumed by the offline smoke test.
+built and before the bundle can be consumed by Release Kill Test 001.
 
 The installed consumer sets `CARGO_HOME` to an empty external directory. The
 guest build receives the bundle's own Cargo home and the ScriptC child process
@@ -75,4 +75,5 @@ du -sh <installed-bundle-root>
 
 The verification workflow records the exact archive SHA-256, byte size, file
 count, and unpacked size in its run summary. No release is promoted until the
-two independent producer archives and the two consumer artifact sets agree.
+the two independent producer archives agree and the published bytes pass
+Release Kill Test 001.

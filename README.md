@@ -1,12 +1,53 @@
 # JamScript
 
-JamScript's MiniJAM Stage-1 production boundary is the neutral node RPC,
-Formal Work RPC, and proof-aware StateProvider. It has no Playground runtime
-or compiler dependency.
-
 JamScript is a deterministic TypeScript-like application runtime for JAM
-services. The release ABI uses a single typed descriptor for actions, managed
-state, queries, and clients.
+services. It compiles an external service project to a canonical PolkaVM/JAM
+artifact and keeps MiniJAM and Jambda out of the compiler and release path.
+
+## Supported platforms
+
+The v0.1 release producer currently supports publishing `linux-x86_64`. The release
+manifest explicitly marks `macos-arm64` as pending a reproducible Apple Silicon
+LLVM bundle producer and `windows-x86_64` as outside the v0.1 scope. A platform
+marked pending is not silently treated as supported.
+
+## Installation
+
+Download the matching CLI archive, managed toolchain bundle, `SHA256SUMS`, and
+`release-manifest.json` from the immutable GitHub Release tag. Verify the
+checksums, extract the CLI, and install the pinned bundle:
+
+```bash
+sha256sum -c SHA256SUMS
+tar --zstd -xf jamscript-v0.1.0-linux-x86_64.tar.zst
+./jamscript toolchain install
+./jamscript doctor
+```
+
+The release archive embeds the exact toolchain URL and digest; no repository
+checkout or developer toolchain is needed.
+
+## Hello World
+
+Create a project containing an entry TypeScript file and a `.jamscript`
+service identity, then run:
+
+```bash
+./jamscript build ./hello --offline --output ./dist
+./jamscript run ./dist/service.pvm
+```
+
+`run` executes the generated PVM artifact with the deterministic local
+interpreter and prints `PVM_EXECUTION=PASS` on success.
+
+## Build
+
+The canonical build installs the managed bundle once and then compiles without
+network access. `jamscript doctor` reports every resolved compiler path and
+fails when a canonical build cannot be satisfied.
+
+The release ABI uses a single typed descriptor for actions, managed state,
+queries, and clients.
 
 The supported path uses imports from the `jam` standard library, bounded
 primitive input schemas, ABI generation, and generated `no_std` Rust for the
@@ -43,6 +84,28 @@ cargo run --locked --bin jamscript -- build examples/counter
 cargo run --locked --bin jamscript -- toolchain status
 cargo run --locked --bin jamscript -- doctor
 ```
+
+## Run
+
+The `run` command is a release validation aid for the generated
+`service.pvm`. Network deployment remains an operator action outside the
+compiler.
+
+## Toolchain model
+
+JamScript owns Node, ScriptC, Rust, rust-src/compiler-builtins, LLVM/Clang,
+PolkaVM linker inputs, vendored Cargo dependencies, and the JAM target SDK in
+one digest-addressed bundle. MiniJAM compatibility is an optional downstream
+check and is never a release prerequisite.
+
+## Limitations
+
+The v0.1 boundary is a testnet developer preview. Windows and Apple Silicon
+archives are not published by this branch. Mainnet economics, distributed
+providers, generic PVM witness discovery, and automatic installers remain out
+of scope.
+
+## Development and contribution
 
 To run the optional cross-process MiniJAM compatibility path (it requires a
 separate MiniJAM checkout):

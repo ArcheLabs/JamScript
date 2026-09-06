@@ -1,0 +1,11 @@
+[package]
+name = "release-consumer-hello"
+version = "0.1.0"
+entry = "hello.ts"
+language = "0.2"
+
+[compiler]
+backend = "scriptc"
+
+[management]
+mode = "immutable"

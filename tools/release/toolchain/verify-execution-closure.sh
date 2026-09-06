@@ -11,6 +11,13 @@ test -x "$BUNDLE_ROOT/bin/rustc"
 test -x "$BUNDLE_ROOT/bin/cargo"
 test -x "$BUNDLE_ROOT/bin/jamscript-host-linker"
 
+# `-Z build-std` resolves compiler-builtins from rust-src. Keep this check
+# explicit because a bundle can contain rustc/cargo and still fail to build a
+# PolkaVM cdylib when the Rust sources were accidentally omitted.
+compiler_builtins_source="$BUNDLE_ROOT/lib/rustlib/src/rust/library/compiler-builtins"
+test -d "$compiler_builtins_source"
+echo "COMPILER_BUILTINS_SOURCE=PASS"
+
 mkdir -p "$RUN_ROOT/host-tools" "$RUN_ROOT/home" "$RUN_ROOT/cache"
 for host_tool in bash cat cp dirname find grep mkdir mktemp rm sed sha256sum stat tar tee tr; do
   host_tool_path="$(type -P "$host_tool" || true)"

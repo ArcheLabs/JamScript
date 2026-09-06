@@ -44,8 +44,8 @@ user requirements. The candidate distribution workflow is
 [`build-toolchain-bundle.yml`](../.github/workflows/build-toolchain-bundle.yml).
 It produces and verifies two identical Linux x86_64 archives and uploads a
 short-lived Actions validation artifact. The separate
-[`publish-toolchain.yml`](../.github/workflows/publish-toolchain.yml) workflow
-is reserved for an explicit reviewed Release promotion.
+The tag workflow [`release-candidate.yml`](../.github/workflows/release-candidate.yml)
+is the only publication path; there is no mutable “latest toolchain” workflow.
 
 The checked-in distribution record is intentionally marked unpublished until
 the first bundle has been built and its exact SHA-256 and byte size promoted
@@ -72,6 +72,45 @@ Service provisioning is intentionally not exposed as a fake application RPC. Min
 has no formal deployment RPC equivalent to the Work RPC, so v0 deployment remains an explicit
 operator action. Wallet calls remain in the TypeScript/browser client so the wallet receives one
 standard `signRaw` request and private keys never enter the CLI.
+
+## Release gates
+
+The tag workflow [`release-candidate.yml`](../.github/workflows/release-candidate.yml)
+builds the CLI and managed bundle from the exact tag commit, writes an immutable
+`release-manifest.json` and `SHA256SUMS`, creates the GitHub Release, and refuses
+to replace an existing tag's assets. A second job downloads those published
+bytes from the release URL and runs
+[`JamScript Release Kill Test 001`](../scripts/release/release-kill-test-001.sh).
+
+The kill test starts with isolated `HOME`, Cargo, Rustup, and JamScript cache
+directories. It hides host Rust, Cargo, rustup, Node, npm, Clang, LLVM, and Zig
+behind a restricted `PATH`, installs the digest-pinned bundle, runs `doctor`,
+builds an external fixture twice with network disabled, executes the resulting
+PVM artifact, and compares the two artifact hashes. Its JSON result is the
+machine-readable R1/R4 decision.
+
+The explicit
+[`compiler-builtins-regression.sh`](../scripts/release/compiler-builtins-regression.sh)
+keeps the earlier offline failure covered: the managed `rust-src` tree must
+contain `compiler-builtins`, and the same isolated execution-closure probe
+must build a PolkaVM cdylib guest. The old failure occurred when the consumer
+scan treated binary PVM files as text; the current gate verifies execution and
+managed paths instead of grepping generated binaries.
+
+`toolchains/release-targets.toml` is the authoritative v0 platform matrix.
+Linux x86_64 is the only target this branch can publish. Apple Silicon remains
+explicitly pending until its LLVM and Rust bundle producer is reproducible;
+Windows is outside this release scope. The release workflow will not claim
+either target as supported without matching immutable assets.
+
+## Promotion protocol
+
+The intended sequence is `main` green, tag `v0.1.0-rc.1`, build and publish the
+immutable assets, download them from the release URL, pass Release Kill Test
+001, and only then promote the same source and toolchain state to `v0.1.0`.
+The checked-in distribution record stays unpublished until a reviewed release
+promotion records the exact URL, digest, and byte size; changing it to
+`published = true` without those bytes is rejected by the toolchain manager.
 
 ## Explicit exclusions
 
