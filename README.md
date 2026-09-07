@@ -11,7 +11,27 @@ manifest explicitly marks `macos-arm64` as pending a reproducible Apple Silicon
 LLVM bundle producer and `windows-x86_64` as outside the v0.1 scope. A platform
 marked pending is not silently treated as supported.
 
-## Installation
+## Quick install
+
+Linux x86_64:
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/ArcheLabs/JamScript/v0.1.0-rc.2/install.sh \
+  | bash -s -- --version v0.1.0-rc.2
+```
+
+Then:
+
+```bash
+jams doctor
+jams --help
+```
+
+The installer does not modify shell profiles. If `~/.local/bin` is not on the
+current shell's `PATH`, export it as shown by the installer.
+
+## Manual installation
 
 Download the matching CLI archive, managed toolchain bundle,
 `toolchain-manifest.json`, `SHA256SUMS`, and `release-manifest.json` from the
@@ -28,6 +48,9 @@ tar --zstd -xf jamscript-v0.1.0-linux-x86_64.tar.zst
 The release archive embeds the exact toolchain URL and digest; no repository
 checkout or developer toolchain is needed. The public executable is `jams`; the
 release does not provide a `jamscript` compatibility alias.
+
+See [`docs/installation.md`](docs/installation.md) for custom destinations,
+PATH handling, retry, and manual uninstall details.
 
 ## Hello World
 
@@ -104,8 +127,7 @@ check and is never a release prerequisite.
 
 The v0.1 boundary is a testnet developer preview. Windows and Apple Silicon
 archives are not published by this branch. Mainnet economics, distributed
-providers, generic PVM witness discovery, and automatic installers remain out
-of scope.
+providers, and generic PVM witness discovery remain out of scope.
 
 ## Development and contribution
 
