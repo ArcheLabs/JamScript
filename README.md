@@ -118,8 +118,39 @@ cargo run --locked --bin jams -- doctor
 ## Run
 
 The `run` command is a release validation aid for the generated
-`service.pvm`. Network deployment remains an operator action outside the
-compiler.
+`service.pvm`.
+
+## Deploy
+
+Deployment is a separate, explicit step after artifact creation. Configure
+named MiniJAM networks in `jamscript.toml`:
+
+```toml
+[deployment]
+default_network = "local"
+
+[networks.local]
+kind = "minijam"
+deployment_rpc = "http://127.0.0.1:8090"
+node_rpc = "http://127.0.0.1:9944"
+# Optional but recommended for identity verification.
+genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+```
+
+Then inspect and deploy a verified artifact:
+
+```bash
+jams network list
+jams build ./hello --output ./hello/dist
+jams deploy ./hello --network local --artifact ./hello/dist
+```
+
+`jams deploy` supports MiniJAM Stage-1 `minijam_createServiceV1` only. It
+verifies `service.blob`, `build.json`, and `checksums.json` before submitting,
+checks the configured genesis identity before mutation, and writes a local
+record under `.jamscript/deployments/`. JAM deployment is reserved for a
+future release. See [`docs/deployment.md`](docs/deployment.md) for custom
+RPCs, precedence rules, records, and the real-network E2E workflow.
 
 ## Toolchain model
 

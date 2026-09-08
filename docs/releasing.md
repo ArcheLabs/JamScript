@@ -66,16 +66,19 @@ rewritten as a successful run.
 
 1. Build the Service with `jams build`.
 2. Verify the deployment bundle with `jams inspect <bundle>`.
-3. Provision or upgrade the Service through the network operator's deployment control plane.
+3. Select a named MiniJAM network and deploy with `jams deploy --network <name>`.
 4. Compile and run the generated Builder application as a per-Service Formal RPC sidecar.
 5. Configure the browser client with separate node, work, and managed-state Provider endpoints.
 6. When a downstream network is available, run the manual MiniJAM network E2E
    as a compatibility check before publishing the release artifacts.
 
-Service provisioning is intentionally not exposed as a fake application RPC. MiniJAM currently
-has no formal deployment RPC equivalent to the Work RPC, so v0 deployment remains an explicit
-operator action. Wallet calls remain in the TypeScript/browser client so the wallet receives one
-standard `signRaw` request and private keys never enter the CLI.
+The deployment command is intentionally a separate control-plane operation, not an application
+RPC. In v0.1 it targets the formal MiniJAM Stage-1
+`minijam_createServiceV1` method, verifies the artifact and optional node genesis identity before
+mutation, waits for the finalized result returned by the deployment RPC, and stores a local
+deployment record. Wallet calls remain in the TypeScript/browser client so the wallet receives one
+standard `signRaw` request and private keys never enter the CLI. JAM deployment is recognized in
+configuration but remains unsupported in v0.1.
 
 ## Release gates
 

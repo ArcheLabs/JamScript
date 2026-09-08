@@ -5,6 +5,7 @@ use jamscript_codegen_rust::{
     generate_builder_application_rust, generate_no_std_rust_with_scriptc_context,
     ManagementPolicyConfig, PortableServiceContext,
 };
+use jamscript_deployment::{DEFAULT_MIN_ITEM_GAS, DEFAULT_MIN_MEMO_GAS};
 use jamscript_ir::{abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
 use jamscript_toolchain::InstalledToolchain;
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,10 @@ pub struct BuildMetadata {
     pub source_hash: String,
     pub abi_hash: String,
     pub code_hash: Option<String>,
+    #[serde(rename = "minItemGas")]
+    pub min_item_gas: u64,
+    #[serde(rename = "minMemoGas")]
+    pub min_memo_gas: u64,
     pub native_abi_version: u32,
     pub native_modules: Vec<NativeModuleMetadata>,
     #[serde(flatten)]
@@ -397,6 +402,24 @@ impl JamTarget {
         let polkavm = output_dir.join("service.polkavm");
         link_elf_to_jam(&artifacts.elf, &blob, &polkavm)?;
         fs::copy(&polkavm, output_dir.join("service.pvm"))?;
+        let clang_version = command_version(&clang)?;
+        let native_metadata = native_metadata(project_root, native_modules)?;
+        let metadata = build_metadata(
+            context,
+            source_hash,
+            abi_hash,
+            hash_file(&blob)?,
+            clang_version,
+            native_metadata,
+            artifacts,
+            Some(scriptc.metadata.clone()),
+            "0.2",
+            self.toolchain.as_ref(),
+        );
+        fs::write(
+            output_dir.join("build.json"),
+            serde_json::to_vec_pretty(&metadata)?,
+        )?;
         let mut checksum_files = vec![
             "service.blob",
             "service.polkavm",
@@ -407,6 +430,7 @@ impl JamTarget {
             "generated_builder_application.rs",
             "builder.json",
             "protocol-v0.json",
+            "build.json",
         ];
         checksum_files.extend([
             "scriptc/scriptc_service.ts",
@@ -429,20 +453,7 @@ impl JamTarget {
                 files,
             })?,
         )?;
-        let clang_version = command_version(&clang)?;
-        let native_metadata = native_metadata(project_root, native_modules)?;
-        Ok(build_metadata(
-            context,
-            source_hash,
-            abi_hash,
-            hash_file(&blob)?,
-            clang_version,
-            native_metadata,
-            artifacts,
-            Some(scriptc.metadata.clone()),
-            "0.2",
-            self.toolchain.as_ref(),
-        ))
+        Ok(metadata)
     }
 }
 
@@ -570,6 +581,8 @@ fn build_metadata(
         source_hash,
         abi_hash,
         code_hash: Some(code_hash),
+        min_item_gas: DEFAULT_MIN_ITEM_GAS,
+        min_memo_gas: DEFAULT_MIN_MEMO_GAS,
         native_abi_version: NATIVE_ABI_VERSION,
         native_modules,
         scriptc,

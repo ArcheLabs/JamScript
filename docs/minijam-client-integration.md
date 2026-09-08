@@ -61,15 +61,19 @@ response identity and verifies the Polkadot LayoutV1 storage proof locally
 before decoding the ABI value. Provider availability never selects the root,
 and implicit fallback to legacy Service KV is disabled by default.
 
-## Network E2E
+## Deployment and Network E2E
 
 Run:
 
     ./scripts/minijam-network-e2e.sh
 
 The test uses a pinned MiniJAM checkout, starts a real local node, formal Work
-RPC and Workers, provisions a JamScript Service, submits a wallet-signed
-action through the production client path, waits for finalized Work, and
-verifies finalized Service state.
+RPC and Workers, builds a network-independent JamScript artifact, and deploys
+the Service through `jams deploy --network local`. The deployment uses the
+formal Stage-1 `minijam_createServiceV1` RPC and verifies the node genesis
+identity before mutation. It then submits a wallet-signed action through the
+production client path, waits for finalized Work, and verifies finalized
+Service state.
 
-The test does not use the Playground Work endpoint.
+The canonical E2E does not use the Playground lifecycle API or its legacy
+`/api/v1/*` endpoints. Work, State, and deployment endpoints remain separate.

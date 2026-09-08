@@ -107,28 +107,18 @@ genesis_hash="$(
   exit 1
 }
 
-placeholder_blob="${MINIJAM_ROOT}/examples/services/counter/artifacts/counter-c.blob"
-placeholder_code_hash="$(
-  cd "${JAMSCRIPT_ROOT}/packages/client"
-  node --input-type=module -e 'import fs from "node:fs"; import { blake2AsHex } from "@polkadot/util-crypto"; process.stdout.write(blake2AsHex(fs.readFileSync(process.argv[1]), 256));' "${placeholder_blob}"
-)"
-provision_json="$(
-  node "${JAMSCRIPT_ROOT}/packages/client/tests/support/provision-service.mjs" \
-    --command create \
-    --base-url http://127.0.0.1:8080 \
-    --blob "${placeholder_blob}" \
-    --code-hash "${placeholder_code_hash}"
-)"
-service_id="$(
-  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(b).serviceId)));' <<<"${provision_json}"
-)"
-echo "[provision] placeholder service created: ${service_id}"
-
 rm -rf "${E2E_PROJECT}"
 mkdir -p "${E2E_RUNTIME}"
 cp -R "${JAMSCRIPT_ROOT}/examples/dynamic-state-scriptc" "${E2E_PROJECT}"
+cat >> "${E2E_PROJECT}/jamscript.toml" <<EOF
+
+[networks.local]
+kind = "minijam"
+deployment_rpc = "${MINIJAM_FORMAL_RPC_URL}"
+node_rpc = "${MINIJAM_NODE_RPC}"
+genesis_hash = "${genesis_hash}"
+EOF
 sed -i \
-  -e "s/^service_id = .*/service_id = ${service_id}/" \
   -e "s/^genesis_hash = .*/genesis_hash = \"${genesis_hash}\"/" \
   "${E2E_PROJECT}/jamscript.toml"
 
@@ -141,6 +131,19 @@ service_key="$(
   node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>{const v=JSON.parse(b);process.stdout.write(v.serviceKey ?? v.service_key);});' < "${ARTIFACTS}/build.json"
 )"
 echo "[build] JamScript service built: ${ARTIFACTS}/service.blob"
+
+deployment_json="$(
+  cd "${JAMSCRIPT_ROOT}"
+  cargo run --locked --bin jams -- deploy "${E2E_PROJECT}" \
+    --network local --artifact "${ARTIFACTS}" --json
+)"
+service_id="$(
+  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(b).serviceId)));' <<<"${deployment_json}"
+)"
+code_hash="$(
+  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).codeHash));' <<<"${deployment_json}"
+)"
+echo "[deploy] JamScript Service ${service_id} created through minijam_createServiceV1"
 
 builder_native_sources="$(
   node --input-type=module -e '
@@ -164,14 +167,6 @@ JAMSCRIPT_BUILDER_APPLICATION_RS="${ARTIFACTS}/generated_builder_application.rs"
 JAMSCRIPT_BUILDER_NATIVE_SOURCES="${builder_native_sources}" \
 JAMSCRIPT_BUILDER_NATIVE_INCLUDES="${builder_native_includes}" \
   cargo build --locked --manifest-path "${JAMSCRIPT_ROOT}/Cargo.toml" --bin managed-state-network-adapter
-
-node "${JAMSCRIPT_ROOT}/packages/client/tests/support/provision-service.mjs" \
-  --command upgrade \
-  --base-url http://127.0.0.1:8080 \
-  --service-id "${service_id}" \
-  --blob "${ARTIFACTS}/service.blob" \
-  --code-hash "${code_hash}" >/dev/null
-echo "[provision] finalized code hash verified for service ${service_id}"
 
 JAMSCRIPT_E2E_SERVICE_ID="${service_id}" \
 JAMSCRIPT_E2E_SERVICE_KEY="${service_key}" \
