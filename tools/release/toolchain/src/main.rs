@@ -14,12 +14,21 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("distribution manifest path is required"))?;
     let archive = Path::new(&archive);
     let cache = Path::new(&cache);
+    let platform = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| {
+            ["linux-x86_64", "macos-arm64"]
+                .into_iter()
+                .find(|platform| name.contains(platform))
+        })
+        .ok_or_else(|| anyhow::anyhow!("cannot infer supported platform from bundle filename"))?;
     let mut manifest: DistributionManifest =
         toml::from_str(&fs::read_to_string(manifest_path)?)?;
     let bundle = manifest
         .platforms
-        .get_mut("linux-x86_64")
-        .ok_or_else(|| anyhow::anyhow!("linux-x86_64 bundle is missing"))?;
+        .get_mut(platform)
+        .ok_or_else(|| anyhow::anyhow!("{platform} bundle is missing"))?;
     bundle.url = format!("file://{}", archive.display());
     bundle.sha256 = sha256_file(archive)?;
     bundle.size = fs::metadata(archive)?.len();

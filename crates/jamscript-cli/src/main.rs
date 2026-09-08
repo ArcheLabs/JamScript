@@ -240,6 +240,7 @@ fn doctor(json: bool) -> Result<()> {
             "clang": root.join("bin/clang"),
             "llvm_ar": root.join("bin/llvm-ar"),
             "lld": root.join("bin/ld.lld"),
+            "readelf": root.join("bin/llvm-readelf"),
             "host_linker": root.join("bin/jamscript-host-linker"),
             "polkavm": root.join("toolchains/polkavm.lock"),
             "jam_sdk": root.join("targets/jam/sdk"),
@@ -256,6 +257,7 @@ fn doctor(json: bool) -> Result<()> {
             root.join("bin/clang"),
             root.join("bin/llvm-ar"),
             root.join("bin/ld.lld"),
+            root.join("bin/llvm-readelf"),
             root.join("bin/jamscript-host-linker"),
             root.join("toolchains/polkavm.lock"),
             root.join("targets/jam/sdk"),
@@ -322,6 +324,7 @@ fn doctor(json: bool) -> Result<()> {
             ("ScriptC", root.join("scriptc")),
             ("Clang", root.join("bin/clang")),
             ("LLVM/Clang linker", root.join("bin/ld.lld")),
+            ("LLVM ELF inspector", root.join("bin/llvm-readelf")),
             (
                 "Managed host linker",
                 root.join("bin/jamscript-host-linker"),

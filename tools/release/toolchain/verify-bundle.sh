@@ -7,6 +7,25 @@ EXTRACT_DIR="${2:-$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/toolchain-verify.
 ROOT_OUTPUT="${3:-}"
 mkdir -p "${EXTRACT_DIR}"
 
+archive_list() {
+  if tar --zstd -tf "${ARCHIVE}" 2>/dev/null; then
+    return 0
+  fi
+  command -v zstd >/dev/null 2>&1 || {
+    echo "cannot inspect tar.zst bundle: neither tar --zstd nor zstd is available" >&2
+    exit 1
+  }
+  zstd -q -d -c "${ARCHIVE}" | tar -tf -
+}
+
+archive_verbose_list() {
+  if tar --zstd -tvf "${ARCHIVE}" 2>/dev/null; then
+    return 0
+  fi
+  command -v zstd >/dev/null 2>&1 || exit 1
+  zstd -q -d -c "${ARCHIVE}" | tar -tvf -
+}
+
 while IFS= read -r entry; do
   case "${entry}" in
     /*|../*|*/../*|*\\*)
@@ -14,8 +33,8 @@ while IFS= read -r entry; do
       exit 1
       ;;
   esac
-done < <(tar --zstd -tf "${ARCHIVE}")
-if tar --zstd -tvf "${ARCHIVE}" | grep -Eq '^[lh]'; then
+done < <(archive_list)
+if archive_verbose_list | grep -Eq '^[lh]'; then
   echo "symlinks and hard links are not allowed in toolchain bundles" >&2
   exit 1
 fi

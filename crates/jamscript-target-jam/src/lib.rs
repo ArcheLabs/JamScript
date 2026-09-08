@@ -365,6 +365,10 @@ impl JamTarget {
                 .toolchain
                 .as_ref()
                 .map(|toolchain| toolchain.lld.clone()),
+            readelf_path: self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.readelf.clone()),
             host_linker_path: self
                 .toolchain
                 .as_ref()

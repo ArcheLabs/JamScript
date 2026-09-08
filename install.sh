@@ -2,7 +2,6 @@
 set -euo pipefail
 
 readonly INSTALLER_REPOSITORY="ArcheLabs/JamScript"
-readonly SUPPORTED_PLATFORM="linux-x86_64"
 
 usage() {
   cat <<'USAGE'
@@ -57,11 +56,13 @@ done
 
 os="$(uname -s)"
 arch="$(uname -m)"
-if [[ "$os" != 'Linux' || "$arch" != 'x86_64' ]]; then
-  fail 'JamScript v0.1 currently supports linux-x86_64 only.'
-fi
+case "${os}:${arch}" in
+  Linux:x86_64) platform='linux-x86_64' ;;
+  Darwin:arm64) platform='macos-arm64' ;;
+  *) fail "unsupported platform: ${os} ${arch}; supported platforms are Linux x86_64 and macOS Apple Silicon (arm64)" ;;
+esac
 
-required_tools=(bash curl tar zstd sha256sum mktemp mkdir install mv rm uname grep awk)
+required_tools=(bash curl tar gzip mktemp mkdir install mv rm uname grep awk)
 missing_tools=()
 for tool in "${required_tools[@]}"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -74,13 +75,16 @@ if ((${#missing_tools[@]} > 0)); then
     "${missing_tools[*]}" >&2
   exit 1
 fi
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+  fail 'neither sha256sum nor shasum is available for checksum verification'
+fi
 
 test_asset_dir="${JAMSCRIPT_INSTALL_TEST_ASSET_DIR:-}"
 if [[ -n "$test_asset_dir" && "${JAMSCRIPT_INSTALL_TEST:-}" != '1' ]]; then
   fail 'JAMSCRIPT_INSTALL_TEST_ASSET_DIR is only available with JAMSCRIPT_INSTALL_TEST=1'
 fi
 
-asset="jamscript-${version}-${SUPPORTED_PLATFORM}.tar.zst"
+asset="jamscript-${version}-${platform}.tar.gz"
 release_base="https://github.com/${INSTALLER_REPOSITORY}/releases/download/${version}"
 tmp="$(mktemp -d)"
 new_path=''
@@ -124,11 +128,22 @@ checksum="$(awk -v target="$asset" '
 ' "$checksums_path")" || fail "SHA256SUMS must contain exactly one valid entry for ${asset}"
 
 printf '%s  %s\n' "$checksum" "$asset" > "${tmp}/checksum-entry"
-(cd "$tmp" && sha256sum -c checksum-entry)
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    fail 'neither sha256sum nor shasum is available for checksum verification'
+  fi
+}
+actual_checksum="$(sha256_file "$archive_path")"
+[[ "$actual_checksum" == "$checksum" ]] || fail "SHA-256 mismatch for ${asset}"
 
 extract="${tmp}/extract"
 mkdir -p -- "$extract"
-tar --zstd -xf "$archive_path" -C "$extract"
+tar -xzf "$archive_path" -C "$extract"
 test -x "$extract/jams" || fail 'release archive does not contain an executable jams'
 test -f "$extract/LICENSE" || fail 'release archive does not contain LICENSE'
 test -f "$extract/README.md" || fail 'release archive does not contain README.md'
@@ -142,7 +157,7 @@ install -m 0755 -- "$extract/jams" "$new_path"
 mv -f -- "$new_path" "$installed_jams"
 new_path=''
 
-printf 'JamScript installer\nRelease:  %s\nPlatform: %s\n\n' "$version" "$SUPPORTED_PLATFORM"
+printf 'JamScript installer\nRelease:  %s\nPlatform: %s\n\n' "$version" "$platform"
 printf 'CLI verified and installed at %s\n\n' "$installed_jams"
 printf 'Installing managed toolchain...\n'
 if ! "$installed_jams" toolchain install; then
@@ -162,7 +177,7 @@ if ! "$installed_jams" doctor; then
 fi
 
 printf '\nJamScript installation complete.\n\nCLI:\n  %s\n\nRelease:\n  %s\n\nPlatform:\n  %s\n\nManaged toolchain:\n  verified\n\nCanonical build readiness:\n  PASS\n' \
-  "$installed_jams" "$version" "$SUPPORTED_PLATFORM"
+  "$installed_jams" "$version" "$platform"
 
 resolved_jams="$(command -v jams 2>/dev/null || true)"
 if [[ "$resolved_jams" != "$installed_jams" ]]; then

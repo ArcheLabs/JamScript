@@ -36,19 +36,23 @@ only source of canonical roots; the Provider supplies data and proofs for explic
 ## Operator workflow
 
 The compiler distribution is a JamScript responsibility. Release engineering
-produces versioned, checksum-addressed bundles with
-[`tools/release/toolchain/build-linux.sh`](../tools/release/toolchain/build-linux.sh)
-and publishes them as GitHub Release assets. Users install JamScript and run
-`jams build`; Docker, LLVM, Rust, Node, and a MiniJAM checkout are not
-user requirements. The candidate distribution workflow is
+produces versioned, checksum-addressed bundles with the native
+[`build-linux.sh`](../tools/release/toolchain/build-linux.sh) and
+[`build-macos.sh`](../tools/release/toolchain/build-macos.sh) producers and
+publishes them as GitHub Release assets. Users install JamScript and run
+`jams build`; Docker, LLVM, Rust, Node, and a MiniJAM checkout are not user
+requirements for that canonical service build. A separately compiled native
+Builder host adapter may require Apple's SDK / Command Line Tools. The
+candidate distribution workflow is
 [`build-toolchain-bundle.yml`](../.github/workflows/build-toolchain-bundle.yml).
-It produces and verifies two identical Linux x86_64 archives and uploads a
-short-lived Actions validation artifact. The tag workflow
-[`release-candidate.yml`](../.github/workflows/release-candidate.yml)
-is the only publication path; there is no mutable “latest toolchain” workflow.
+It has separate native Linux x86_64 and macOS arm64 producers, builds and
+verifies two identical archives per target, and uploads short-lived Actions
+validation artifacts. The tag workflow
+[`release-candidate.yml`](../.github/workflows/release-candidate.yml) is the
+only publication path; there is no mutable “latest toolchain” workflow.
 
 The checked-in distribution record is intentionally marked unpublished until
-the first bundle has been built and its exact SHA-256 and byte size promoted
+each release bundle has been built and its exact SHA-256 and byte size promoted
 into `toolchains/distribution-v1.toml`. This prevents a floating or guessed
 compiler identity from entering a canonical build.
 
@@ -76,15 +80,15 @@ standard `signRaw` request and private keys never enter the CLI.
 ## Release gates
 
 The tag workflow [`release-candidate.yml`](../.github/workflows/release-candidate.yml)
-builds the CLI and managed bundle from the exact tag commit, writes an immutable
-`release-manifest.json` and `SHA256SUMS`, creates the GitHub Release, and refuses
-to replace an existing tag's assets. Before publication, the same job runs
-Release Kill Test 001 with `--asset-dir` against the exact assembled bytes and
-emits `RELEASE_CANDIDATE_READY` only after that test passes. A second job then
-downloads the published bytes from the release URL and runs
-[`JamScript Release Kill Test 001`](../scripts/release/release-kill-test-001.sh).
-It emits `RELEASE_READY` only after the remote-byte test passes; the local asset
-test never substitutes for this R4 check.
+builds native CLI archives and managed bundles for Linux x86_64 and macOS arm64
+from the exact tag commit. It writes one immutable `release-manifest.json` and
+complete `SHA256SUMS`, runs native pre-publication clean-consumer tests, and
+then allows exactly one publication job to create the GitHub Release. It
+refuses to replace an existing tag's assets. After publication, separate native
+jobs download the published bytes and run
+[`JamScript Release Kill Test 001`](../scripts/release/release-kill-test-001.sh)
+against the release URL; the local asset test never substitutes for this R4
+check.
 
 For `v0.1.0-rc.*`, publication passes both `--prerelease` and
 `--latest=false` to GitHub CLI. The stable `v0.1.0` path does not set
@@ -94,8 +98,10 @@ The kill test starts with isolated `HOME`, Cargo, Rustup, and JamScript cache
 directories. It hides host Rust, Cargo, rustup, Node, npm, Clang, LLVM, and Zig
 behind a restricted `PATH`, installs the digest-pinned bundle, runs `doctor`,
 builds an external fixture twice with network disabled, executes the resulting
-PVM artifact, and compares the two artifact hashes. Its JSON result is the
-machine-readable R1/R4 decision.
+PVM artifact, and compares the two artifact hashes. It runs natively on both
+Linux x86_64 and macOS arm64; the macOS native Builder linkage is where the
+Apple SDK / Xcode Command Line Tools boundary is exercised. Its JSON result is
+the machine-readable R1/R4 decision.
 
 The explicit
 [`compiler-builtins-regression.sh`](../scripts/release/compiler-builtins-regression.sh)
@@ -106,10 +112,9 @@ scan treated binary PVM files as text; the current gate verifies execution and
 managed paths instead of grepping generated binaries.
 
 `toolchains/release-targets.toml` is the authoritative v0 platform matrix.
-Linux x86_64 is the only target this branch can publish. Apple Silicon remains
-explicitly pending until its LLVM and Rust bundle producer is reproducible;
-Windows is outside this release scope. The release workflow will not claim
-either target as supported without matching immutable assets.
+Linux x86_64 and macOS arm64 are supported only with matching native producers,
+immutable assets, and native kill-test evidence. Windows is outside this
+release scope.
 
 ## Promotion protocol
 

@@ -14,6 +14,7 @@ on:
       - 'scripts/release/**'
       - 'scripts/check-toolchain-distribution.sh'
       - 'toolchains/**'
+      - 'tools/release/*.py'
       - 'tools/release/toolchain/**'
   workflow_dispatch:
 
@@ -339,4 +340,165 @@ jobs:
             echo "DISTRIBUTION_MANIFEST_PUBLISHED=FALSE"
             echo "HOSTED_PUBLIC_DOWNLOAD_TEST=PENDING"
             echo "CROSS_HOST_REPRODUCIBILITY=PENDING"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  build-macos-arm64-toolchain:
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      TZ: UTC
+      LANG: C
+      LC_ALL: C
+      JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING: "1"
+
+    steps:
+      - name: Checkout exact workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          submodules: false
+
+      - name: Verify native Apple Silicon runner and source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          source_sha="$(git rev-parse HEAD)"
+          test "${source_sha}" = "${GITHUB_SHA}"
+          echo "TOOLCHAIN_PLATFORM=macos-arm64"
+          echo "JAMSCRIPT_SOURCE_SHA=${source_sha}" >> "${GITHUB_ENV}"
+          echo "SOURCE_IDENTITY=PASS"
+
+      - name: Install exact Node release
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: toolchains/scriptc/NODE_VERSION
+
+      - name: Install release engineering prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install zstd jq
+          node --version
+          zstd --version | head -1
+
+      - name: Install exact Rust release
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src
+
+      - name: Install locked ScriptC packages
+        working-directory: toolchains/scriptc
+        shell: bash
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run focused toolchain tests and portability checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p jamscript-toolchain
+          cargo test --locked -p jamscript-cli
+          cargo clippy --locked -p jamscript-toolchain -- -D warnings
+          ./scripts/check-toolchain-distribution.sh
+          python3 ./tools/release/toolchain/test-llvm-lock.py
+
+      - name: Bootstrap and verify official macOS LLVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          llvm_out="${RUNNER_TEMP}/jamscript-llvm"
+          ./tools/release/toolchain/bootstrap-llvm-macos.sh "${llvm_out}"
+          set -a
+          source "${llvm_out}/llvm.env"
+          set +a
+          ./tools/release/toolchain/verify-llvm-macos.sh "${JAMSCRIPT_LLVM_ROOT}"
+          cat "${llvm_out}/llvm.env" >> "${GITHUB_ENV}"
+
+      - name: Build and verify bundle A
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/toolchain-build-a"
+          mkdir -p "${out}"
+          export SCRIPTC_NODE="$(command -v node)"
+          ./tools/release/toolchain/build-macos.sh "${out}"
+          bundle="${out}/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
+          ./tools/release/toolchain/verify-bundle.sh "${bundle}" "${RUNNER_TEMP}/toolchain-verify-a" "${RUNNER_TEMP}/toolchain-root-a.txt"
+          ./scripts/release/compiler-builtins-regression.sh "$(<"${RUNNER_TEMP}/toolchain-root-a.txt")"
+          echo "BUNDLE_A=${bundle}" >> "${GITHUB_ENV}"
+          echo "BUNDLE_METADATA_A=${out}/bundle-metadata-macos-arm64.json" >> "${GITHUB_ENV}"
+          echo "BUNDLE_MANIFEST_A=${out}/toolchain-manifest-macos-arm64.json" >> "${GITHUB_ENV}"
+
+      - name: Build and verify bundle B independently
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/toolchain-build-b"
+          mkdir -p "${out}"
+          export SCRIPTC_NODE="$(command -v node)"
+          ./tools/release/toolchain/build-macos.sh "${out}"
+          bundle="${out}/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
+          ./tools/release/toolchain/verify-bundle.sh "${bundle}" "${RUNNER_TEMP}/toolchain-verify-b" "${RUNNER_TEMP}/toolchain-root-b.txt"
+          ./tools/release/toolchain/verify-execution-closure-macos.sh "$(<"${RUNNER_TEMP}/toolchain-root-b.txt")"
+          echo "BUNDLE_B=${bundle}" >> "${GITHUB_ENV}"
+          echo "BUNDLE_METADATA_B=${out}/bundle-metadata-macos-arm64.json" >> "${GITHUB_ENV}"
+
+      - name: Compare macOS bundle A and B
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp -s "${BUNDLE_A}" "${BUNDLE_B}"
+          echo "MACOS_BUNDLE_A_B_REPRODUCIBILITY=PASS"
+
+      - name: Prepare validated macOS artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${RUNNER_TEMP}/toolchain-artifact"
+          mkdir -p "${artifact_dir}"
+          bundle_file="$(basename -- "${BUNDLE_A}")"
+          cp -L "${BUNDLE_A}" "${artifact_dir}/${bundle_file}"
+          cp -L "${BUNDLE_METADATA_A}" "${artifact_dir}/bundle-metadata.json"
+          cp -L "${BUNDLE_MANIFEST_A}" "${artifact_dir}/toolchain-manifest.json"
+          cp -L "${RUNNER_TEMP}/jamscript-llvm/llvm.env" "${artifact_dir}/llvm-measurements.env"
+          (
+            cd "${artifact_dir}"
+            if command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 "${bundle_file}" bundle-metadata.json toolchain-manifest.json llvm-measurements.env
+            else
+              sha256sum "${bundle_file}" bundle-metadata.json toolchain-manifest.json llvm-measurements.env
+            fi
+          ) > "${artifact_dir}/SHA256SUMS"
+          if command -v shasum >/dev/null 2>&1; then bundle_sha256="$(shasum -a 256 "${BUNDLE_A}" | awk '{print $1}')"; else bundle_sha256="$(sha256sum "${BUNDLE_A}" | awk '{print $1}')"; fi
+          echo "ARTIFACT_DIR=${artifact_dir}" >> "${GITHUB_ENV}"
+          echo "MACOS_BUNDLE_SHA256=${bundle_sha256}" >> "${GITHUB_ENV}"
+
+      - name: Upload validated macOS toolchain artifact
+        id: upload-toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolchain-macos-arm64
+          path: ${{ env.ARTIFACT_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Write macOS producer summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## JamScript macOS arm64 toolchain bundle"
+            echo
+            echo "- Platform: macos-arm64"
+            echo "- Runner: macos-15 / $(uname -m)"
+            echo "- LLVM archive: ${LLVM_ARCHIVE}"
+            echo "- LLVM archive SHA256: ${LLVM_ARCHIVE_SHA256}"
+            echo "- Bundle SHA256: ${MACOS_BUNDLE_SHA256}"
+            echo "- Bundle A/B reproducibility: PASS"
+            echo "- Managed execution closure: PASS"
+            echo "- Apple SDK / Xcode CLT: required for native host Builder linkage; this is verified by the clean-consumer kill test"
+            echo "- Public release: PENDING"
           } >> "${GITHUB_STEP_SUMMARY}"

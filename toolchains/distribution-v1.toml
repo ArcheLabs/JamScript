@@ -7,6 +7,7 @@ rust_toolchain = "nightly-2026-05-02"
 clang_version = "20.1.8"
 llvm_distribution = "llvm-official-linux-x64"
 llvm_lock = "toolchains/llvm/linux-x86_64.lock"
+llvm_locks = { "linux-x86_64" = "toolchains/llvm/linux-x86_64.lock", "macos-arm64" = "toolchains/llvm/macos-arm64.lock" }
 polkavm_linker = "0.30.0"
 jam_target_version = "jam-v1"
 jam_blob_encoder_version = "0.1.28"
@@ -23,14 +24,20 @@ size = 1
 archive = "tar.zst"
 published = false
 
+[platforms.macos-arm64]
+url = "https://github.com/ArcheLabs/JamScript/releases/download/v0.1.0-rc.2/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 1
+archive = "tar.zst"
+published = false
+
 [[target]]
 triple = "linux-x86_64"
 supported = true
 
 [[target]]
 triple = "macos-arm64"
-supported = false
-reason = "No reproducible Apple Silicon bundle producer is available on this branch."
+supported = true
 
 [[target]]
 triple = "windows-x86_64"

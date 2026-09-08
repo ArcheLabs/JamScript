@@ -2,6 +2,7 @@
 set -euo pipefail
 
 python3 tools/release/toolchain/test-llvm-lock.py
+python3 tools/release/test-write-release-manifest.py
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${ROOT}"
@@ -18,12 +19,18 @@ done
 test -f toolchains/release-targets.toml
 grep -q 'triple = "linux-x86_64"' toolchains/release-targets.toml
 grep -q 'triple = "macos-arm64"' toolchains/release-targets.toml
-grep -q 'supported = false' toolchains/release-targets.toml
+grep -q 'triple = "windows-x86_64"' toolchains/release-targets.toml
+
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) expected_platform='linux-x86_64' ;;
+  Darwin:arm64) expected_platform='macos-arm64' ;;
+  *) echo "unsupported test runner platform" >&2; exit 1 ;;
+esac
 
 cargo test --locked -p jamscript-toolchain
 cargo run --quiet --locked --bin jams -- toolchain status --json > "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
 grep -q '"toolchainId": "scriptc-m2-v1"' "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
-grep -q '"platform": "linux-x86_64"' "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
+grep -q "\"platform\": \"${expected_platform}\"" "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
 grep -q 'canonical_toolchain' crates/jamscript-target-jam/src/lib.rs
 grep -q 'JAMSCRIPT_OFFLINE' crates/jamscript-toolchain/src/lib.rs
 grep -q 'JAMSCRIPT_RELEASE_KILL_001' scripts/release/release-kill-test-001.sh

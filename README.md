@@ -6,14 +6,15 @@ artifact and keeps MiniJAM and Jambda out of the compiler and release path.
 
 ## Supported platforms
 
-The v0.1 release producer currently supports publishing `linux-x86_64`. The release
-manifest explicitly marks `macos-arm64` as pending a reproducible Apple Silicon
-LLVM bundle producer and `windows-x86_64` as outside the v0.1 scope. A platform
-marked pending is not silently treated as supported.
+The v0.1 release target matrix supports native `linux-x86_64` and native
+`macos-arm64` (Apple Silicon). `windows-x86_64` is explicitly outside the v0.1
+scope. macOS uses the official LLVM 20.1.8 ARM64 distribution and is produced
+and validated on a native Apple Silicon runner; Rosetta is not part of the
+support contract.
 
 ## Quick install
 
-Linux x86_64:
+Linux x86_64 or macOS Apple Silicon:
 
 ```bash
 curl -fsSL \
@@ -33,17 +34,21 @@ current shell's `PATH`, export it as shown by the installer.
 
 ## Manual installation
 
-Download the matching CLI archive, managed toolchain bundle,
-`toolchain-manifest.json`, `SHA256SUMS`, and `release-manifest.json` from the
-immutable GitHub Release tag. Verify the checksums, extract the CLI, and install
-the pinned bundle:
+Download the target-specific CLI archive, managed toolchain bundle,
+target-specific toolchain manifest and metadata, `SHA256SUMS`, and
+`release-manifest.json` from the immutable GitHub Release tag. Verify the
+checksums, extract the CLI, and install the pinned bundle:
 
 ```bash
 sha256sum -c SHA256SUMS
-tar --zstd -xf jamscript-v0.1.0-linux-x86_64.tar.zst
+tar -xzf jamscript-v0.1.0-linux-x86_64.tar.gz
 ./jams toolchain install
 ./jams doctor
 ```
+
+On macOS, use `shasum -a 256 -c SHA256SUMS` and the matching
+`jamscript-v0.1.0-macos-arm64.tar.gz` archive. The managed toolchain remains a
+`.tar.zst` release asset, but the end-user CLI bootstrap does not require zstd.
 
 The release archive embeds the exact toolchain URL and digest; no repository
 checkout or developer toolchain is needed. The public executable is `jams`; the
@@ -120,14 +125,17 @@ compiler.
 
 JamScript owns Node, ScriptC, Rust, rust-src/compiler-builtins, LLVM/Clang,
 PolkaVM linker inputs, vendored Cargo dependencies, and the JAM target SDK in
-one digest-addressed bundle. MiniJAM compatibility is an optional downstream
-check and is never a release prerequisite.
+one digest-addressed, platform-specific bundle. The user does not need to
+install Rust, Node, LLVM, Docker, or zstd for the canonical `jams build` path.
+The separately compiled native Builder host adapter uses Apple's SDK / Command
+Line Tools ABI boundary; the native release gate is the proof of that separate
+host-linkage contract.
 
 ## Limitations
 
-The v0.1 boundary is a testnet developer preview. Windows and Apple Silicon
-archives are not published by this branch. Mainnet economics, distributed
-providers, and generic PVM witness discovery remain out of scope.
+The v0.1 boundary is a testnet developer preview. Windows remains unsupported.
+Mainnet economics, distributed providers, and generic PVM witness discovery
+remain out of scope.
 
 ## Development and contribution
 

@@ -1,0 +1,20 @@
+format = 1
+version = 1
+platform = "macos-arm64"
+llvm_version = "20.1.8"
+clang_version = "20.1.8"
+distribution = "llvm-official-macos-arm64"
+archive_url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-macOS-ARM64.tar.xz"
+archive_filename = "LLVM-20.1.8-macOS-ARM64.tar.xz"
+archive_sha256 = "a9a22f450d35f1f73cd61ab6a17c6f27d8f6051d56197395c1eb397f0c9bbec4"
+clang_relpath = "bin/clang"
+llvm_ar_relpath = "bin/llvm-ar"
+lld_relpath = "bin/ld.lld"
+
+# The official archive digest above is immutable. The executable digests are
+# deliberately left as an explicit native-measurement sentinel until the
+# macOS ARM64 producer runs on macos-15. bootstrap-llvm-macos.sh refuses to
+# publish a bundle until it has measured and verified these three values.
+clang_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+llvm_ar_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+ld_lld_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"

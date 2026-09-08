@@ -38,14 +38,25 @@ def parse_lock(path):
         raise LockError("missing lock fields: " + ", ".join(missing))
     if values["format"] != 1:
         raise LockError("unsupported LLVM lock format")
-    if values["platform"] != "linux-x86_64":
-        raise LockError("LLVM lock platform is not linux-x86_64")
+    platform = values["platform"]
+    expected = {
+        "linux-x86_64": {
+            "distribution": "llvm-official-linux-x64",
+            "archive_filename": "LLVM-20.1.8-Linux-X64.tar.xz",
+        },
+        "macos-arm64": {
+            "distribution": "llvm-official-macos-arm64",
+            "archive_filename": "LLVM-20.1.8-macOS-ARM64.tar.xz",
+        },
+    }.get(platform)
+    if expected is None:
+        raise LockError(f"unsupported LLVM lock platform: {platform}")
     if values["llvm_version"] != "20.1.8":
         raise LockError("LLVM lock must pin version 20.1.8")
     if values["clang_version"] != values["llvm_version"]:
         raise LockError("LLVM clang version disagrees with LLVM version")
-    if values["distribution"] != "llvm-official-linux-x64":
-        raise LockError("unexpected LLVM distribution")
+    if values["distribution"] != expected["distribution"]:
+        raise LockError(f"unexpected LLVM distribution for {platform}")
     url = values["archive_url"]
     if not url.startswith("https://github.com/llvm/llvm-project/releases/download/"):
         raise LockError("LLVM archive URL is not the official release endpoint")
@@ -53,8 +64,8 @@ def parse_lock(path):
         raise LockError("LLVM archive URL is floating")
     if "/llvmorg-20.1.8/" not in url:
         raise LockError("LLVM archive URL is not pinned to llvmorg-20.1.8")
-    if values["archive_filename"] != "LLVM-20.1.8-Linux-X64.tar.xz":
-        raise LockError("unexpected LLVM archive filename")
+    if values["archive_filename"] != expected["archive_filename"]:
+        raise LockError(f"unexpected LLVM archive filename for {platform}")
     if not url.endswith("/" + values["archive_filename"]):
         raise LockError("archive filename does not match URL")
     for key in ("archive_sha256", "clang_sha256", "llvm_ar_sha256", "ld_lld_sha256"):
@@ -72,7 +83,7 @@ def parse_lock(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("lock", type=Path)
-    parser.add_argument("--get", choices=("archive_filename", "archive_url", "llvm_version", "distribution", "archive_sha256", "clang_sha256", "llvm_ar_sha256", "ld_lld_sha256"))
+    parser.add_argument("--get", choices=("archive_filename", "archive_url", "llvm_version", "distribution", "archive_sha256", "clang_sha256", "llvm_ar_sha256", "lld_relpath", "clang_relpath", "llvm_ar_relpath", "ld_lld_sha256"))
     args = parser.parse_args()
     values = parse_lock(args.lock)
     if args.get:

@@ -6,8 +6,7 @@ supported = true
 
 [[target]]
 triple = "macos-arm64"
-supported = false
-reason = "The v0.1 branch has no reproducible Apple Silicon LLVM bundle producer yet."
+supported = true
 
 [[target]]
 triple = "windows-x86_64"

@@ -13,7 +13,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   TZ: UTC
@@ -22,213 +22,518 @@ env:
   JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING: "1"
 
 jobs:
-  build-and-publish:
+  build-linux-x86_64-bundle:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-    outputs:
-      tag: ${{ steps.identity.outputs.tag }}
     steps:
-      - name: Checkout exact tag commit
+      - name: Checkout exact release source
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 1
           submodules: false
-
-      - name: Verify tag and source identity
-        id: identity
+      - name: Verify release identity
         shell: bash
         run: |
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
           [[ "${tag}" =~ ^v0\.1\.0(-rc\.[0-9]+)?$ ]]
-          [[ "${GITHUB_REF_TYPE}" == "tag" || -n "${{ github.event.inputs.tag }}" ]]
           source_sha="$(git rev-parse HEAD)"
-          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            test "${source_sha}" = "${GITHUB_SHA}"
-          fi
-          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
-          echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
-          echo "RELEASE_SOURCE_IDENTITY=PASS"
-
+          if [[ "${GITHUB_EVENT_NAME}" == push ]]; then test "${source_sha}" = "${GITHUB_SHA}"; fi
+          echo "RELEASE_TAG=${tag}" >> "${GITHUB_ENV}"
+          echo "JAMSCRIPT_SOURCE_SHA=${source_sha}" >> "${GITHUB_ENV}"
       - uses: actions/setup-node@v4
         with:
           node-version-file: toolchains/scriptc/NODE_VERSION
-
-      - name: Install locked ScriptC packages
-        working-directory: toolchains/scriptc
-        run: npm ci --ignore-scripts --no-audit --no-fund
-
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-05-02
           components: rust-src
-
-      - name: Install release engineering tools
+      - name: Install Linux release tools
         run: sudo apt-get update && sudo apt-get install -y zstd patchelf jq curl xz-utils
-
-      - name: Bootstrap and verify locked LLVM
-        shell: bash
+      - name: Install locked ScriptC packages
+        working-directory: toolchains/scriptc
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check release source locks
+        run: |
+          set -euo pipefail
+          cargo test --locked -p jamscript-toolchain
+          cargo test --locked -p jamscript-cli
+          cargo clippy --locked -p jamscript-toolchain -- -D warnings
+          ./scripts/check-toolchain-distribution.sh
+          python3 ./tools/release/toolchain/test-llvm-lock.py
+      - name: Bootstrap and verify locked Linux LLVM
         run: |
           set -euo pipefail
           out="${RUNNER_TEMP}/jamscript-llvm"
           ./tools/release/toolchain/bootstrap-llvm-linux.sh "${out}"
-          ./tools/release/toolchain/verify-llvm-linux.sh "${out}/llvm"
+          while IFS= read -r line; do echo "${line}" >> "${GITHUB_ENV}"; done < "${out}/llvm.env"
+          ./tools/release/toolchain/verify-llvm-linux.sh "${LLVM_ROOT}"
+      - name: Build, verify, and compare Linux bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suffix in a b; do
+            out="${RUNNER_TEMP}/toolchain-${suffix}"
+            mkdir -p "${out}"
+            export SCRIPTC_NODE="$(command -v node)"
+            ./tools/release/toolchain/build-linux.sh "${out}"
+            bundle="${out}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+            ./tools/release/toolchain/verify-bundle.sh "${bundle}" "${RUNNER_TEMP}/verify-${suffix}" "${RUNNER_TEMP}/root-${suffix}.txt"
+            ./scripts/release/compiler-builtins-regression.sh "$(<"${RUNNER_TEMP}/root-${suffix}.txt")"
+          done
+          cmp -s "${RUNNER_TEMP}/toolchain-a/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst" \
+            "${RUNNER_TEMP}/toolchain-b/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+      - name: Prepare Linux producer artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="${RUNNER_TEMP}/producer-assets"
+          mkdir -p "${assets}"
+          cp -L "${RUNNER_TEMP}/toolchain-a/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst" "${assets}/"
+          cp -L "${RUNNER_TEMP}/toolchain-a/toolchain-manifest.json" "${assets}/toolchain-manifest-linux-x86_64.json"
+          cp -L "${RUNNER_TEMP}/toolchain-a/bundle-metadata.json" "${assets}/bundle-metadata-linux-x86_64.json"
+      - name: Upload Linux producer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-input-bundle-linux-x86_64
+          path: ${{ runner.temp }}/producer-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos-arm64-bundle:
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+          submodules: false
+      - name: Verify native macOS release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          [[ "${tag}" =~ ^v0\.1\.0(-rc\.[0-9]+)?$ ]]
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "${GITHUB_EVENT_NAME}" == push ]]; then test "${source_sha}" = "${GITHUB_SHA}"; fi
+          echo "RELEASE_TAG=${tag}" >> "${GITHUB_ENV}"
+          echo "JAMSCRIPT_SOURCE_SHA=${source_sha}" >> "${GITHUB_ENV}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: toolchains/scriptc/NODE_VERSION
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src
+      - name: Install macOS release tools
+        run: brew install zstd jq
+      - name: Install locked ScriptC packages
+        working-directory: toolchains/scriptc
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check release source locks
+        run: |
+          set -euo pipefail
+          cargo test --locked -p jamscript-toolchain
+          cargo test --locked -p jamscript-cli
+          cargo clippy --locked -p jamscript-toolchain -- -D warnings
+          ./scripts/check-toolchain-distribution.sh
+          python3 ./tools/release/toolchain/test-llvm-lock.py
+          if grep -Eq '^(clang_sha256|llvm_ar_sha256|ld_lld_sha256) = "0{64}"$' toolchains/llvm/macos-arm64.lock; then
+            echo "macOS LLVM binary hashes must be promoted from a native measurement before release publication" >&2
+            exit 1
+          fi
+      - name: Bootstrap and verify locked macOS LLVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/jamscript-llvm"
+          ./tools/release/toolchain/bootstrap-llvm-macos.sh "${out}"
+          set -a
+          source "${out}/llvm.env"
+          set +a
+          ./tools/release/toolchain/verify-llvm-macos.sh "${JAMSCRIPT_LLVM_ROOT}"
           cat "${out}/llvm.env" >> "${GITHUB_ENV}"
-
-      - name: Build and verify managed toolchain
+      - name: Build, verify, and compare macOS bundles
         shell: bash
         run: |
           set -euo pipefail
-          out="${RUNNER_TEMP}/toolchain"
-          export SCRIPTC_NODE="$(command -v node)"
-          ./tools/release/toolchain/build-linux.sh "${out}"
-          bundle="${out}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
-          ./tools/release/toolchain/verify-bundle.sh "${bundle}" "${RUNNER_TEMP}/toolchain-verify" "${RUNNER_TEMP}/toolchain-root.txt"
-          ./scripts/release/compiler-builtins-regression.sh "$(<"${RUNNER_TEMP}/toolchain-root.txt")"
-          echo "BUNDLE=${bundle}" >> "${GITHUB_ENV}"
-          echo "BUNDLE_METADATA=${out}/bundle-metadata.json" >> "${GITHUB_ENV}"
-          echo "TOOLCHAIN_MANIFEST=${out}/toolchain-manifest.json" >> "${GITHUB_ENV}"
-
-      - name: Build CLI with pinned release manifest
+          for suffix in a b; do
+            out="${RUNNER_TEMP}/toolchain-${suffix}"
+            mkdir -p "${out}"
+            export SCRIPTC_NODE="$(command -v node)"
+            ./tools/release/toolchain/build-macos.sh "${out}"
+            bundle="${out}/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
+            ./tools/release/toolchain/verify-bundle.sh "${bundle}" "${RUNNER_TEMP}/verify-${suffix}" "${RUNNER_TEMP}/root-${suffix}.txt"
+            ./scripts/release/compiler-builtins-regression.sh "$(<"${RUNNER_TEMP}/root-${suffix}.txt")"
+          done
+          cmp -s "${RUNNER_TEMP}/toolchain-a/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst" \
+            "${RUNNER_TEMP}/toolchain-b/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
+      - name: Prepare macOS producer artifact
         shell: bash
         run: |
           set -euo pipefail
+          assets="${RUNNER_TEMP}/producer-assets"
+          mkdir -p "${assets}"
+          cp -L "${RUNNER_TEMP}/toolchain-a/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst" "${assets}/"
+          cp -L "${RUNNER_TEMP}/toolchain-a/toolchain-manifest-macos-arm64.json" "${assets}/"
+          cp -L "${RUNNER_TEMP}/toolchain-a/bundle-metadata-macos-arm64.json" "${assets}/"
+      - name: Upload macOS producer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-input-bundle-macos-arm64
+          path: ${{ runner.temp }}/producer-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux-x86_64-cli:
+    needs: [build-linux-x86_64-bundle, build-macos-arm64-bundle]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-input-bundle-linux-x86_64
+          path: ${{ runner.temp }}/inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-input-bundle-macos-arm64
+          path: ${{ runner.temp }}/inputs
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+      - name: Build Linux CLI against both exact bundle identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          source_sha="$(git rev-parse HEAD)"
           source_copy="${RUNNER_TEMP}/release-source"
           mkdir -p "${source_copy}"
-          git archive --format=tar "${{ steps.identity.outputs.source_sha }}" | tar -xf - -C "${source_copy}"
-          bundle_name="$(basename -- "${BUNDLE}")"
-          bundle_sha="$(sha256sum "${BUNDLE}" | awk '{print $1}')"
-          bundle_size="$(stat -c '%s' "${BUNDLE}")"
-          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.identity.outputs.tag }}"
-          python3 ./tools/release/toolchain/make-candidate-manifest.py \
-            --input "${source_copy}/toolchains/distribution-v1.toml" \
-            --output "${source_copy}/toolchains/distribution-v1.toml" \
-            --url "${release_url}/${bundle_name}" --sha256 "${bundle_sha}" --size "${bundle_size}"
-          cli_out="${RUNNER_TEMP}/cli"
-          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${{ steps.identity.outputs.source_sha }}")" \
-            ./tools/release/build-cli-archive.sh "${source_copy}" "${cli_out}" "${{ steps.identity.outputs.tag }}"
-          echo "CLI_ARCHIVE=${cli_out}/jamscript-${{ steps.identity.outputs.tag }}-linux-x86_64.tar.zst" >> "${GITHUB_ENV}"
+          git archive --format=tar "${source_sha}" | tar -xf - -C "${source_copy}"
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
+          for platform in linux-x86_64 macos-arm64; do
+            bundle="${RUNNER_TEMP}/inputs/jamscript-toolchain-scriptc-m2-v1-${platform}.tar.zst"
+            sha="$(sha256sum "${bundle}" | awk '{print $1}')"
+            size="$(stat -c '%s' "${bundle}")"
+            python3 ./tools/release/toolchain/make-candidate-manifest.py \
+              --input "${source_copy}/toolchains/distribution-v1.toml" \
+              --output "${source_copy}/toolchains/distribution-v1.toml" \
+              --platform "${platform}" --url "${release_url}/${bundle##*/}" --sha256 "${sha}" --size "${size}"
+          done
+          ./tools/release/build-cli-archive.sh "${source_copy}" "${RUNNER_TEMP}/cli" "${tag}" linux-x86_64
+      - name: Upload Linux CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-input-cli-linux-x86_64
+          path: ${{ runner.temp }}/cli/jamscript-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Assemble immutable release assets
+  build-macos-arm64-cli:
+    needs: [build-linux-x86_64-bundle, build-macos-arm64-bundle]
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-input-bundle-linux-x86_64
+          path: ${{ runner.temp }}/inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-input-bundle-macos-arm64
+          path: ${{ runner.temp }}/inputs
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+      - name: Build macOS CLI against both exact bundle identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          source_sha="$(git rev-parse HEAD)"
+          source_copy="${RUNNER_TEMP}/release-source"
+          mkdir -p "${source_copy}"
+          git archive --format=tar "${source_sha}" | tar -xf - -C "${source_copy}"
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
+          for platform in linux-x86_64 macos-arm64; do
+            bundle="${RUNNER_TEMP}/inputs/jamscript-toolchain-scriptc-m2-v1-${platform}.tar.zst"
+            sha="$(shasum -a 256 "${bundle}" | awk '{print $1}')"
+            size="$(stat -f '%z' "${bundle}")"
+            python3 ./tools/release/toolchain/make-candidate-manifest.py \
+              --input "${source_copy}/toolchains/distribution-v1.toml" \
+              --output "${source_copy}/toolchains/distribution-v1.toml" \
+              --platform "${platform}" --url "${release_url}/${bundle##*/}" --sha256 "${sha}" --size "${size}"
+          done
+          ./tools/release/build-cli-archive.sh "${source_copy}" "${RUNNER_TEMP}/cli" "${tag}" macos-arm64
+      - name: Upload macOS CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-input-cli-macos-arm64
+          path: ${{ runner.temp }}/cli/jamscript-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble-release-assets:
+    needs: [build-linux-x86_64-cli, build-macos-arm64-cli]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-input-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+      - name: Write one multi-platform release manifest
         shell: bash
         run: |
           set -euo pipefail
           assets="${RUNNER_TEMP}/release-assets"
-          mkdir -p "${assets}"
-          cp -L "${CLI_ARCHIVE}" "${assets}/"
-          cp -L "${BUNDLE}" "${assets}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
-          cp -L "${TOOLCHAIN_MANIFEST}" "${assets}/toolchain-manifest.json"
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          source_sha="$(git rev-parse HEAD)"
           python3 ./tools/release/write-release-manifest.py \
             --output "${assets}/release-manifest.json" \
-            --release-version "${{ steps.identity.outputs.tag }}" \
-            --source-commit "${{ steps.identity.outputs.source_sha }}" --repository "${GITHUB_REPOSITORY}" \
+            --release-version "${tag}" --source-commit "${source_sha}" --repository "${GITHUB_REPOSITORY}" \
             --target linux-x86_64 \
-            --unsupported-target macos-arm64 --unsupported-target windows-x86_64 \
-            --cli "${assets}/$(basename -- "${CLI_ARCHIVE}")" \
+            --cli "${assets}/jamscript-${tag}-linux-x86_64.tar.gz" \
             --toolchain "${assets}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst" \
-            --toolchain-manifest "${assets}/toolchain-manifest.json" \
-            --bundle-metadata "${BUNDLE_METADATA}"
-          (cd "${assets}" && sha256sum \
-            "$(basename -- "${CLI_ARCHIVE}")" \
-            jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst \
-            toolchain-manifest.json release-manifest.json > SHA256SUMS)
-          echo "RELEASE_ASSETS=${assets}" >> "${GITHUB_ENV}"
-          cat "${assets}/release-manifest.json"
-
-      - name: Run Release Kill Test 001 before publication
-        shell: bash
-        run: |
-          set -euo pipefail
-          prepublish_dir="${RUNNER_TEMP}/release-kill-prepublish"
-          mkdir -p "${prepublish_dir}"
-          ./scripts/release/release-kill-test-001.sh \
-            --asset-dir "${RELEASE_ASSETS}" \
-            --release-version "${{ steps.identity.outputs.tag }}" \
-            --result-json "${prepublish_dir}/result.json" \
-            --work-dir "${prepublish_dir}/work"
-          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == false and .gates.R3_immutable_github_release == false and .gates.R4_published_artifact_validation == false' "${prepublish_dir}/result.json"
-          echo "RELEASE_CANDIDATE_READY=PASS"
-          {
-            echo "## Release candidate readiness"
-            echo
-            echo "RELEASE_CANDIDATE_READY=PASS"
-            echo "Pre-publication Kill Test 001 passed against the exact assembled assets."
-          } >> "${GITHUB_STEP_SUMMARY}"
-          echo "PREPUBLISH_KILL_RESULT=${prepublish_dir}/result.json" >> "${GITHUB_ENV}"
-
-      - name: Create immutable GitHub Release and upload assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ steps.identity.outputs.tag }}"
-          if gh release view "${tag}" >/dev/null 2>&1; then
-            echo "release already exists; immutable publication refuses replacement: ${tag}" >&2
-            exit 1
-          fi
-          release_args=(
-            "${tag}"
-            --verify-tag
-            --title "JamScript ${tag}"
-            --notes "Immutable JamScript release assets for ${tag}."
-          )
-          if [[ "${tag}" == *-rc.* ]]; then
-            release_args+=(--prerelease --latest=false)
-          fi
-          gh release create "${release_args[@]}"
-          gh release upload "${tag}" "${RELEASE_ASSETS}"/*
-          echo "IMMUTABLE_RELEASE_PUBLICATION=PASS"
-
-      - name: Upload builder evidence
+            --toolchain-manifest "${assets}/toolchain-manifest-linux-x86_64.json" \
+            --bundle-metadata "${assets}/bundle-metadata-linux-x86_64.json" \
+            --target macos-arm64 \
+            --cli "${assets}/jamscript-${tag}-macos-arm64.tar.gz" \
+            --toolchain "${assets}/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst" \
+            --toolchain-manifest "${assets}/toolchain-manifest-macos-arm64.json" \
+            --bundle-metadata "${assets}/bundle-metadata-macos-arm64.json" \
+            --unsupported-target windows-x86_64
+          (cd "${assets}" && sha256sum -- * > SHA256SUMS)
+          jq -e '.targets | map(select(.supported == true)) | length == 2' "${assets}/release-manifest.json"
+          jq -e -s '.[0].sourceRevision == .[1].sourceRevision and .[0].toolchainId == .[1].toolchainId' \
+            "${assets}/bundle-metadata-linux-x86_64.json" "${assets}/bundle-metadata-macos-arm64.json"
+          echo "CROSS_HOST_ARTIFACT_IDENTITY=PASS"
+      - name: Upload assembled release assets
         uses: actions/upload-artifact@v4
         with:
-          name: release-builder-evidence-${{ steps.identity.outputs.tag }}
-          path: |
-            ${{ env.RELEASE_ASSETS }}
-            ${{ env.PREPUBLISH_KILL_RESULT }}
+          name: assembled-release-assets
+          path: ${{ runner.temp }}/release-assets
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
-  validate-published-release:
-    needs: build-and-publish
+  prepublish-kill-linux:
+    needs: assemble-release-assets
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.build-and-publish.outputs.tag }}
-
-      - name: Install bootstrap tools
-        run: sudo apt-get update && sudo apt-get install -y zstd curl jq
-
-      - name: Run Release Kill Test 001 against GitHub Release bytes
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-release-assets
+          path: ${{ runner.temp }}/release-assets
+      - run: sudo apt-get update && sudo apt-get install -y zstd jq
+      - name: Run native Linux clean-consumer kill test
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/kill-test"
-          ./scripts/release/release-kill-test-001.sh \
-            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ needs.build-and-publish.outputs.tag }}" \
-            --release-version "${{ needs.build-and-publish.outputs.tag }}" \
-            --result-json "${RUNNER_TEMP}/kill-test/result.json" \
-            --work-dir "${RUNNER_TEMP}/kill-test/work"
-          cat "${RUNNER_TEMP}/kill-test/result.json"
-          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == true and .gates.R3_immutable_github_release == true and .gates.R4_published_artifact_validation == true' "${RUNNER_TEMP}/kill-test/result.json"
-          echo "RELEASE_READY=PASS"
-          {
-            echo "## Released artifact readiness"
-            echo
-            echo "RELEASE_READY=PASS"
-            echo "Release Kill Test 001 passed against downloaded GitHub Release bytes."
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Upload published-artifact validation evidence
-        uses: actions/upload-artifact@v4
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          result="${RUNNER_TEMP}/release-kill-linux.json"
+          ./scripts/release/release-kill-test-001.sh --asset-dir "${RUNNER_TEMP}/release-assets" \
+            --release-version "${tag}" --target linux-x86_64 --result-json "${result}" \
+            --work-dir "${RUNNER_TEMP}/release-kill-linux-work"
+          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == false and .gates.R3_immutable_github_release == false and .gates.R4_published_artifact_validation == false' "${result}"
+      - uses: actions/upload-artifact@v4
         with:
-          name: release-kill-test-001-${{ needs.build-and-publish.outputs.tag }}
-          path: ${{ runner.temp }}/kill-test/result.json
+          name: release-kill-linux
+          path: ${{ runner.temp }}/release-kill-linux.json
           if-no-files-found: error
           retention-days: 30
+
+  prepublish-kill-macos:
+    needs: assemble-release-assets
+    runs-on: macos-15
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-release-assets
+          path: ${{ runner.temp }}/release-assets
+      - name: Verify native Apple Silicon runner and install kill-test tools
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          brew install zstd jq
+      - name: Run native macOS clean-consumer kill test
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          result="${RUNNER_TEMP}/release-kill-macos.json"
+          ./scripts/release/release-kill-test-001.sh --asset-dir "${RUNNER_TEMP}/release-assets" \
+            --release-version "${tag}" --target macos-arm64 --result-json "${result}" \
+            --work-dir "${RUNNER_TEMP}/release-kill-macos-work"
+          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == false and .gates.R3_immutable_github_release == false and .gates.R4_published_artifact_validation == false' "${result}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-kill-macos
+          path: ${{ runner.temp }}/release-kill-macos.json
+          if-no-files-found: error
+          retention-days: 30
+
+  compare-cross-host-canonical-artifacts:
+    needs: [prepublish-kill-linux, prepublish-kill-macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-kill-linux
+          path: ${{ runner.temp }}/linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-kill-macos
+          path: ${{ runner.temp }}/macos
+      - name: Compare host-independent canonical service hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact in service.pvm service.polkavm service.blob; do
+            linux_hash="$(jq -er --arg artifact "${artifact}" '.artifact_hashes[$artifact]' "${RUNNER_TEMP}/linux/release-kill-linux.json")"
+            macos_hash="$(jq -er --arg artifact "${artifact}" '.artifact_hashes[$artifact]' "${RUNNER_TEMP}/macos/release-kill-macos.json")"
+            test "${linux_hash}" = "${macos_hash}"
+            echo "${artifact}: ${linux_hash}"
+          done
+          echo "CROSS_HOST_CANONICAL_ARTIFACTS=PASS"
+
+  publish-immutable-release:
+    needs: [prepublish-kill-linux, prepublish-kill-macos, compare-cross-host-canonical-artifacts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-release-assets
+          path: ${{ runner.temp }}/release-assets
+      - name: Create the immutable GitHub Release exactly once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "release already exists; immutable publication refuses replacement: ${tag}" >&2
+            exit 1
+          fi
+          args=("${tag}" --verify-tag --title "JamScript ${tag}" --notes "Immutable JamScript release assets for ${tag}.")
+          if [[ "${tag}" == *-rc.* ]]; then args+=(--prerelease --latest=false); fi
+          gh release create "${args[@]}"
+          gh release upload "${tag}" "${RUNNER_TEMP}/release-assets"/*
+          echo "IMMUTABLE_RELEASE_PUBLICATION=PASS"
+
+  validate-published-linux:
+    needs: publish-immutable-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+      - run: sudo apt-get update && sudo apt-get install -y zstd jq
+      - name: Run Linux kill test against GitHub Release bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          result="${RUNNER_TEMP}/release-kill-published-linux.json"
+          ./scripts/release/release-kill-test-001.sh --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}" \
+            --release-version "${tag}" --target linux-x86_64 --result-json "${result}" \
+            --work-dir "${RUNNER_TEMP}/release-kill-published-linux-work"
+          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == true and .gates.R3_immutable_github_release == true and .gates.R4_published_artifact_validation == true' "${result}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-kill-published-linux
+          path: ${{ runner.temp }}/release-kill-published-linux.json
+          if-no-files-found: error
+          retention-days: 30
+
+  validate-published-macos:
+    needs: publish-immutable-release
+    runs-on: macos-15
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+      - name: Verify native Apple Silicon runner and install kill-test tools
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          brew install zstd jq
+      - name: Run macOS kill test against GitHub Release bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          result="${RUNNER_TEMP}/release-kill-published-macos.json"
+          ./scripts/release/release-kill-test-001.sh --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}" \
+            --release-version "${tag}" --target macos-arm64 --result-json "${result}" \
+            --work-dir "${RUNNER_TEMP}/release-kill-published-macos-work"
+          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == true and .gates.R3_immutable_github_release == true and .gates.R4_published_artifact_validation == true' "${result}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-kill-published-macos
+          path: ${{ runner.temp }}/release-kill-published-macos.json
+          if-no-files-found: error
+          retention-days: 30
+
+  release-ready:
+    needs: [validate-published-linux, validate-published-macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Confirm both native published-byte gates
+        run: echo "RELEASE_READY=PASS"

@@ -6,7 +6,12 @@ tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
 
 version='v0.1.0-rc.1'
-asset="jamscript-${version}-linux-x86_64.tar.zst"
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) platform='linux-x86_64' ;;
+  Darwin:arm64) platform='macos-arm64' ;;
+  *) printf 'installer tests require Linux x86_64 or macOS arm64\n' >&2; exit 1 ;;
+esac
+asset="jamscript-${version}-${platform}.tar.gz"
 asset_dir="${tmp}/assets"
 fixture_dir="${tmp}/fixture"
 home_dir="${tmp}/home"
@@ -14,23 +19,15 @@ bin_dir="${tmp}/bin"
 log_file="${tmp}/jams.log"
 fake_bin="${tmp}/fake-bin"
 mkdir -p "$asset_dir" "$fixture_dir" "$home_dir" "$bin_dir"
+test_path="$PATH"
 
-if command -v zstd >/dev/null 2>&1; then
-  test_path="$PATH"
-  have_zstd=1
-else
-  # The installer correctly requires zstd in normal operation. This local
-  # passthrough lets the fixture suite run on minimal development images that
-  # lack zstd; the CI runner uses the real compressor when it is available.
-  mkdir -p "$fake_bin"
-  cat > "${fake_bin}/zstd" <<'FAKE'
-#!/usr/bin/env bash
-cat
-FAKE
-  chmod 0755 "${fake_bin}/zstd"
-  test_path="${fake_bin}:$PATH"
-  have_zstd=0
-fi
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
 
 write_fixture_cli() {
   cat > "${fixture_dir}/jams" <<'FIXTURE'
@@ -68,14 +65,10 @@ make_archive() {
   if [[ "$mode" == 'missing-jams' ]]; then
     rm -f -- "${fixture_dir}/jams"
   fi
-  if ((have_zstd)); then
-    (cd "$fixture_dir" && tar --sort=name --numeric-owner --owner=0 --group=0 --zstd -cf "${asset_dir}/${asset}" .)
-  else
-    (cd "$fixture_dir" && tar --sort=name --numeric-owner --owner=0 --group=0 -cf "${asset_dir}/${asset}" .)
-  fi
+  (cd "$fixture_dir" && tar -czf "${asset_dir}/${asset}" .)
   case "$checksum_mode" in
     correct)
-      (cd "$asset_dir" && sha256sum "$asset" > SHA256SUMS)
+      printf '%s  %s\n' "$(sha256_file "${asset_dir}/${asset}")" "$asset" > "${asset_dir}/SHA256SUMS"
       ;;
     missing)
       : > "${asset_dir}/SHA256SUMS"
@@ -111,11 +104,7 @@ assert_log_contains() {
   grep -qx "$1" "$log_file"
 }
 
-# I1, I10, I11, I12: Linux x86_64 success, executable installation, and CLI calls.
-[[ "$(uname -s)" == 'Linux' && "$(uname -m)" == 'x86_64' ]] || {
-  printf 'installer tests require Linux x86_64\n' >&2
-  exit 1
-}
+# I1, I10, I11, I12: supported-native success, executable installation, and CLI calls.
 make_archive
 : > "$log_file"
 run_install > "${tmp}/success.out"

@@ -21,6 +21,7 @@ pub struct PolkaVmBuildConfig {
     pub clang_path: Option<PathBuf>,
     pub ar_path: Option<PathBuf>,
     pub lld_path: Option<PathBuf>,
+    pub readelf_path: Option<PathBuf>,
     pub host_linker_path: Option<PathBuf>,
     pub cargo_home: Option<PathBuf>,
 }
@@ -38,6 +39,7 @@ impl Default for PolkaVmBuildConfig {
             clang_path: None,
             ar_path: None,
             lld_path: None,
+            readelf_path: None,
             host_linker_path: None,
             cargo_home: None,
         }
@@ -234,6 +236,7 @@ impl PolkaVmBuilder {
         fs::copy(&elf, &output_elf)
             .with_context(|| format!("copying canonical guest ELF from {}", elf.display()))?;
         let diagnostics = validate_elf(
+            &self.config,
             &output_elf,
             &request.required_exports,
             request.require_relocations,
@@ -291,18 +294,22 @@ fn validate_managed_host_toolchain(config: &PolkaVmBuildConfig) -> Result<()> {
         && (config.clang_path.is_none()
             || config.ar_path.is_none()
             || config.lld_path.is_none()
+            || config.readelf_path.is_none()
             || config.host_linker_path.is_none())
     {
         bail!(
-            "managed PolkaVM build requires explicit clang_path, ar_path, lld_path, and host_linker_path"
+            "managed PolkaVM build requires explicit clang_path, ar_path, lld_path, readelf_path, and host_linker_path"
         );
     }
     Ok(())
 }
 
 fn host_linker_env_var() -> &'static str {
-    // The v1 managed distribution currently ships Linux x86_64 only.
-    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
+    if cfg!(target_os = "macos") {
+        "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"
+    } else {
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
+    }
 }
 
 fn resolve_target_args(
@@ -354,12 +361,14 @@ fn verify_managed_rustc(config: &PolkaVmBuildConfig, lock: &ToolchainLock) -> Re
 }
 
 fn validate_elf(
+    config: &PolkaVmBuildConfig,
     path: &Path,
     required_exports: &[String],
     require_relocations: bool,
 ) -> Result<ElfDiagnostics> {
     let readelf = env::var_os("JAMSCRIPT_READELF")
         .map(PathBuf::from)
+        .or_else(|| config.readelf_path.clone())
         .or_else(|| find_on_path("readelf"))
         .or_else(|| find_on_path("llvm-readelf"))
         .ok_or_else(|| anyhow::anyhow!("ELF validation requires readelf or llvm-readelf"))?;
@@ -721,11 +730,13 @@ mod tests {
     }
 
     #[test]
-    fn managed_host_linker_targets_the_shipping_linux_host() {
-        assert_eq!(
-            host_linker_env_var(),
+    fn managed_host_linker_targets_the_native_shipping_host() {
+        let expected = if cfg!(target_os = "macos") {
+            "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"
+        } else {
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
-        );
+        };
+        assert_eq!(host_linker_env_var(), expected);
     }
 
     #[test]
