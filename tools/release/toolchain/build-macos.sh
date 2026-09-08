@@ -205,9 +205,11 @@ verify_macos_dependency_closure() {
   local seen seen_key dependency install_id relative resolved dependencies
 
   seen_key="${consumer}|${executable}"
-  for seen in "${MACOS_SEEN_DEPENDENCIES[@]}"; do
-    [[ "${seen}" == "${seen_key}" ]] && return 0
-  done
+  if ((${#MACOS_SEEN_DEPENDENCIES[@]})); then
+    for seen in "${MACOS_SEEN_DEPENDENCIES[@]}"; do
+      [[ "${seen}" == "${seen_key}" ]] && return 0
+    done
+  fi
   MACOS_SEEN_DEPENDENCIES+=("${seen_key}")
 
   dependencies="$(otool -L "${consumer}")" || {
