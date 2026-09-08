@@ -43,7 +43,19 @@ llvm_lock_module_path = source_root / "tools/release/toolchain/llvm-lock.py"
 llvm_lock_spec = importlib.util.spec_from_file_location("llvm_lock", llvm_lock_module_path)
 llvm_lock = importlib.util.module_from_spec(llvm_lock_spec)
 llvm_lock_spec.loader.exec_module(llvm_lock)
-llvm_lock_values = llvm_lock.parse_lock(source_root / "toolchains/llvm/linux-x86_64.lock")
+manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+if not isinstance(manifest, dict):
+    raise SystemExit("internal manifest is not an object")
+platform = manifest.get("platform")
+lock_match = re.search(
+    rf'"{re.escape(platform)}"\s*=\s*"([^"]+)"',
+    re.search(r"^llvm_locks\s*=\s*\{([^}]*)\}$", distribution_text, re.MULTILINE).group(0)
+    if re.search(r"^llvm_locks\s*=\s*\{([^}]*)\}$", distribution_text, re.MULTILINE)
+    else "",
+)
+if not lock_match:
+    raise SystemExit(f"missing LLVM lock for bundle platform: {platform}")
+llvm_lock_values = llvm_lock.parse_lock(source_root / lock_match.group(1))
 
 
 def toml_string(name):
@@ -67,14 +79,10 @@ distribution = {
     "jam_blob_encoder_version": toml_string("jam_blob_encoder_version"),
     "scriptc_revision": toml_string("scriptc_revision"),
 }
-manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-if not isinstance(manifest, dict):
-    raise SystemExit("internal manifest is not an object")
-
 checks = {
     "format": distribution["format"],
     "toolchainId": distribution["toolchain_id"],
-    "platform": "linux-x86_64",
+    "platform": platform,
     "nodeVersion": distribution["node_version"],
     "clangVersion": distribution["clang_version"],
     "rustToolchain": distribution["rust_toolchain"],
@@ -96,6 +104,11 @@ expected_llvm = {
     "llvmArSha256": llvm_lock_values["llvm_ar_sha256"],
     "ldLldSha256": llvm_lock_values["ld_lld_sha256"],
 }
+for key in ("clangSha256", "llvmArSha256", "ldLldSha256"):
+    if llvm_lock_values[key.replace("Sha256", "_sha256")] == "0" * 64:
+        if platform != "macos-arm64" or not re.fullmatch(r"[0-9a-f]{64}", manifest_llvm.get(key, "")):
+            raise SystemExit(f"unmeasured LLVM binary digest is not allowed for {platform}: {key}")
+        expected_llvm[key] = manifest_llvm[key]
 if manifest_llvm != expected_llvm:
     raise SystemExit("internal manifest LLVM provenance mismatch")
 
@@ -129,6 +142,7 @@ required_files = [
     "bin/llvm-ar",
     "bin/ar",
     "bin/ld.lld",
+    "bin/llvm-readelf",
     "bin/jamscript-host-linker",
     "bin/rustc",
     "bin/cargo",
@@ -150,7 +164,10 @@ for name in required_directories:
         raise SystemExit(f"required bundle directory is missing: {name}")
 
 for name, key in (("bin/clang", "clang_sha256"), ("bin/llvm-ar", "llvm_ar_sha256"), ("bin/ld.lld", "ld_lld_sha256")):
-    if sha256(root / name) != llvm_lock_values[key]:
+    expected_hash = llvm_lock_values[key]
+    if expected_hash == "0" * 64:
+        expected_hash = manifest_llvm[key.replace("_sha256", "Sha256")]
+    if sha256(root / name) != expected_hash:
         raise SystemExit(f"LLVM binary lock hash mismatch: {name}")
 
 node_version = run_version(root / "bin/node")
@@ -161,12 +178,15 @@ if node_version != distribution["node_version"]:
 clang_version = run_version(root / "bin/clang").splitlines()[0]
 if distribution["clang_version"] not in clang_version:
     raise SystemExit(f"Clang identity mismatch: {clang_version}")
-for name in ["bin/llvm-ar", "bin/ld.lld", "bin/rustc", "bin/cargo"]:
+for name in ["bin/llvm-ar", "bin/ld.lld", "bin/llvm-readelf", "bin/rustc", "bin/cargo"]:
     if not run_version(root / name):
         raise SystemExit(f"tool version query returned no output: {name}")
 if not os.access(root / "bin/jamscript-host-linker", os.X_OK):
     raise SystemExit("managed host linker is not executable")
-if sha256(root / "bin/ar") != llvm_lock_values["llvm_ar_sha256"]:
+ar_expected_hash = llvm_lock_values["llvm_ar_sha256"]
+if ar_expected_hash == "0" * 64:
+    ar_expected_hash = manifest_llvm["llvmArSha256"]
+if sha256(root / "bin/ar") != ar_expected_hash:
     raise SystemExit("LLVM archiver lock hash mismatch: bin/ar")
 if "nightly" not in run_version(root / "bin/rustc"):
     raise SystemExit("Rust identity is not a nightly toolchain")

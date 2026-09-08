@@ -44,8 +44,29 @@ done
 [[ "${release_version}" =~ ^v0\.1\.0(-rc\.[0-9]+)?$ ]] || { echo "release version is not a v0.1 semver tag" >&2; exit 1; }
 [[ -n "${release_url}" || -n "${asset_dir}" ]] || { echo "--release-url or --asset-dir is required" >&2; usage; }
 [[ -z "${release_url}" || -z "${asset_dir}" ]] || { echo "choose one of --release-url and --asset-dir" >&2; usage; }
-[[ "${target}" == "linux-x86_64" ]] || { echo "Release Kill Test 001 currently supports linux-x86_64" >&2; exit 1; }
+[[ "${target}" == "linux-x86_64" || "${target}" == "macos-arm64" ]] || {
+  echo "Release Kill Test 001 supports linux-x86_64 and macos-arm64" >&2
+  exit 1
+}
 command -v jq >/dev/null 2>&1 || { echo "jq is required during release bootstrap" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || [[ -n "${asset_dir}" ]] || {
+  echo "curl is required when downloading a release" >&2
+  exit 1
+}
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_file() { sha256sum "$1" | awk '{print $1}'; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_file() { shasum -a 256 "$1" | awk '{print $1}'; }
+else
+  echo "sha256sum or shasum is required" >&2
+  exit 1
+fi
+
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) [[ "${target}" == "linux-x86_64" ]] || { echo "target does not match this native Linux runner" >&2; exit 1; } ;;
+  Darwin:arm64) [[ "${target}" == "macos-arm64" ]] || { echo "target does not match this native macOS arm64 runner" >&2; exit 1; } ;;
+  *) echo "native release kill test requires Linux x86_64 or macOS arm64" >&2; exit 1 ;;
+esac
 
 if [[ -z "${work_dir}" ]]; then
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/jamscript-release-kill-001.XXXXXX")"
@@ -62,61 +83,67 @@ output_a="${work_dir}/output-a"
 output_b="${work_dir}/output-b"
 mkdir -p "${bootstrap}" "${install}" "${home}" "${forbidden_cargo_home}" "${forbidden_rustup_home}" "${cache}"
 
-cli_asset="jamscript-${release_version}-${target}.tar.zst"
-toolchain_asset="jamscript-toolchain-scriptc-m2-v1-${target}.tar.zst"
+cli_asset=""
+toolchain_asset=""
+toolchain_manifest_asset=""
+toolchain_metadata_asset=""
 if [[ -n "${release_url}" ]]; then
   release_url="${release_url%/}"
   curl --fail --location --retry 3 --silent --show-error "${release_url}/release-manifest.json" -o "${bootstrap}/release-manifest.json"
-  curl --fail --location --retry 3 --silent --show-error "${release_url}/${cli_asset}" -o "${bootstrap}/${cli_asset}"
-  curl --fail --location --retry 3 --silent --show-error "${release_url}/${toolchain_asset}" -o "${bootstrap}/${toolchain_asset}"
-  curl --fail --location --retry 3 --silent --show-error "${release_url}/toolchain-manifest.json" -o "${bootstrap}/toolchain-manifest.json"
   curl --fail --location --retry 3 --silent --show-error "${release_url}/SHA256SUMS" -o "${bootstrap}/SHA256SUMS"
 else
   cp -L "${asset_dir}/release-manifest.json" "${bootstrap}/release-manifest.json"
-  cp -L "${asset_dir}/${cli_asset}" "${bootstrap}/${cli_asset}"
-  cp -L "${asset_dir}/${toolchain_asset}" "${bootstrap}/${toolchain_asset}"
-  cp -L "${asset_dir}/toolchain-manifest.json" "${bootstrap}/toolchain-manifest.json"
   cp -L "${asset_dir}/SHA256SUMS" "${bootstrap}/SHA256SUMS"
 fi
 echo "K0_BOOTSTRAP=PASS"
 
-# SHA256SUMS is a release-asset index. Reject both missing entries and
-# references to files that this protocol did not acquire before verification.
+target_json="$(jq -cer --arg target "${target}" '.targets[] | select(.triple == $target and .supported == true)' "${bootstrap}/release-manifest.json")"
+cli_asset="$(jq -er '.cli.name' <<<"${target_json}")"
+toolchain_asset="$(jq -er '.toolchain.name' <<<"${target_json}")"
+toolchain_manifest_asset="$(jq -er '.toolchainManifest.name' <<<"${target_json}")"
+toolchain_metadata_asset="$(jq -er '.toolchainMetadata.name' <<<"${target_json}")"
+for required_asset in "${cli_asset}" "${toolchain_asset}" "${toolchain_manifest_asset}" "${toolchain_metadata_asset}"; do
+  if [[ -n "${release_url}" ]]; then
+    curl --fail --location --retry 3 --silent --show-error "${release_url}/${required_asset}" -o "${bootstrap}/${required_asset}"
+  else
+    cp -L "${asset_dir}/${required_asset}" "${bootstrap}/${required_asset}"
+  fi
+done
+
+# SHA256SUMS is a release-asset index. Validate every acquired target asset;
+# entries for the other native target are expected in a multi-platform release.
 declare -A checksum_seen=()
 while read -r checksum filename; do
+  [[ -n "${checksum:-}" && -n "${filename:-}" ]] || continue
   [[ "${checksum}" =~ ^[[:xdigit:]]{64}$ ]] || { echo "invalid SHA256SUMS entry" >&2; exit 1; }
   filename="${filename#\*}"
-  case "${filename}" in
-    "${cli_asset}"|"${toolchain_asset}"|toolchain-manifest.json|release-manifest.json) ;;
-    *) echo "SHA256SUMS references unavailable release asset: ${filename}" >&2; exit 1 ;;
-  esac
-  test -f "${bootstrap}/${filename}" || { echo "checksum asset was not acquired: ${filename}" >&2; exit 1; }
+  [[ "${filename}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "unsafe SHA256SUMS filename: ${filename}" >&2; exit 1; }
   checksum_seen["${filename}"]=1
+  if [[ -f "${bootstrap}/${filename}" ]]; then
+    test "$(sha256_file "${bootstrap}/${filename}")" = "${checksum}"
+  fi
 done < "${bootstrap}/SHA256SUMS"
-for required_asset in "${cli_asset}" "${toolchain_asset}" toolchain-manifest.json release-manifest.json; do
+for required_asset in release-manifest.json "${cli_asset}" "${toolchain_asset}" "${toolchain_manifest_asset}" "${toolchain_metadata_asset}"; do
   [[ "${checksum_seen[${required_asset}]:-}" == 1 ]] || {
     echo "SHA256SUMS is missing acquired release asset: ${required_asset}" >&2
     exit 1
   }
 done
-(cd "${bootstrap}" && sha256sum -c SHA256SUMS)
 test "$(jq -er '.releaseVersion' "${bootstrap}/release-manifest.json")" = "${release_version}"
-test "$(jq -er '.targets[0].triple' "${bootstrap}/release-manifest.json")" = "${target}"
-test "$(jq -er '.targets[0].cli.name' "${bootstrap}/release-manifest.json")" = "${cli_asset}"
-test "$(jq -er '.targets[0].toolchain.name' "${bootstrap}/release-manifest.json")" = "${toolchain_asset}"
-manifest_cli_sha="$(jq -er '.targets[0].cli.sha256' "${bootstrap}/release-manifest.json")"
-manifest_toolchain_sha="$(jq -er '.targets[0].toolchain.sha256' "${bootstrap}/release-manifest.json")"
-test "$(sha256sum "${bootstrap}/${cli_asset}" | awk '{print $1}')" = "${manifest_cli_sha}"
-test "$(sha256sum "${bootstrap}/${toolchain_asset}" | awk '{print $1}')" = "${manifest_toolchain_sha}"
+test "$(jq -er --arg target "${target}" '.targets[] | select(.triple == $target) | .triple' "${bootstrap}/release-manifest.json")" = "${target}"
+manifest_cli_sha="$(jq -er '.cli.sha256' <<<"${target_json}")"
+manifest_toolchain_sha="$(jq -er '.toolchain.sha256' <<<"${target_json}")"
+test "$(sha256_file "${bootstrap}/${cli_asset}")" = "${manifest_cli_sha}"
+test "$(sha256_file "${bootstrap}/${toolchain_asset}")" = "${manifest_toolchain_sha}"
 echo "K1_MANIFEST=PASS"
 echo "K2_CLI_CHECKSUM=PASS"
 echo "K4_TOOLCHAIN_CHECKSUM=PASS"
 
-tar --zstd -xf "${bootstrap}/${cli_asset}" -C "${install}"
+tar -xzf "${bootstrap}/${cli_asset}" -C "${install}"
 test -x "${install}/jams"
 test ! -e "${install}/jamscript"
 echo "K3_CLI_DOWNLOAD=PASS"
-tar --zstd -tf "${bootstrap}/${toolchain_asset}" >/dev/null
+zstd -q -d -c "${bootstrap}/${toolchain_asset}" | tar -tf - >/dev/null
 echo "K5_TOOLCHAIN_DOWNLOAD=PASS"
 
 if [[ -z "${fixture_dir}" ]]; then
@@ -163,7 +190,11 @@ fi
 
 host_tools="${work_dir}/host-tools"
 mkdir -p "${host_tools}"
-for tool in awk bash basename cat cmp cp dirname find grep mkdir mktemp readelf rm sed sha256sum stat tar tee tr touch zstd; do
+host_tool_names=(awk bash basename cat cmp cp dirname find grep mkdir mktemp rm sed sh tar tee tr uname zstd)
+if [[ "${target}" == "macos-arm64" ]]; then host_tool_names+=(xcrun); fi
+if [[ "${target}" == "macos-arm64" ]]; then host_tool_names+=(file otool); fi
+if command -v sha256sum >/dev/null 2>&1; then host_tool_names+=(sha256sum); else host_tool_names+=(shasum); fi
+for tool in "${host_tool_names[@]}"; do
   tool_path="$(type -P "${tool}" || true)"
   test -x "${tool_path}"
   ln -s "${tool_path}" "${host_tools}/${tool}"
@@ -197,6 +228,14 @@ grep -q "${JAMSCRIPT_TOOLCHAIN_HOME}" "${doctor_json}"
 echo "K7_DOCTOR=PASS"
 echo "K8_MANAGED_PATHS=PASS"
 
+apple_sdk_status="not-applicable"
+if [[ "${target}" == "macos-arm64" ]]; then
+  managed_root="$("${install}/jams" toolchain path)"
+  ./tools/release/toolchain/verify-execution-closure-macos.sh "${managed_root}"
+  apple_sdk_status="native-host-link-pass"
+  echo "K8_MACOS_HOST_ABI=PASS"
+fi
+
 "${install}/jams" build "${fixture_dir}" --offline --output "${output_a}"
 "${install}/jams" build "${fixture_dir}" --offline --output "${output_b}"
 for output in "${output_a}" "${output_b}"; do
@@ -226,9 +265,15 @@ test -n "${expected_line}"
 grep -Fxq "${expected_line}" "${run_log}"
 echo "K13_OUTPUT_AND_RESULT=PASS"
 
-hash_a="$(sha256sum "${output_a}/service.pvm" | awk '{print $1}')"
-hash_b="$(sha256sum "${output_b}/service.pvm" | awk '{print $1}')"
+hash_a="$(sha256_file "${output_a}/service.pvm")"
+hash_b="$(sha256_file "${output_b}/service.pvm")"
 test "${hash_a}" = "${hash_b}"
+blob_hash="$(sha256_file "${output_a}/service.blob")"
+blob_hash_b="$(sha256_file "${output_b}/service.blob")"
+test "${blob_hash}" = "${blob_hash_b}"
+polkavm_hash="$(sha256_file "${output_a}/service.polkavm")"
+polkavm_hash_b="$(sha256_file "${output_b}/service.polkavm")"
+test "${polkavm_hash}" = "${polkavm_hash_b}"
 echo "K14_REBUILD=PASS"
 echo "K15_DETERMINISTIC_HASH=PASS"
 
@@ -248,7 +293,16 @@ cat >"${result_json}" <<EOF
     "R3_immutable_github_release": $([[ -n "${release_url}" ]] && echo true || echo false),
     "R4_published_artifact_validation": $([[ -n "${release_url}" ]] && echo true || echo false)
   },
-  "artifact_sha256": "${hash_a}"
+  "artifact_sha256": "${hash_a}",
+  "artifact_hashes": {
+    "service.pvm": "${hash_a}",
+    "service.polkavm": "${polkavm_hash}",
+    "service.blob": "${blob_hash}"
+  },
+  "apple_sdk": {
+    "required_for_jams_build": false,
+    "native_host_linkage": "${apple_sdk_status}"
+  }
 }
 EOF
 echo "RELEASE_KILL_TEST_001=PASS"

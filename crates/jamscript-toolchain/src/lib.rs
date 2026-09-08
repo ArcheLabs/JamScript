@@ -32,6 +32,8 @@ pub struct DistributionManifest {
     pub jam_target_version: String,
     pub jam_blob_encoder_version: String,
     #[serde(default)]
+    pub llvm_locks: BTreeMap<String, String>,
+    #[serde(default)]
     pub scriptc_revision: String,
     pub platforms: BTreeMap<String, PlatformBundle>,
     #[serde(default, rename = "target")]
@@ -67,6 +69,7 @@ pub struct InstalledToolchain {
     pub clang: PathBuf,
     pub llvm_ar: PathBuf,
     pub lld: PathBuf,
+    pub readelf: PathBuf,
     pub host_linker: PathBuf,
     pub rustc: PathBuf,
     pub cargo: PathBuf,
@@ -338,6 +341,7 @@ impl ToolchainManager {
             clang: executable("clang"),
             llvm_ar: executable("llvm-ar"),
             lld: executable("ld.lld"),
+            readelf: executable("llvm-readelf"),
             host_linker: executable("jamscript-host-linker"),
             rustc: executable("rustc"),
             cargo: executable("cargo"),
@@ -389,6 +393,7 @@ impl ToolchainManager {
             &installed.clang,
             &installed.llvm_ar,
             &installed.lld,
+            &installed.readelf,
             &installed.host_linker,
             &installed.rustc,
             &installed.cargo,
@@ -427,14 +432,16 @@ impl ToolchainManager {
 }
 
 pub fn current_platform() -> Result<String> {
-    let os = env::consts::OS;
-    let arch = env::consts::ARCH;
+    platform_for(env::consts::OS, env::consts::ARCH)
+}
+
+/// Map Rust's host names to JamScript's stable public distribution IDs.
+/// `aarch64` is intentionally exposed as the public `macos-arm64` ID.
+pub fn platform_for(os: &str, arch: &str) -> Result<String> {
     match (os, arch) {
         ("linux", "x86_64") => Ok("linux-x86_64".into()),
-        ("linux", "aarch64") => Ok("linux-aarch64".into()),
         ("windows", "x86_64") => Ok("windows-x86_64".into()),
-        ("macos", "x86_64") => Ok("macos-x86_64".into()),
-        ("macos", "aarch64") => Ok("macos-aarch64".into()),
+        ("macos", "aarch64") => Ok("macos-arm64".into()),
         _ => bail!("unsupported host platform: {os}-{arch}"),
     }
 }
@@ -475,18 +482,51 @@ fn validate_manifest(manifest: &DistributionManifest) -> Result<()> {
     {
         bail!("unsupported JamScript toolchain distribution manifest");
     }
-    if manifest.platforms.is_empty() {
-        bail!("toolchain distribution has no platform bundles");
+    if manifest.platforms.is_empty() || manifest.targets.is_empty() {
+        bail!("toolchain distribution must declare platform bundles and targets");
     }
-    if !manifest.targets.is_empty()
-        && !manifest
+    let mut supported_count = 0;
+    for target in &manifest.targets {
+        if !matches!(
+            target.triple.as_str(),
+            "linux-x86_64" | "macos-arm64" | "windows-x86_64"
+        ) {
+            bail!(
+                "toolchain distribution contains unknown target {}",
+                target.triple
+            );
+        }
+        if target.supported {
+            supported_count += 1;
+            if !manifest.platforms.contains_key(&target.triple) {
+                bail!("supported target {} has no platform bundle", target.triple);
+            }
+        } else if manifest.platforms.contains_key(&target.triple) {
+            bail!(
+                "unsupported target {} must not have a resolvable platform bundle",
+                target.triple
+            );
+        }
+    }
+    if supported_count == 0 {
+        bail!("toolchain distribution declares no supported targets");
+    }
+    for platform in manifest.platforms.keys() {
+        if !manifest
             .targets
             .iter()
-            .any(|target| target.triple == "linux-x86_64" && target.supported)
-    {
-        bail!("toolchain distribution does not declare linux-x86_64 support");
+            .any(|target| target.triple == *platform && target.supported)
+        {
+            bail!(
+                "platform bundle {} has no matching supported target",
+                platform
+            );
+        }
     }
-    for bundle in manifest.platforms.values() {
+    for (platform, bundle) in &manifest.platforms {
+        if bundle.archive != "tar.zst" {
+            bail!("platform bundle {} must use tar.zst", platform);
+        }
         if bundle.url.is_empty()
             || bundle.sha256.len() != 64
             || !bundle.sha256.chars().all(|c| c.is_ascii_hexdigit())
@@ -494,6 +534,32 @@ fn validate_manifest(manifest: &DistributionManifest) -> Result<()> {
             || (bundle.published && bundle.sha256.chars().all(|c| c == '0'))
         {
             bail!("toolchain distribution contains an incomplete platform bundle");
+        }
+    }
+    if manifest.llvm_locks.is_empty() {
+        bail!("toolchain distribution has no platform-specific LLVM locks");
+    }
+    for target in manifest.targets.iter().filter(|target| target.supported) {
+        if !manifest.llvm_locks.contains_key(&target.triple) {
+            bail!("supported target {} has no LLVM lock", target.triple);
+        }
+    }
+    for (platform, lock_path) in &manifest.llvm_locks {
+        if !manifest
+            .targets
+            .iter()
+            .any(|target| target.supported && target.triple == *platform)
+        {
+            bail!("LLVM lock {} has no matching supported target", platform);
+        }
+        let path = Path::new(lock_path);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| component == Component::ParentDir)
+            || !lock_path.starts_with("toolchains/llvm/")
+        {
+            bail!("unsafe LLVM lock path for {}", platform);
         }
     }
     Ok(())
@@ -506,6 +572,15 @@ fn validate_source_locks(manifest: &DistributionManifest, source_root: &Path) ->
     // internal bundle manifest instead.
     if !source_root.join("toolchains").is_dir() {
         return Ok(());
+    }
+    for (platform, lock_path) in &manifest.llvm_locks {
+        if !source_root.join(lock_path).is_file() {
+            bail!(
+                "TOOLCHAIN_MANIFEST_DRIFT=FAIL: LLVM lock for {} is missing: {}",
+                platform,
+                lock_path
+            );
+        }
     }
     let node = fs::read_to_string(source_root.join("toolchains/scriptc/NODE_VERSION"))?
         .trim()
@@ -726,10 +801,11 @@ mod tests {
 
     #[test]
     fn platform_names_are_stable() {
-        assert!(matches!(
-            current_platform().unwrap().as_str(),
-            "linux-x86_64" | "linux-aarch64" | "windows-x86_64" | "macos-x86_64" | "macos-aarch64"
-        ));
+        assert_eq!(platform_for("linux", "x86_64").unwrap(), "linux-x86_64");
+        assert_eq!(platform_for("macos", "aarch64").unwrap(), "macos-arm64");
+        assert_eq!(platform_for("windows", "x86_64").unwrap(), "windows-x86_64");
+        assert!(platform_for("macos", "x86_64").is_err());
+        assert!(platform_for("linux", "aarch64").is_err());
     }
 
     #[test]

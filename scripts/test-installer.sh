@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 tmp="$(mktemp -d)"
-trap 'rm -rf -- "$tmp"' EXIT
+trap 'rm -rf "$tmp"' EXIT
 
 version='v0.1.0-rc.1'
-asset="jamscript-${version}-linux-x86_64.tar.zst"
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) platform='linux-x86_64' ;;
+  Darwin:arm64) platform='macos-arm64' ;;
+  *) printf 'installer tests require Linux x86_64 or macOS arm64\n' >&2; exit 1 ;;
+esac
+asset="jamscript-${version}-${platform}.tar.gz"
 asset_dir="${tmp}/assets"
 fixture_dir="${tmp}/fixture"
 home_dir="${tmp}/home"
@@ -14,23 +19,16 @@ bin_dir="${tmp}/bin"
 log_file="${tmp}/jams.log"
 fake_bin="${tmp}/fake-bin"
 mkdir -p "$asset_dir" "$fixture_dir" "$home_dir" "$bin_dir"
+canonical_bin_dir="$(cd "$bin_dir" && pwd -P)"
+test_path="$PATH"
 
-if command -v zstd >/dev/null 2>&1; then
-  test_path="$PATH"
-  have_zstd=1
-else
-  # The installer correctly requires zstd in normal operation. This local
-  # passthrough lets the fixture suite run on minimal development images that
-  # lack zstd; the CI runner uses the real compressor when it is available.
-  mkdir -p "$fake_bin"
-  cat > "${fake_bin}/zstd" <<'FAKE'
-#!/usr/bin/env bash
-cat
-FAKE
-  chmod 0755 "${fake_bin}/zstd"
-  test_path="${fake_bin}:$PATH"
-  have_zstd=0
-fi
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
 
 write_fixture_cli() {
   cat > "${fixture_dir}/jams" <<'FIXTURE'
@@ -56,7 +54,7 @@ FIXTURE
 make_archive() {
   local mode="${1:-success}"
   local checksum_mode="${2:-correct}"
-  rm -rf -- "$asset_dir" "$fixture_dir"
+  rm -rf "$asset_dir" "$fixture_dir"
   mkdir -p "$asset_dir" "$fixture_dir"
   write_fixture_cli
   printf 'fixture license\n' > "${fixture_dir}/LICENSE"
@@ -66,16 +64,12 @@ make_archive() {
     chmod 0755 "${fixture_dir}/jamscript"
   fi
   if [[ "$mode" == 'missing-jams' ]]; then
-    rm -f -- "${fixture_dir}/jams"
+    rm -f "${fixture_dir}/jams"
   fi
-  if ((have_zstd)); then
-    (cd "$fixture_dir" && tar --sort=name --numeric-owner --owner=0 --group=0 --zstd -cf "${asset_dir}/${asset}" .)
-  else
-    (cd "$fixture_dir" && tar --sort=name --numeric-owner --owner=0 --group=0 -cf "${asset_dir}/${asset}" .)
-  fi
+  (cd "$fixture_dir" && tar -czf "${asset_dir}/${asset}" .)
   case "$checksum_mode" in
     correct)
-      (cd "$asset_dir" && sha256sum "$asset" > SHA256SUMS)
+      printf '%s  %s\n' "$(sha256_file "${asset_dir}/${asset}")" "$asset" > "${asset_dir}/SHA256SUMS"
       ;;
     missing)
       : > "${asset_dir}/SHA256SUMS"
@@ -111,18 +105,18 @@ assert_log_contains() {
   grep -qx "$1" "$log_file"
 }
 
-# I1, I10, I11, I12: Linux x86_64 success, executable installation, and CLI calls.
-[[ "$(uname -s)" == 'Linux' && "$(uname -m)" == 'x86_64' ]] || {
-  printf 'installer tests require Linux x86_64\n' >&2
-  exit 1
-}
+# I1, I10, I11, I12: supported-native success, executable installation, and CLI calls.
 make_archive
 : > "$log_file"
 run_install > "${tmp}/success.out"
 test -x "${bin_dir}/jams"
 assert_log_contains 'toolchain install'
 assert_log_contains 'doctor'
-grep -Fqx "  export PATH=\"${bin_dir}:\$PATH\"" "${tmp}/success.out"
+if PATH="$test_path" command -v jams >/dev/null 2>&1; then
+  ! grep -Fq "  export PATH=\"${canonical_bin_dir}:\$PATH\"" "${tmp}/success.out"
+else
+  grep -Fqx "  export PATH=\"${canonical_bin_dir}:\$PATH\"" "${tmp}/success.out"
+fi
 
 # The default destination is HOME/.local/bin.
 HOME="$home_dir" PATH="$test_path" JAMSCRIPT_INSTALL_TEST=1 JAMSCRIPT_INSTALL_TEST_ASSET_DIR="$asset_dir" \
@@ -150,7 +144,7 @@ chmod 0755 "${fake_bin}/uname"
 run_expect_failure env PATH="$fake_bin:$test_path" HOME="$home_dir" \
   JAMSCRIPT_INSTALL_TEST=1 JAMSCRIPT_INSTALL_TEST_ASSET_DIR="$asset_dir" \
   JAMSCRIPT_TEST_LOG="$log_file" bash "$ROOT/install.sh" --version "$version" --bin-dir "$bin_dir"
-rm -f -- "${fake_bin}/uname"
+rm -f "${fake_bin}/uname"
 
 # I4 and I5: required and validated release versions.
 run_expect_failure env HOME="$home_dir" bash "$ROOT/install.sh" --bin-dir "$bin_dir"
@@ -191,7 +185,7 @@ test "$(grep -c '^doctor$' "$log_file")" -eq 2
 # I15: a download/source failure preserves the existing CLI.
 printf 'stable CLI\n' > "${bin_dir}/jams"
 chmod 0755 "${bin_dir}/jams"
-rm -f -- "${asset_dir}/${asset}"
+rm -f "${asset_dir}/${asset}"
 run_expect_failure run_install
 grep -qx 'stable CLI' "${bin_dir}/jams"
 

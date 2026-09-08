@@ -1885,6 +1885,7 @@ dependencies = [
  "clap",
  "getrandom 0.3.4",
  "jamscript-codegen-rust",
+ "jamscript-deployment",
  "jamscript-ir",
  "jamscript-parser",
  "jamscript-target-jam",
@@ -1920,6 +1921,20 @@ dependencies = [
  "blake2b_simd",
  "schnorrkel",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "jamscript-deployment"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake2b_simd",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "url",
 ]
 
 [[package]]
@@ -1987,6 +2002,7 @@ dependencies = [
  "jam-program-blob-common",
  "jamscript-backend-scriptc",
  "jamscript-codegen-rust",
+ "jamscript-deployment",
  "jamscript-ir",
  "jamscript-runtime-scriptc",
  "jamscript-toolchain",

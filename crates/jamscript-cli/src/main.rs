@@ -3,6 +3,10 @@ use clap::{Parser, Subcommand};
 use jamscript_codegen_rust::{
     generate_builder_application_rust, ManagementPolicyConfig, PortableServiceContext,
 };
+use jamscript_deployment::{
+    load_service_artifact, redact_url, resolve_network, validate_networks, CurlJsonRpcTransport,
+    DeploymentConfig, DeploymentEngine, NetworkConfig, NetworkOverrides,
+};
 use jamscript_ir::abi_for_language;
 use jamscript_parser::parse_service_v02;
 use jamscript_target_jam::{verify_deployment_bundle, JamTarget, NativeModule};
@@ -70,6 +74,28 @@ enum CommandKind {
         #[arg(default_value = "dist")]
         bundle: PathBuf,
     },
+    Deploy {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        network: Option<String>,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        deployment_rpc: Option<String>,
+        #[arg(long)]
+        node_rpc: Option<String>,
+        #[arg(long, default_value = "dist")]
+        artifact: PathBuf,
+        #[arg(long, default_value = "120s")]
+        timeout: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -83,6 +109,34 @@ enum ToolchainCommand {
     Path,
 }
 
+#[derive(Subcommand)]
+enum NetworkCommand {
+    List {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        name: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+struct DeployOptions {
+    path: PathBuf,
+    network: Option<String>,
+    kind: Option<String>,
+    deployment_rpc: Option<String>,
+    node_rpc: Option<String>,
+    artifact: PathBuf,
+    timeout: String,
+    json: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
@@ -91,6 +145,8 @@ struct Manifest {
     target: Option<Target>,
     native: Option<BTreeMap<String, NativeConfig>>,
     management: Option<ManagementConfig>,
+    networks: Option<BTreeMap<String, NetworkConfig>>,
+    deployment: Option<DeploymentConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +244,26 @@ fn main() -> Result<()> {
             result,
         } => run_artifact(&artifact, &export, result.as_deref()),
         CommandKind::Inspect { bundle } => inspect(&bundle),
+        CommandKind::Deploy {
+            path,
+            network,
+            kind,
+            deployment_rpc,
+            node_rpc,
+            artifact,
+            timeout,
+            json,
+        } => deploy(DeployOptions {
+            path,
+            network,
+            kind,
+            deployment_rpc,
+            node_rpc,
+            artifact,
+            timeout,
+            json,
+        }),
+        CommandKind::Network { command } => network_command(command),
     }
 }
 
@@ -240,6 +316,7 @@ fn doctor(json: bool) -> Result<()> {
             "clang": root.join("bin/clang"),
             "llvm_ar": root.join("bin/llvm-ar"),
             "lld": root.join("bin/ld.lld"),
+            "readelf": root.join("bin/llvm-readelf"),
             "host_linker": root.join("bin/jamscript-host-linker"),
             "polkavm": root.join("toolchains/polkavm.lock"),
             "jam_sdk": root.join("targets/jam/sdk"),
@@ -256,6 +333,7 @@ fn doctor(json: bool) -> Result<()> {
             root.join("bin/clang"),
             root.join("bin/llvm-ar"),
             root.join("bin/ld.lld"),
+            root.join("bin/llvm-readelf"),
             root.join("bin/jamscript-host-linker"),
             root.join("toolchains/polkavm.lock"),
             root.join("targets/jam/sdk"),
@@ -322,6 +400,7 @@ fn doctor(json: bool) -> Result<()> {
             ("ScriptC", root.join("scriptc")),
             ("Clang", root.join("bin/clang")),
             ("LLVM/Clang linker", root.join("bin/ld.lld")),
+            ("LLVM ELF inspector", root.join("bin/llvm-readelf")),
             (
                 "Managed host linker",
                 root.join("bin/jamscript-host-linker"),
@@ -499,12 +578,241 @@ fn inspect(bundle: &Path) -> Result<()> {
     Ok(())
 }
 
-fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
+fn network_command(command: NetworkCommand) -> Result<()> {
+    match command {
+        NetworkCommand::List { path, json } => {
+            let manifest = read_manifest(&path)?;
+            let networks = manifest.networks.unwrap_or_default();
+            if json {
+                let values = networks
+                    .iter()
+                    .map(|(name, config)| {
+                        serde_json::json!({
+                            "name": name,
+                            "kind": config.kind,
+                            "deploymentRpc": config.deployment_rpc.as_deref().map(redact_url),
+                            "nodeRpc": config.node_rpc.as_deref().map(redact_url),
+                            "default": manifest.deployment.as_ref()
+                                .and_then(|deployment| deployment.default_network.as_deref())
+                                == Some(name.as_str()),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                println!("{}", serde_json::to_string_pretty(&values)?);
+            } else if networks.is_empty() {
+                println!("No deployment networks configured.");
+                println!("Add [networks.<name>] to jamscript.toml.");
+            } else {
+                println!("{:<20} {:<10} DEPLOYMENT", "NAME", "KIND");
+                for (name, config) in networks {
+                    println!(
+                        "{:<20} {:<10} {}",
+                        name,
+                        config.kind,
+                        config
+                            .deployment_rpc
+                            .as_deref()
+                            .map(redact_url)
+                            .unwrap_or_else(|| "not configured".into())
+                    );
+                }
+            }
+            Ok(())
+        }
+        NetworkCommand::Show { name, path, json } => {
+            let manifest = read_manifest(&path)?;
+            let config = manifest
+                .networks
+                .as_ref()
+                .and_then(|networks| networks.get(&name))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("NETWORK_NOT_FOUND: network '{name}' is not configured")
+                })?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "name": name,
+                        "kind": config.kind,
+                        "deploymentRpc": config.deployment_rpc.as_deref().map(redact_url),
+                        "nodeRpc": config.node_rpc.as_deref().map(redact_url),
+                        "genesisHash": config.genesis_hash,
+                        "default": manifest.deployment.as_ref()
+                            .and_then(|deployment| deployment.default_network.as_deref())
+                            == Some(name.as_str()),
+                    }))?
+                );
+            } else {
+                println!("Name\n  {name}");
+                println!("Kind\n  {}", config.kind);
+                println!(
+                    "Deployment RPC\n  {}",
+                    config
+                        .deployment_rpc
+                        .as_deref()
+                        .map(redact_url)
+                        .unwrap_or_else(|| "not configured".into())
+                );
+                println!(
+                    "Node RPC\n  {}",
+                    config
+                        .node_rpc
+                        .as_deref()
+                        .map(redact_url)
+                        .unwrap_or_else(|| "not configured".into())
+                );
+                println!(
+                    "Genesis pin\n  {}",
+                    config.genesis_hash.as_deref().unwrap_or("not configured")
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn deploy(options: DeployOptions) -> Result<()> {
+    let DeployOptions {
+        path,
+        network,
+        kind,
+        deployment_rpc,
+        node_rpc,
+        artifact,
+        timeout,
+        json,
+    } = options;
+    let project_root = path
+        .canonicalize()
+        .with_context(|| format!("locating JamScript project {}", path.display()))?;
+    let manifest = read_manifest(&project_root)?;
+    let artifact_dir = if artifact.is_absolute() {
+        artifact
+    } else {
+        project_root.join(artifact)
+    };
+    let service_artifact =
+        load_service_artifact(&artifact_dir).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let resolved = resolve_network(
+        manifest.networks.as_ref(),
+        manifest.deployment.as_ref(),
+        NetworkOverrides {
+            network,
+            kind,
+            deployment_rpc,
+            node_rpc,
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let timeout = parse_duration(&timeout)?;
+    if !json {
+        println!("JamScript Deployment\n");
+        println!("Network");
+        println!("  Name: {}", resolved.display_name());
+        println!("  Kind: {}", resolved.kind);
+        println!("  Endpoint: {}", redact_url(&resolved.deployment_rpc));
+        println!(
+            "  Identity: {}",
+            if resolved.genesis_hash.is_some() {
+                "pinned; verifying"
+            } else {
+                "unpinned"
+            }
+        );
+        println!("\nArtifact");
+        println!("  {}", service_artifact.blob_path.display());
+        println!(
+            "  Code hash: {}",
+            jamscript_deployment::hash_hex(&service_artifact.code_hash)
+        );
+        println!("  Artifact verification: PASS");
+        println!("\nSubmitting deployment...");
+    }
+    let result = DeploymentEngine::new(CurlJsonRpcTransport)
+        .deploy(resolved, service_artifact, timeout)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let record = jamscript_deployment::write_deployment_record(&project_root, &result)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "PASS",
+                "network": {
+                    "name": result.network.name,
+                    "kind": result.network.kind,
+                    "genesisHash": result.network.genesis_hash,
+                    "identity": format!("{:?}", result.network.verification).to_ascii_lowercase(),
+                },
+                "serviceId": result.service_id,
+                "codeHash": result.code_hash,
+                "finalized": result.finalized,
+                "finalizedBlock": result.finalized_context,
+                "operationId": result.operation_id,
+                "record": record,
+            }))?
+        );
+    } else {
+        println!("  PASS");
+        println!("\nService");
+        println!("  ID: {}", result.service_id);
+        println!("\nFinalization");
+        println!("  {}", if result.finalized { "PASS" } else { "FAIL" });
+        println!(
+            "  Block: {}",
+            result
+                .finalized_context
+                .as_ref()
+                .map(|context| format!("{} ({})", context.block_hash, context.block_number))
+                .unwrap_or_else(|| "not reported".into())
+        );
+        println!("Code identity\n  PASS");
+        println!(
+            "Network identity\n  {}",
+            if result.network.verification == jamscript_deployment::IdentityVerification::Verified {
+                "VERIFIED"
+            } else {
+                "UNPINNED"
+            }
+        );
+        println!("\nDeployment record\n  {}", record.display());
+        println!("\nDEPLOYMENT=PASS");
+    }
+    Ok(())
+}
+
+fn parse_duration(value: &str) -> Result<std::time::Duration> {
+    let value = value.trim();
+    let split = value
+        .trim_end_matches(|character: char| character.is_ascii_alphabetic())
+        .len();
+    let (number, unit) = value.split_at(split);
+    let seconds = number
+        .parse::<u64>()
+        .with_context(|| format!("invalid deployment timeout '{value}'"))?;
+    let multiplier = match unit {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        _ => bail!("invalid deployment timeout unit '{unit}'; use seconds, minutes, or hours"),
+    };
+    let seconds = seconds
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("deployment timeout is too large"))?;
+    if seconds == 0 {
+        bail!("deployment timeout must be greater than zero");
+    }
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
+fn read_manifest(path: &Path) -> Result<Manifest> {
     let manifest_path = path.join("jamscript.toml");
     let manifest: Manifest = toml::from_str(
         &fs::read_to_string(&manifest_path)
             .with_context(|| format!("reading {}", manifest_path.display()))?,
     )?;
+    validate_networks(manifest.networks.as_ref(), manifest.deployment.as_ref())
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if let Some(management) = &manifest.management {
         match management.mode.as_str() {
             "deployer" => {
@@ -530,6 +838,11 @@ fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
             mode => bail!("unsupported management mode `{mode}`"),
         }
     }
+    Ok(manifest)
+}
+
+fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
+    let manifest = read_manifest(path)?;
     let backend = manifest
         .compiler
         .as_ref()
@@ -673,13 +986,9 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         Some(toolchain) => JamTarget::from_installed_toolchain(toolchain),
         None => JamTarget::new(),
     };
-    let metadata = target
+    target
         .build_scriptc_probe(&project_root, &ir, context, output, &native_modules)
         .context("JAM target build")?;
-    fs::write(
-        output.join("build.json"),
-        serde_json::to_vec_pretty(&metadata)?,
-    )?;
     println!("built {}", output.display());
     Ok(())
 }

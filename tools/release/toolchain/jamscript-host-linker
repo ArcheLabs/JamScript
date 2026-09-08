@@ -2,7 +2,20 @@
 set -euo pipefail
 
 TOOLCHAIN_BIN="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-exec "$TOOLCHAIN_BIN/clang" \
+args=(
   -fuse-ld=lld \
-  "--ld-path=$TOOLCHAIN_BIN/ld.lld" \
-  "$@"
+  "--ld-path=$TOOLCHAIN_BIN/ld.lld"
+)
+if [[ "$(uname -s)" == Darwin ]]; then
+  sdkroot="${SDKROOT:-}"
+  if [[ -z "${sdkroot}" ]] && command -v xcrun >/dev/null 2>&1; then
+    sdkroot="$(xcrun --sdk macosx --show-sdk-path)"
+  fi
+  [[ -n "${sdkroot}" && -d "${sdkroot}" ]] || {
+    echo "macOS host linking requires an Apple SDK (install Xcode Command Line Tools or set SDKROOT)" >&2
+    exit 1
+  }
+  args+=("-isysroot" "${sdkroot}")
+fi
+args+=("$@")
+exec "$TOOLCHAIN_BIN/clang" "${args[@]}"

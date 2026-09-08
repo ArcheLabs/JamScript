@@ -10,6 +10,7 @@ blake2b_simd.workspace = true
 jam-program-blob-common.workspace = true
 polkavm-linker.workspace = true
 jamscript-codegen-rust = { path = "../jamscript-codegen-rust" }
+jamscript-deployment = { path = "../jamscript-deployment" }
 jamscript-backend-scriptc = { path = "../jamscript-backend-scriptc" }
 jamscript-runtime-scriptc = { path = "../jamscript-runtime-scriptc" }
 jamscript-toolchain = { path = "../jamscript-toolchain" }

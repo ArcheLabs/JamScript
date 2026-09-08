@@ -1,25 +1,46 @@
 # JamScript Toolchain Distribution v1
 
-JamScript canonical builds resolve one immutable compiler distribution:
+JamScript canonical builds resolve one immutable compiler distribution per
+native target:
 
 ```text
 JamScript CLI + source + target
-  -> exact toolchain bundle
+  -> exact platform bundle
   -> deterministic service artifact
 ```
 
 The distribution owns Node, LLVM/Clang, `llvm-ar` (also exposed as the
-ScriptC-compatible `ar` command), `ld.lld`, Rust, `rust-src`,
-ScriptC's prepared npm tree, the compiler/runtime source crates, Cargo's
-vendored dependencies, and the JamScript-owned JAM target SDK. It is described by
-[`toolchains/distribution-v1.toml`](../toolchains/distribution-v1.toml) and
-the Linux LLVM closure by
-[`toolchains/llvm/linux-x86_64.lock`](../toolchains/llvm/linux-x86_64.lock).
-The Linux release path bootstraps the immutable LLVM 20.1.8 official
-`LLVM-20.1.8-Linux-X64.tar.xz` archive into `$RUNNER_TEMP`; it does not use
-Ubuntu's `clang-20` package as the canonical compiler. The archive SHA-256 and
-the `clang`, `llvm-ar`, and `ld.lld` SHA-256 values are checked before and after
-extraction, and `ldd` must report a complete LLVM runtime closure.
+ScriptC-compatible `ar` command), `ld.lld`, `llvm-readelf`, Rust, rust-src and
+compiler-builtins, ScriptC's prepared npm tree, compiler/runtime source crates,
+Cargo's vendored dependencies, and the JAM target SDK. It is described by
+[`toolchains/distribution-v1.toml`](../toolchains/distribution-v1.toml).
+
+## Platform boundary
+
+The public IDs are deliberately stable:
+
+| Public ID | Native producer | LLVM lock | Status |
+| --- | --- | --- | --- |
+| `linux-x86_64` | Ubuntu x86_64 | `toolchains/llvm/linux-x86_64.lock` | supported |
+| `macos-arm64` | macOS 15 Apple Silicon | `toolchains/llvm/macos-arm64.lock` | supported |
+| `windows-x86_64` | none in v0.1 | none | unsupported |
+
+Rust's `aarch64` macOS host name maps to `macos-arm64`; Rosetta is not used as
+a substitute for a native producer.
+
+Linux bootstraps the official LLVM 20.1.8
+`LLVM-20.1.8-Linux-X64.tar.xz`; macOS bootstraps the official
+`LLVM-20.1.8-macOS-ARM64.tar.xz`. Each archive URL and archive digest is
+locked, and each native producer measures the compiler binary digests before
+creating a bundle. The macOS binary-digest fields remain explicit native
+measurement sentinels in the source lock until the first macOS producer run
+promotes the measured values; a release bundle is accepted only when its
+internal manifest contains the measured values.
+
+On a native Apple Silicon checkout, the measured values can be promoted into
+the reviewed source lock with
+`tools/release/toolchain/promote-llvm-macos.sh <llvm.env>`. The v0.1 release
+workflow refuses publication while those three fields remain sentinels.
 
 ## User commands
 
@@ -36,13 +57,18 @@ jams doctor
 Installation may use the network once. Compilation uses the installed bundle;
 `--offline` and `JAMSCRIPT_OFFLINE=1` fail clearly when the expected bundle is
 missing and never try to download it. A damaged bundle fails verification and
-is never replaced by `/usr/bin/clang`, PATH `node`, rustup, or any other host
+is never replaced by `/usr/bin/clang`, PATH `node`, rustup, or another host
 tool.
+
+The CLI bootstrap archive is `.tar.gz` so Linux and macOS can install it with
+stock tar and gzip. The managed compiler bundle is `.tar.zst`; zstd is an
+internal release/CLI implementation detail and is not an end-user
+prerequisite.
 
 The cache is platform-specific and immutable:
 
 ```text
-<cache>/scriptc-m2-v1/linux-x86_64/<bundle-sha256>/
+<cache>/scriptc-m2-v1/<platform>/<bundle-sha256>/
 ```
 
 `JAMSCRIPT_TOOLCHAIN_HOME` can relocate the cache for CI or enterprise
@@ -54,62 +80,54 @@ and `canonical_toolchain: true`; it never records a user's cache path.
 Contributors may explicitly use repository checkouts with
 `JAMSCRIPT_DEV_TOOLCHAIN=1`. Such artifacts are marked
 `canonical_toolchain: false` and are not valid release inputs. Docker is
-allowed only around release engineering and cross-distro verification.
+allowed only around release engineering and cross-distro verification; it is
+not a user build dependency.
 
-The release flow is:
+The native producer flow is:
 
-1. Check out the exact JamScript revision.
-2. Bootstrap and verify the exact LLVM distribution with
-   `tools/release/toolchain/bootstrap-llvm-linux.sh`.
-3. Build the bundle with `tools/release/toolchain/build-linux.sh`.
-4. Run `tools/release/toolchain/verify-bundle.sh`.
-5. Publish the archive and internal manifest to a GitHub Release.
-6. Promote the exact archive URL, SHA-256, and byte size in the distribution
-   manifest in a separate commit.
+1. Check out the exact JamScript revision on the matching native runner.
+2. Bootstrap and verify the locked LLVM distribution with the platform-specific
+   `bootstrap-llvm-*` and `verify-llvm-*` scripts.
+3. Build the bundle with `build-linux.sh` or `build-macos.sh`.
+4. Run `verify-bundle.sh`, the managed execution-closure probe, and the
+   compiler-builtins regression.
+5. Build two independent archives and compare their bytes.
+6. Pass both native clean-consumer kill tests before publication.
 
-The hosted production gate is
+The candidate workflow is
 [`build-toolchain-bundle.yml`](../.github/workflows/build-toolchain-bundle.yml).
-It runs on Ubuntu 24.04, checks the exact source SHA and x86_64 architecture,
-installs the locked ScriptC packages, builds and verifies two independent
-`tar.zst` archives, and compares their bytes before uploading the validation
-artifact `toolchain-linux-x86_64` for seven days. The artifact includes the
-archive, `SHA256SUMS`, `bundle-status.json`, `bundle-metadata.json`, and the
-internal toolchain manifest.
+It has separate Linux and macOS producers, checks exact source identity and
+native architecture, validates the managed bundle, and uploads short-lived
+engineering evidence. An Actions artifact is not a public distribution URL.
 
-The workflow validates the archive through `ToolchainManager`, checks both
-independent builds, and verifies the managed execution closure. The checked-in
-`published = false` record is never edited or promoted by Actions; an Actions
-artifact is not a public distribution URL.
+## Native ABI and SDK boundary
+
+The managed bundle is compiler-toolchain self-contained on both supported
+targets. It does not require host-installed Rust, Cargo, Node, LLVM, Clang,
+LLD, ScriptC, or a MiniJAM checkout.
+
+The guest/service path uses the managed target SDK and managed tools. `jams
+build` does not compile the separate generated Builder host application. When
+that host adapter is compiled, native host binaries still use the host ABI:
+Linux uses the Ubuntu/glibc boundary and macOS uses the Apple arm64 loader,
+system frameworks, and SDK / Xcode Command Line Tools for host linkage. Those
+Apple components are not copied into the bundle. The native macOS execution
+closure and clean-consumer tests are the release proof for this boundary.
 
 The bundle contains only the JamScript-owned JAM target SDK under
 `targets/jam/sdk`; MiniJAM, Jambda, and deployment services are not bundled.
-The default CI and release workflows use only this bundle. The repository's
-MiniJAM network workflow is a manually triggered downstream compatibility
-check and is never a prerequisite for compiling or publishing JamScript.
-
-The supported Linux x86_64 distribution is compiler-toolchain self-contained.
-It does not require host-installed Rust, Cargo, Node, GCC, Clang, LLD, LLVM
-binutils, or ScriptC. It may rely on the Ubuntu 24.04 Linux ABI boundary,
-including the system dynamic loader, glibc-compatible runtime libraries, and
-normal host CRT/startup objects. Native host Rust links use the bundle-relative
-managed host linker.
-
-The native bundle scope starts with `linux-x86_64`. Windows, macOS, and
-Linux ARM bundles use the same manifest and cache model when published.
 
 ## Published bytes and consumer validation
 
-The release workflow builds the CLI archive and managed bundle from a semver
-tag, embeds the exact bundle URL and SHA-256 in the CLI's distribution
-manifest, and publishes `release-manifest.json`, `toolchain-manifest.json`, and
-`SHA256SUMS` as immutable release assets. It refuses to upload into an existing
-release tag.
+The tag workflow
+[`release-candidate.yml`](../.github/workflows/release-candidate.yml) builds
+both CLI archives and both managed bundles from the exact tag commit. It
+assembles one `release-manifest.json` with two supported target entries and an
+explicit unsupported Windows entry, plus target-specific toolchain manifests,
+metadata, and a complete `SHA256SUMS` index.
 
-After publication, a separate job downloads those assets from the GitHub
-Release URL. [`release-kill-test-001.sh`](../scripts/release/release-kill-test-001.sh)
-verifies the release manifest against the downloaded bytes, isolates HOME and
-all compiler caches, hides host toolchains, runs `jams doctor`, and builds
-the external consumer fixture twice with `JAMSCRIPT_OFFLINE=1`. The test then
-executes `service.pvm` through the CLI interpreter and records a JSON result.
-This is the R1/R4 gate; an Actions artifact passed directly between jobs is not
-used as a substitute for the published bytes.
+The workflow has one publication job. Before it can run, native Linux and
+native macOS clean-consumer jobs download the exact assembled bytes and run
+[`release-kill-test-001.sh`](../scripts/release/release-kill-test-001.sh).
+After publication, separate native jobs repeat the same test against the
+GitHub Release URL. The release refuses to replace an existing tag.

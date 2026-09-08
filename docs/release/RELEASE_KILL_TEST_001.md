@@ -9,19 +9,21 @@ release contains no `jamscript` compatibility executable or alias.
 
 The implementation is
 [`scripts/release/release-kill-test-001.sh`](../../scripts/release/release-kill-test-001.sh).
-The bootstrap phase downloads `release-manifest.json`, the CLI archive, the
-managed toolchain bundle, `toolchain-manifest.json`, and `SHA256SUMS`. It first
-asserts that every checksum entry names an acquired release asset, then verifies
-the checksum file and the per-target digests embedded in the release manifest.
-After extraction it requires an executable `jams` and rejects any `jamscript`
-executable, so the archive structure itself enforces the public command rename.
+It accepts `--target linux-x86_64` or `--target macos-arm64` and must run on the
+matching native host. The bootstrap phase reads the target-specific CLI,
+managed toolchain, toolchain manifest, metadata, `release-manifest.json`, and
+`SHA256SUMS`. It verifies the acquired target bytes and the per-target digests
+embedded in the release manifest. After extraction it requires an executable
+`jams` and rejects any `jamscript` executable, so the archive structure itself
+enforces the public command rename.
 
 The build phase uses isolated `HOME`, Cargo, Rustup, and XDG cache directories,
 sets `CARGO_NET_OFFLINE` through the canonical builder, and restricts `PATH` so
 host Rust, Cargo, rustup, Node, npm, Clang, LLVM, and Zig cannot be resolved.
 The managed bundle is the only compiler input. An external hello fixture is
 built twice, the generated `service.pvm` is executed with `jams run`, and
-the two artifact hashes must match.
+the two artifact hashes must match. On macOS this also proves that the native
+Builder can link against the Apple SDK / Command Line Tools ABI boundary.
 
 The script writes a machine-readable result:
 

@@ -7,3 +7,8 @@ if rg -n 'playground\.minijam\.xyz|VITE_PLAYGROUND|PLAYGROUND_API_URL|/api/v1/bu
   exit 1
 fi
 
+if rg -n '/api/v1/services|/api/v1/actions/prepare|/api/v1/operations|provision-service' \
+  "$root/scripts/minijam-network-e2e.sh"; then
+  echo "Canonical MiniJAM E2E still uses the legacy Playground lifecycle" >&2
+  exit 1
+fi
