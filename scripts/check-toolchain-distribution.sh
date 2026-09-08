@@ -6,6 +6,10 @@ python3 tools/release/test-write-release-manifest.py
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${ROOT}"
+command -v rg >/dev/null 2>&1 || {
+  echo "ripgrep is required for distribution checks" >&2
+  exit 1
+}
 
 # The compiler and release gates must remain self-contained. The manually
 # triggered MiniJAM compatibility workflow is intentionally outside this set.

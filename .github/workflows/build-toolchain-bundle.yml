@@ -380,7 +380,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          brew install zstd jq
+          brew install zstd jq ripgrep
           node --version
           zstd --version | head -1
 

@@ -131,7 +131,7 @@ jobs:
           toolchain: nightly-2026-05-02
           components: rust-src
       - name: Install macOS release tools
-        run: brew install zstd jq
+        run: brew install zstd jq ripgrep
       - name: Install locked ScriptC packages
         working-directory: toolchains/scriptc
         run: npm ci --ignore-scripts --no-audit --no-fund

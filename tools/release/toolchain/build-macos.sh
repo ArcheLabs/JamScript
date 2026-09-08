@@ -25,6 +25,8 @@ LLVM_READELF_BIN="${LLVM_ROOT}/bin/llvm-readelf"
 RUSTC_BIN="${JAMSCRIPT_RUSTC:-$(rustup which rustc --toolchain nightly-2026-05-02)}"
 CARGO_BIN="${JAMSCRIPT_CARGO:-$(rustup which cargo --toolchain nightly-2026-05-02)}"
 command -v zstd >/dev/null 2>&1 || { echo "zstd is required only by release engineering to package the toolchain" >&2; exit 1; }
+command -v otool >/dev/null 2>&1 || { echo "otool is required to verify macOS runtime dependencies" >&2; exit 1; }
+command -v install_name_tool >/dev/null 2>&1 || { echo "install_name_tool is required to repair macOS runtime paths" >&2; exit 1; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -109,6 +111,16 @@ directory = "cargo/vendor"
 EOF
 
 copy_tree "${RUST_SYSROOT}/lib/rustlib" lib/rustlib
+while IFS= read -r runtime_library; do
+  copy_file "${runtime_library}" "lib/$(basename -- "${runtime_library}")"
+done < <(
+  find "${RUST_SYSROOT}/lib" \
+    -type d ! -path "${RUST_SYSROOT}/lib" -prune -o \
+    \( -type f -o -type l \) \
+    -name '*.dylib*' \
+    -print |
+  sort
+)
 test -d "${RUST_SYSROOT}/share" && copy_tree "${RUST_SYSROOT}/share" share || true
 
 for binary in "${NODE_BIN}" "${CLANG_BIN}" "${LLVM_AR_BIN}" "${LLD_BIN}" "${LLVM_READELF_BIN}" "${RUSTC_BIN}" "${CARGO_BIN}"; do
@@ -118,6 +130,94 @@ for binary in "${NODE_BIN}" "${CLANG_BIN}" "${LLVM_AR_BIN}" "${LLD_BIN}" "${LLVM
     exit 1
   }
 done
+
+ensure_bundle_rpath() {
+  local binary="$1"
+  if ! otool -l "${binary}" | grep -F 'path @executable_path/../lib' >/dev/null; then
+    install_name_tool -add_rpath '@executable_path/../lib' "${binary}"
+  fi
+}
+
+# Rust's macOS binaries use @rpath for the compiler runtime. Keep the
+# relocation self-contained even if a future Rust release omits the standard
+# rustup rpath from one of its binaries or dylibs.
+ensure_bundle_rpath "${STAGE}/bin/rustc"
+ensure_bundle_rpath "${STAGE}/bin/cargo"
+while IFS= read -r runtime_library; do
+  ensure_bundle_rpath "${runtime_library}"
+done < <(
+  find "${STAGE}/lib" \
+    -type d ! -path "${STAGE}/lib" -prune -o \
+    -type f -name '*.dylib*' -print |
+  sort
+)
+
+verify_macos_dependency_closure() {
+  local consumer="$1"
+  local dependency relative resolved
+  while IFS= read -r dependency; do
+    [[ -n "${dependency}" ]] || continue
+    case "${dependency}" in
+      /usr/lib/*|/System/Library/*)
+        ;;
+      @rpath/*)
+        relative="${dependency#@rpath/}"
+        test -f "${STAGE}/lib/${relative}" || {
+          echo "missing bundle @rpath dependency: ${dependency} (from ${consumer})" >&2
+          exit 1
+        }
+        ;;
+      @loader_path/*)
+        relative="${dependency#@loader_path/}"
+        resolved="$(dirname -- "${consumer}")/${relative}"
+        test -f "${resolved}" || {
+          echo "missing bundle @loader_path dependency: ${dependency} (from ${consumer})" >&2
+          exit 1
+        }
+        ;;
+      @executable_path/*)
+        relative="${dependency#@executable_path/}"
+        resolved="${STAGE}/bin/${relative}"
+        test -f "${resolved}" || {
+          echo "missing bundle @executable_path dependency: ${dependency} (from ${consumer})" >&2
+          exit 1
+        }
+        ;;
+      *)
+        echo "non-relocatable macOS dependency: ${dependency} (from ${consumer})" >&2
+        exit 1
+        ;;
+    esac
+  done < <(otool -L "${consumer}" | awk 'NR > 1 {print $1}')
+}
+
+for binary in "${STAGE}/bin/node" "${STAGE}/bin/clang" "${STAGE}/bin/llvm-ar" \
+  "${STAGE}/bin/ld.lld" "${STAGE}/bin/llvm-readelf" "${STAGE}/bin/rustc" "${STAGE}/bin/cargo"; do
+  verify_macos_dependency_closure "${binary}"
+done
+while IFS= read -r runtime_library; do
+  verify_macos_dependency_closure "${runtime_library}"
+done < <(
+  find "${STAGE}/lib" \
+    -type d ! -path "${STAGE}/lib" -prune -o \
+    -type f -name '*.dylib*' -print |
+  sort
+)
+echo "STAGED_DEPENDENCY_CLOSURE=PASS"
+
+staged_version_gate() {
+  local name="$1" binary="$2"
+  env -i HOME="${HOME}" PATH="/usr/bin:/bin" "${binary}" --version >/dev/null
+  echo "${name}=PASS"
+}
+
+staged_version_gate STAGED_NODE "${STAGE}/bin/node"
+staged_version_gate STAGED_CLANG "${STAGE}/bin/clang"
+staged_version_gate STAGED_LLVM_AR "${STAGE}/bin/llvm-ar"
+staged_version_gate STAGED_LLD "${STAGE}/bin/ld.lld"
+staged_version_gate STAGED_LLVM_READELF "${STAGE}/bin/llvm-readelf"
+staged_version_gate STAGED_RUSTC "${STAGE}/bin/rustc"
+staged_version_gate STAGED_CARGO "${STAGE}/bin/cargo"
 
 clang_sha256="$(sha256_file "${CLANG_BIN}")"
 llvm_ar_sha256="$(sha256_file "${LLVM_AR_BIN}")"
