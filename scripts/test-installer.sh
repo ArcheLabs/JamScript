@@ -4,17 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-stage='bootstrap'
-report_failure() {
-  local status=$?
-  printf '::error title=Installer test failure::stage=%s command=%s status=%s\n' \
-    "$stage" "$BASH_COMMAND" "$status"
-  exit "$status"
-}
-trap report_failure ERR
 
 version='v0.1.0-rc.1'
-stage='platform detection'
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64) platform='linux-x86_64' ;;
   Darwin:arm64) platform='macos-arm64' ;;
@@ -28,6 +19,7 @@ bin_dir="${tmp}/bin"
 log_file="${tmp}/jams.log"
 fake_bin="${tmp}/fake-bin"
 mkdir -p "$asset_dir" "$fixture_dir" "$home_dir" "$bin_dir"
+canonical_bin_dir="$(cd "$bin_dir" && pwd -P)"
 test_path="$PATH"
 
 sha256_file() {
@@ -114,7 +106,6 @@ assert_log_contains() {
 }
 
 # I1, I10, I11, I12: supported-native success, executable installation, and CLI calls.
-stage='initial installation'
 make_archive
 : > "$log_file"
 run_install > "${tmp}/success.out"
@@ -122,13 +113,12 @@ test -x "${bin_dir}/jams"
 assert_log_contains 'toolchain install'
 assert_log_contains 'doctor'
 if PATH="$test_path" command -v jams >/dev/null 2>&1; then
-  ! grep -Fq "  export PATH=\"${bin_dir}:\$PATH\"" "${tmp}/success.out"
+  ! grep -Fq "  export PATH=\"${canonical_bin_dir}:\$PATH\"" "${tmp}/success.out"
 else
-  grep -Fqx "  export PATH=\"${bin_dir}:\$PATH\"" "${tmp}/success.out"
+  grep -Fqx "  export PATH=\"${canonical_bin_dir}:\$PATH\"" "${tmp}/success.out"
 fi
 
 # The default destination is HOME/.local/bin.
-stage='default installation directory'
 HOME="$home_dir" PATH="$test_path" JAMSCRIPT_INSTALL_TEST=1 JAMSCRIPT_INSTALL_TEST_ASSET_DIR="$asset_dir" \
   JAMSCRIPT_TEST_LOG="$log_file" bash "$ROOT/install.sh" --version "$version" >/dev/null
 test -x "${home_dir}/.local/bin/jams"
@@ -136,7 +126,6 @@ test -x "${home_dir}/.local/bin/jams"
 mkdir -p "$fake_bin"
 
 # I2: unsupported OS.
-stage='unsupported operating system rejection'
 cat > "${fake_bin}/uname" <<'FAKE'
 #!/usr/bin/env bash
 if [[ "$1" == '-s' ]]; then printf 'Darwin\n'; else printf 'x86_64\n'; fi
@@ -147,7 +136,6 @@ run_expect_failure env PATH="$fake_bin:$test_path" HOME="$home_dir" \
   JAMSCRIPT_TEST_LOG="$log_file" bash "$ROOT/install.sh" --version "$version" --bin-dir "$bin_dir"
 
 # I3: unsupported architecture.
-stage='unsupported architecture rejection'
 cat > "${fake_bin}/uname" <<'FAKE'
 #!/usr/bin/env bash
 if [[ "$1" == '-s' ]]; then printf 'Linux\n'; else printf 'aarch64\n'; fi
@@ -159,17 +147,14 @@ run_expect_failure env PATH="$fake_bin:$test_path" HOME="$home_dir" \
 rm -f "${fake_bin}/uname"
 
 # I4 and I5: required and validated release versions.
-stage='release version validation'
 run_expect_failure env HOME="$home_dir" bash "$ROOT/install.sh" --bin-dir "$bin_dir"
 run_expect_failure env HOME="$home_dir" bash "$ROOT/install.sh" --version 'v0.1.0/rc.1' --bin-dir "$bin_dir"
 
 # I6: checksum entry is required.
-stage='missing checksum rejection'
 make_archive success missing
 run_expect_failure run_install
 
 # I7: checksum mismatch is rejected.
-stage='checksum mismatch rejection'
 make_archive success incorrect
 printf 'old CLI\n' > "${bin_dir}/jams"
 chmod 0755 "${bin_dir}/jams"
@@ -177,23 +162,19 @@ run_expect_failure run_install
 grep -qx 'old CLI' "${bin_dir}/jams"
 
 # I8: archive structure requires jams.
-stage='missing jams rejection'
 make_archive missing-jams
 run_expect_failure run_install
 
 # I9: legacy jamscript is forbidden.
-stage='legacy executable rejection'
 make_archive legacy-jamscript
 run_expect_failure run_install
 
 # I13: doctor failure leaves the verified CLI in place and fails overall.
-stage='doctor failure handling'
 make_archive
 JAMSCRIPT_TEST_DOCTOR_FAIL=1 run_expect_failure run_install
 test -x "${bin_dir}/jams"
 
 # I14: reinstall is idempotent.
-stage='idempotent reinstall'
 make_archive
 : > "$log_file"
 run_install >/dev/null
@@ -202,7 +183,6 @@ test "$(grep -c '^toolchain install$' "$log_file")" -eq 2
 test "$(grep -c '^doctor$' "$log_file")" -eq 2
 
 # I15: a download/source failure preserves the existing CLI.
-stage='source failure handling'
 printf 'stable CLI\n' > "${bin_dir}/jams"
 chmod 0755 "${bin_dir}/jams"
 rm -f "${asset_dir}/${asset}"
@@ -210,7 +190,6 @@ run_expect_failure run_install
 grep -qx 'stable CLI' "${bin_dir}/jams"
 
 # I16: custom bin directory.
-stage='custom installation directory'
 custom_bin="${tmp}/custom-bin"
 make_archive
 HOME="$home_dir" PATH="$test_path" JAMSCRIPT_INSTALL_TEST=1 JAMSCRIPT_INSTALL_TEST_ASSET_DIR="$asset_dir" \
