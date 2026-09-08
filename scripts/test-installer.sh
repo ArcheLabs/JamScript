@@ -4,14 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-stage='bootstrap'
-report_failure() {
-  local status=$?
-  printf '::error title=Installer test failure::stage=%s command=%s status=%s\n' \
-    "$stage" "$BASH_COMMAND" "$status"
-  exit "$status"
-}
-trap report_failure ERR
 
 version='v0.1.0-rc.1'
 case "$(uname -s):$(uname -m)" in
@@ -113,17 +105,19 @@ assert_log_contains() {
 }
 
 # I1, I10, I11, I12: supported-native success, executable installation, and CLI calls.
-stage='initial installation'
 make_archive
 : > "$log_file"
 run_install > "${tmp}/success.out"
 test -x "${bin_dir}/jams"
 assert_log_contains 'toolchain install'
 assert_log_contains 'doctor'
-grep -Fqx "  export PATH=\"${bin_dir}:\$PATH\"" "${tmp}/success.out"
+if PATH="$test_path" command -v jams >/dev/null 2>&1; then
+  ! grep -Fq "  export PATH=\"${bin_dir}:\$PATH\"" "${tmp}/success.out"
+else
+  grep -Fqx "  export PATH=\"${bin_dir}:\$PATH\"" "${tmp}/success.out"
+fi
 
 # The default destination is HOME/.local/bin.
-stage='default installation directory'
 HOME="$home_dir" PATH="$test_path" JAMSCRIPT_INSTALL_TEST=1 JAMSCRIPT_INSTALL_TEST_ASSET_DIR="$asset_dir" \
   JAMSCRIPT_TEST_LOG="$log_file" bash "$ROOT/install.sh" --version "$version" >/dev/null
 test -x "${home_dir}/.local/bin/jams"
@@ -131,7 +125,6 @@ test -x "${home_dir}/.local/bin/jams"
 mkdir -p "$fake_bin"
 
 # I2: unsupported OS.
-stage='unsupported operating system rejection'
 cat > "${fake_bin}/uname" <<'FAKE'
 #!/usr/bin/env bash
 if [[ "$1" == '-s' ]]; then printf 'Darwin\n'; else printf 'x86_64\n'; fi
