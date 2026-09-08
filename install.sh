@@ -89,9 +89,9 @@ release_base="https://github.com/${INSTALLER_REPOSITORY}/releases/download/${ver
 tmp="$(mktemp -d)"
 new_path=''
 cleanup() {
-  rm -rf -- "$tmp"
+  rm -rf "$tmp"
   if [[ -n "$new_path" ]]; then
-    rm -f -- "$new_path"
+    rm -f "$new_path"
   fi
 }
 trap cleanup EXIT
@@ -101,8 +101,8 @@ checksums_path="${tmp}/SHA256SUMS"
 if [[ -n "$test_asset_dir" ]]; then
   test -f "${test_asset_dir}/${asset}" || fail "test asset is missing: ${asset}"
   test -f "${test_asset_dir}/SHA256SUMS" || fail 'test asset is missing: SHA256SUMS'
-  install -m 0644 -- "${test_asset_dir}/${asset}" "$archive_path"
-  install -m 0644 -- "${test_asset_dir}/SHA256SUMS" "$checksums_path"
+  install -m 0644 "${test_asset_dir}/${asset}" "$archive_path"
+  install -m 0644 "${test_asset_dir}/SHA256SUMS" "$checksums_path"
 else
   curl --fail --location --retry 3 --silent --show-error \
     --output "$archive_path" "${release_base}/${asset}"
@@ -111,7 +111,7 @@ else
 fi
 
 checksum="$(awk -v target="$asset" '
-  NF == 2 && $1 ~ /^[[:xdigit:]]{64}$/ {
+  NF == 2 && length($1) == 64 && $1 ~ /^[[:xdigit:]]+$/ {
     name = $2
     sub(/^\*/, "", name)
     if (name == target) {
@@ -142,19 +142,19 @@ actual_checksum="$(sha256_file "$archive_path")"
 [[ "$actual_checksum" == "$checksum" ]] || fail "SHA-256 mismatch for ${asset}"
 
 extract="${tmp}/extract"
-mkdir -p -- "$extract"
+mkdir -p "$extract"
 tar -xzf "$archive_path" -C "$extract"
 test -x "$extract/jams" || fail 'release archive does not contain an executable jams'
 test -f "$extract/LICENSE" || fail 'release archive does not contain LICENSE'
 test -f "$extract/README.md" || fail 'release archive does not contain README.md'
 test ! -e "$extract/jamscript" || fail 'legacy jamscript executable unexpectedly present'
 
-mkdir -p -- "$bin_dir"
-bin_dir="$(cd -- "$bin_dir" && pwd -P)"
+mkdir -p "$bin_dir"
+bin_dir="$(cd "$bin_dir" && pwd -P)"
 installed_jams="${bin_dir}/jams"
 new_path="${bin_dir}/.jams.new.$$"
-install -m 0755 -- "$extract/jams" "$new_path"
-mv -f -- "$new_path" "$installed_jams"
+install -m 0755 "$extract/jams" "$new_path"
+mv -f "$new_path" "$installed_jams"
 new_path=''
 
 printf 'JamScript installer\nRelease:  %s\nPlatform: %s\n\n' "$version" "$platform"

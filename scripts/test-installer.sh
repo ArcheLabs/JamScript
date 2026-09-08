@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 tmp="$(mktemp -d)"
-trap 'rm -rf -- "$tmp"' EXIT
+trap 'rm -rf "$tmp"' EXIT
 
 version='v0.1.0-rc.1'
 case "$(uname -s):$(uname -m)" in
@@ -53,7 +53,7 @@ FIXTURE
 make_archive() {
   local mode="${1:-success}"
   local checksum_mode="${2:-correct}"
-  rm -rf -- "$asset_dir" "$fixture_dir"
+  rm -rf "$asset_dir" "$fixture_dir"
   mkdir -p "$asset_dir" "$fixture_dir"
   write_fixture_cli
   printf 'fixture license\n' > "${fixture_dir}/LICENSE"
@@ -63,7 +63,7 @@ make_archive() {
     chmod 0755 "${fixture_dir}/jamscript"
   fi
   if [[ "$mode" == 'missing-jams' ]]; then
-    rm -f -- "${fixture_dir}/jams"
+    rm -f "${fixture_dir}/jams"
   fi
   (cd "$fixture_dir" && tar -czf "${asset_dir}/${asset}" .)
   case "$checksum_mode" in
@@ -139,7 +139,7 @@ chmod 0755 "${fake_bin}/uname"
 run_expect_failure env PATH="$fake_bin:$test_path" HOME="$home_dir" \
   JAMSCRIPT_INSTALL_TEST=1 JAMSCRIPT_INSTALL_TEST_ASSET_DIR="$asset_dir" \
   JAMSCRIPT_TEST_LOG="$log_file" bash "$ROOT/install.sh" --version "$version" --bin-dir "$bin_dir"
-rm -f -- "${fake_bin}/uname"
+rm -f "${fake_bin}/uname"
 
 # I4 and I5: required and validated release versions.
 run_expect_failure env HOME="$home_dir" bash "$ROOT/install.sh" --bin-dir "$bin_dir"
@@ -180,7 +180,7 @@ test "$(grep -c '^doctor$' "$log_file")" -eq 2
 # I15: a download/source failure preserves the existing CLI.
 printf 'stable CLI\n' > "${bin_dir}/jams"
 chmod 0755 "${bin_dir}/jams"
-rm -f -- "${asset_dir}/${asset}"
+rm -f "${asset_dir}/${asset}"
 run_expect_failure run_install
 grep -qx 'stable CLI' "${bin_dir}/jams"
 
