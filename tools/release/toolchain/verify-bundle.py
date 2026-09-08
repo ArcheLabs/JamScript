@@ -104,8 +104,16 @@ expected_llvm = {
     "llvmArSha256": llvm_lock_values["llvm_ar_sha256"],
     "ldLldSha256": llvm_lock_values["ld_lld_sha256"],
 }
-for key in ("clangSha256", "llvmArSha256", "ldLldSha256"):
-    if llvm_lock_values[key.replace("Sha256", "_sha256")] == "0" * 64:
+llvm_digest_lock_keys = {
+    "clangSha256": "clang_sha256",
+    "llvmArSha256": "llvm_ar_sha256",
+    "ldLldSha256": "ld_lld_sha256",
+}
+llvm_digest_manifest_keys = {
+    lock_key: manifest_key for manifest_key, lock_key in llvm_digest_lock_keys.items()
+}
+for key, lock_key in llvm_digest_lock_keys.items():
+    if llvm_lock_values[lock_key] == "0" * 64:
         if platform != "macos-arm64" or not re.fullmatch(r"[0-9a-f]{64}", manifest_llvm.get(key, "")):
             raise SystemExit(f"unmeasured LLVM binary digest is not allowed for {platform}: {key}")
         expected_llvm[key] = manifest_llvm[key]
@@ -166,7 +174,7 @@ for name in required_directories:
 for name, key in (("bin/clang", "clang_sha256"), ("bin/llvm-ar", "llvm_ar_sha256"), ("bin/ld.lld", "ld_lld_sha256")):
     expected_hash = llvm_lock_values[key]
     if expected_hash == "0" * 64:
-        expected_hash = manifest_llvm[key.replace("_sha256", "Sha256")]
+        expected_hash = manifest_llvm[llvm_digest_manifest_keys[key]]
     if sha256(root / name) != expected_hash:
         raise SystemExit(f"LLVM binary lock hash mismatch: {name}")
 
