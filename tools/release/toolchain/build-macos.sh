@@ -26,7 +26,6 @@ RUSTC_BIN="${JAMSCRIPT_RUSTC:-$(rustup which rustc --toolchain nightly-2026-05-0
 CARGO_BIN="${JAMSCRIPT_CARGO:-$(rustup which cargo --toolchain nightly-2026-05-02)}"
 command -v zstd >/dev/null 2>&1 || { echo "zstd is required only by release engineering to package the toolchain" >&2; exit 1; }
 command -v otool >/dev/null 2>&1 || { echo "otool is required to verify macOS runtime dependencies" >&2; exit 1; }
-command -v install_name_tool >/dev/null 2>&1 || { echo "install_name_tool is required to repair macOS runtime paths" >&2; exit 1; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -131,78 +130,147 @@ for binary in "${NODE_BIN}" "${CLANG_BIN}" "${LLVM_AR_BIN}" "${LLD_BIN}" "${LLVM
   }
 done
 
-ensure_bundle_rpath() {
+macos_rpaths() {
   local binary="$1"
-  if ! otool -l "${binary}" | grep -F 'path @executable_path/../lib' >/dev/null; then
-    install_name_tool -add_rpath '@executable_path/../lib' "${binary}"
-  fi
+  otool -l "${binary}" | awk '
+    $1 == "cmd" { in_rpath = ($2 == "LC_RPATH"); next }
+    in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+  '
 }
 
-# Rust's macOS binaries use @rpath for the compiler runtime. Keep the
-# relocation self-contained even if a future Rust release omits the standard
-# rustup rpath from one of its binaries or dylibs.
-ensure_bundle_rpath "${STAGE}/bin/rustc"
-ensure_bundle_rpath "${STAGE}/bin/cargo"
-while IFS= read -r runtime_library; do
-  ensure_bundle_rpath "${runtime_library}"
-done < <(
-  find "${STAGE}/lib" \
-    -type d ! -path "${STAGE}/lib" -prune -o \
-    -type f -name '*.dylib*' -print |
-  sort
-)
+macos_bundle_file() {
+  local candidate="$1"
+  local candidate_dir normalized
+  test -f "${candidate}" || return 1
+  candidate_dir="$(cd -- "$(dirname -- "${candidate}")" && pwd -P)" || return 1
+  normalized="${candidate_dir}/$(basename -- "${candidate}")"
+  case "${normalized}" in
+    "${STAGE}"/*) printf '%s\n' "${normalized}" ;;
+    *) return 1 ;;
+  esac
+}
 
+macos_expand_load_path() {
+  local load_path="$1"
+  local consumer="$2"
+  local executable="$3"
+  case "${load_path}" in
+    @loader_path/*) printf '%s\n' "$(dirname -- "${consumer}")/${load_path#@loader_path/}" ;;
+    @executable_path/*) printf '%s\n' "$(dirname -- "${executable}")/${load_path#@executable_path/}" ;;
+    /*) printf '%s\n' "${load_path}" ;;
+    *) return 1 ;;
+  esac
+}
+
+macos_resolve_rpath_dependency() {
+  local dependency="$1"
+  local consumer="$2"
+  local executable="$3"
+  local relative="${dependency#@rpath/}"
+  local rpath candidate resolved
+
+  while IFS= read -r rpath; do
+    [[ -n "${rpath}" ]] || continue
+    candidate="$(macos_expand_load_path "${rpath}" "${consumer}" "${executable}")/${relative}" || continue
+    if resolved="$(macos_bundle_file "${candidate}")"; then
+      printf '%s\n' "${resolved}"
+      return 0
+    fi
+  done < <(macos_rpaths "${consumer}")
+
+  # A dylib can rely on the run-path entries carried by the executable that
+  # loaded it. Check that context as well, without accepting arbitrary paths.
+  if [[ "${consumer}" != "${executable}" ]]; then
+    while IFS= read -r rpath; do
+      [[ -n "${rpath}" ]] || continue
+      candidate="$(macos_expand_load_path "${rpath}" "${executable}" "${executable}")/${relative}" || continue
+      if resolved="$(macos_bundle_file "${candidate}")"; then
+        printf '%s\n' "${resolved}"
+        return 0
+      fi
+    done < <(macos_rpaths "${executable}")
+  fi
+  return 1
+}
+
+macos_install_id() {
+  local dylib="$1"
+  otool -D "${dylib}" 2>/dev/null | awk 'NR == 2 {print $1; exit}' || true
+}
+
+declare -a MACOS_SEEN_DEPENDENCIES=()
 verify_macos_dependency_closure() {
   local consumer="$1"
-  local dependency relative resolved
+  local executable="$2"
+  local seen seen_key dependency install_id relative resolved dependencies
+
+  seen_key="${consumer}|${executable}"
+  for seen in "${MACOS_SEEN_DEPENDENCIES[@]}"; do
+    [[ "${seen}" == "${seen_key}" ]] && return 0
+  done
+  MACOS_SEEN_DEPENDENCIES+=("${seen_key}")
+
+  dependencies="$(otool -L "${consumer}")" || {
+    echo "unable to inspect Mach-O dependencies: ${consumer}" >&2
+    exit 1
+  }
+  install_id="$(macos_install_id "${consumer}")"
   while IFS= read -r dependency; do
     [[ -n "${dependency}" ]] || continue
+    # For a dylib, otool -L includes its LC_ID_DYLIB as the first listed
+    # image. Exclude that exact install ID; do not infer from its basename.
+    [[ -n "${install_id}" && "${dependency}" == "${install_id}" ]] && continue
+
+    resolved=""
     case "${dependency}" in
       /usr/lib/*|/System/Library/*)
+        continue
         ;;
       @rpath/*)
-        relative="${dependency#@rpath/}"
-        test -f "${STAGE}/lib/${relative}" || {
+        resolved="$(macos_resolve_rpath_dependency "${dependency}" "${consumer}" "${executable}")" || {
           echo "missing bundle @rpath dependency: ${dependency} (from ${consumer})" >&2
           exit 1
         }
         ;;
       @loader_path/*)
         relative="${dependency#@loader_path/}"
-        resolved="$(dirname -- "${consumer}")/${relative}"
-        test -f "${resolved}" || {
+        resolved="$(macos_bundle_file "$(dirname -- "${consumer}")/${relative}")" || {
           echo "missing bundle @loader_path dependency: ${dependency} (from ${consumer})" >&2
           exit 1
         }
         ;;
       @executable_path/*)
         relative="${dependency#@executable_path/}"
-        resolved="${STAGE}/bin/${relative}"
-        test -f "${resolved}" || {
+        resolved="$(macos_bundle_file "$(dirname -- "${executable}")/${relative}")" || {
           echo "missing bundle @executable_path dependency: ${dependency} (from ${consumer})" >&2
           exit 1
         }
         ;;
-      *)
+      /*)
         echo "non-relocatable macOS dependency: ${dependency} (from ${consumer})" >&2
         exit 1
         ;;
+      *)
+        echo "unsupported macOS dependency path: ${dependency} (from ${consumer})" >&2
+        exit 1
+        ;;
     esac
-  done < <(otool -L "${consumer}" | awk 'NR > 1 {print $1}')
+    verify_macos_dependency_closure "${resolved}" "${executable}"
+  done < <(awk 'NR > 1 {print $1}' <<<"${dependencies}")
 }
 
-for binary in "${STAGE}/bin/node" "${STAGE}/bin/clang" "${STAGE}/bin/llvm-ar" \
-  "${STAGE}/bin/ld.lld" "${STAGE}/bin/llvm-readelf" "${STAGE}/bin/rustc" "${STAGE}/bin/cargo"; do
-  verify_macos_dependency_closure "${binary}"
-done
-while IFS= read -r runtime_library; do
-  verify_macos_dependency_closure "${runtime_library}"
-done < <(
-  find "${STAGE}/lib" \
-    -type d ! -path "${STAGE}/lib" -prune -o \
-    -type f -name '*.dylib*' -print |
-  sort
+declare -a MACOS_ROOT_BINARIES=(
+  "${STAGE}/bin/node"
+  "${STAGE}/bin/clang"
+  "${STAGE}/bin/llvm-ar"
+  "${STAGE}/bin/ld.lld"
+  "${STAGE}/bin/llvm-readelf"
+  "${STAGE}/bin/rustc"
+  "${STAGE}/bin/cargo"
 )
+for binary in "${MACOS_ROOT_BINARIES[@]}"; do
+  verify_macos_dependency_closure "${binary}" "${binary}"
+done
 echo "STAGED_DEPENDENCY_CLOSURE=PASS"
 
 staged_version_gate() {
