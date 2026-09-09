@@ -5,17 +5,27 @@ on:
     branches:
       - main
       - codex/toolchain-distribution-v1
+    paths:
+      - '.github/workflows/build-toolchain-bundle.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'scripts/release/**'
+      - 'scripts/check-toolchain-distribution.sh'
+      - 'toolchains/**'
+      - 'tools/release/**'
   pull_request:
     paths:
       - '.github/workflows/build-toolchain-bundle.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - 'rust-toolchain.toml'
       - 'crates/**'
       - 'scripts/release/**'
       - 'scripts/check-toolchain-distribution.sh'
       - 'toolchains/**'
-      - 'tools/release/*.py'
-      - 'tools/release/toolchain/**'
+      - 'tools/release/**'
   workflow_dispatch:
 
 permissions:
