@@ -57,6 +57,7 @@ export type BackendCapabilitiesV1 = {
   managedStateVersion: number;
   multiService: boolean;
   externalStateWitness: boolean;
+  dynamicPvmServices: boolean;
 };
 
 export class RpcError extends Error {

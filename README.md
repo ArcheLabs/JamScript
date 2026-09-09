@@ -88,9 +88,9 @@ canonical JAM target. JamScript manages its compiler toolchain automatically: th
 first canonical build installs the exact platform bundle and verifies its
 checksum. `build` emits `service.blob`,
 `service.polkavm`, `service.pvm`, and a portable Builder host artifact. The
-PVM guest and Builder artifact embed the same compiler-generated
-`ServiceApplication`; native imports use the same declared C sources compiled
-once for PolkaVM and once for the host.
+production backend consumes the linked `service.pvm` through its persistent
+PVM loader; the generated Builder artifact remains a legacy compatibility
+artifact and is not a backend deployment dependency.
 
 The v0 release boundary uses `SignedActionV1`: canonical bounded encoding,
 payload commitments, ServiceKey identity, domain-separated sr25519

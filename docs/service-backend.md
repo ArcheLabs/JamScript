@@ -14,17 +14,16 @@ The backend surface is one JSON-RPC endpoint. The core handler exposes:
 - `minijam_getManagedStateV1`
 - `jamscript_getPredictionV1`
 
-Registration validates the Service identity before binding its digest-addressed
-planner artifact. A `ServiceRegistrationValidator` implementation connects
-that check to canonical node metadata. `ApplicationArtifactLoader` is the
-portable loading boundary: a WASM/PVM/ScriptC loader can be supplied without
-compiling the backend daemon for a new Service.
+Registration discovers canonical Service metadata through `BackendNetwork` and
+binds the content-addressed PVM loader only after metadata and code-hash
+verification. See [`backend-pvm-runtime.md`](backend-pvm-runtime.md).
 
 Deployment can provision the backend after on-chain creation by configuring
-`backend_rpc` in the selected network (or `JAMSCRIPT_BACKEND_RPC`) and setting
-`JAMSCRIPT_BACKEND_ADMIN_TOKEN`. `jams deploy` records the chain deployment
-before attempting this separate registration call, so registration can be
-retried without recreating the Service.
+`backend_rpc` in the selected network (or `JAMSCRIPT_BACKEND_RPC`). `jams
+deploy` records the chain deployment before attempting the separate backend
+prewarm call, so a backend outage is reported independently and can be
+retried without recreating the Service. The normal path does not require an
+admin token.
 
 The backend builds proof witnesses only at the root reported by canonical
 Service storage. Refine receives external witnesses as read-only views and
@@ -36,6 +35,5 @@ The append-only recovery format is length-delimited and includes ServiceId
 and ServiceKey. Startup replay fails closed on truncation, oversized entries,
 malformed output, unknown Services, or identity mismatch.
 
-The older `tools/managed-state-network-adapter` remains a compatibility/test
-wrapper for the current MiniJAM generated Builder path. It should not be used
-as the public topology for dynamic multi-Service deployments.
+The older `tools/managed-state-network-adapter` is a legacy compatibility/test
+wrapper for the generated Builder path. It is not the production topology.

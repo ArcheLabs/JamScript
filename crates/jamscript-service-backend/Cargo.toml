@@ -6,11 +6,16 @@ license.workspace = true
 
 [dependencies]
 base64.workspace = true
+jam-program-blob-common.workspace = true
+jamscript-deployment = { path = "../jamscript-deployment" }
+jamscript-runtime-core = { path = "../jamscript-runtime-core" }
+polkavm.workspace = true
+polkavm-linker.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 service-runtime-core = { path = "../service-runtime-core" }
 service-runtime-host = { path = "../service-runtime-host" }
+service-runtime-state = { path = "../service-runtime-state" }
 
 [dev-dependencies]
-service-runtime-state = { path = "../service-runtime-state" }
 tempfile.workspace = true

@@ -505,7 +505,10 @@ fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Re
         instance
             .call_typed_and_get_result::<(), _>(&mut (), export, ())
             .map_err(|error| anyhow::anyhow!("PVM execution: {error:?}"))?;
-    } else if export == "minijam_refine" {
+    } else if matches!(
+        export,
+        "minijam_refine" | "jamscript_plan_v1" | "jamscript_backend_metadata_v1"
+    ) {
         instance
             .call_typed_and_get_result::<u64, _>(&mut (), export, ())
             .map_err(|error| anyhow::anyhow!("PVM execution: {error:?}"))?;
@@ -753,22 +756,17 @@ fn deploy(options: DeployOptions) -> Result<()> {
     let record = jamscript_deployment::write_deployment_record(&project_root, &result)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let backend_registration = if let Some(endpoint) = backend_rpc {
-        let token = std::env::var("JAMSCRIPT_BACKEND_ADMIN_TOKEN").map_err(|_| {
-            anyhow::anyhow!(
-                "ON_CHAIN_DEPLOYMENT=PASS for Service {}; backend registration requires JAMSCRIPT_BACKEND_ADMIN_TOKEN",
-                result.service_id
-            )
-        })?;
         Some(
-            register_backend_service(
+            match register_backend_service(
                 &CurlJsonRpcTransport,
                 &endpoint,
-                &token,
                 result.service_id,
                 &service_artifact,
                 timeout,
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            ) {
+                Ok(value) => serde_json::json!({"status": "PASS", "result": value}),
+                Err(error) => serde_json::json!({"status": "FAILED", "error": error.to_string()}),
+            },
         )
     } else {
         None
@@ -820,7 +818,16 @@ fn deploy(options: DeployOptions) -> Result<()> {
         println!(
             "\nBackend registration\n  {}",
             if backend_registration.is_some() {
-                "PASS"
+                if backend_registration
+                    .as_ref()
+                    .and_then(|value| value.get("status"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("PASS")
+                {
+                    "PASS"
+                } else {
+                    "FAILED (on-chain deployment remains finalized)"
+                }
             } else {
                 "not configured"
             }

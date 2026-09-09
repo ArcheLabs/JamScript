@@ -393,7 +393,12 @@ impl JamTarget {
             manifest_path: guest_project.path().join("Cargo.toml"),
             output_dir: backend_output,
             native_archives: archives,
-            required_exports: vec!["minijam_refine".into(), "minijam_accumulate".into()],
+            required_exports: vec![
+                "minijam_refine".into(),
+                "minijam_accumulate".into(),
+                "jamscript_plan_v1".into(),
+                "jamscript_backend_metadata_v1".into(),
+            ],
             require_relocations: true,
         })?;
         fs::copy(&artifacts.elf, output_dir.join("service.elf"))?;
@@ -471,6 +476,8 @@ pub fn elf_to_jam_blob(elf: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     config.set_dispatch_table(vec![
         b"minijam_refine".to_vec(),
         b"minijam_accumulate".to_vec(),
+        b"jamscript_plan_v1".to_vec(),
+        b"jamscript_backend_metadata_v1".to_vec(),
     ]);
     let linked =
         polkavm_linker::program_from_elf(config, polkavm_linker::TargetInstructionSet::JamV1, elf)

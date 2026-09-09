@@ -1,0 +1,18 @@
+FROM rust:1.88-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --release --bin jamscript-service-backend
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home jamscript
+COPY --from=build /src/target/release/jamscript-service-backend /usr/local/bin/jamscript-service-backend
+RUN mkdir -p /var/lib/jamscript && chown -R jamscript:jamscript /var/lib/jamscript
+USER jamscript
+ENV JAMSCRIPT_BACKEND_BIND=0.0.0.0:8090 \
+    JAMSCRIPT_BACKEND_DATA=/var/lib/jamscript
+EXPOSE 8090
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s CMD curl --fail --silent http://127.0.0.1:8090/healthz
+ENTRYPOINT ["/usr/local/bin/jamscript-service-backend"]

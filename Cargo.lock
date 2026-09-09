@@ -1998,6 +1998,11 @@ name = "jamscript-service-backend"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "jam-program-blob-common",
+ "jamscript-deployment",
+ "jamscript-runtime-core",
+ "polkavm",
+ "polkavm-linker",
  "serde",
  "serde_json",
  "service-runtime-core",
