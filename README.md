@@ -14,12 +14,15 @@ support contract.
 
 ## Quick install
 
-Linux x86_64 or macOS Apple Silicon:
+Choose an existing published version from the repository's GitHub Releases.
+The failed `v0.1.0-rc.2` tag is retained for provenance and has no release
+assets.
 
 ```bash
+VERSION='v0.1.0-rc.N'
 curl -fsSL \
-  https://raw.githubusercontent.com/ArcheLabs/JamScript/v0.1.0-rc.2/install.sh \
-  | bash -s -- --version v0.1.0-rc.2
+  "https://raw.githubusercontent.com/ArcheLabs/JamScript/${VERSION}/install.sh" \
+  | bash -s -- --version "${VERSION}"
 ```
 
 Then:

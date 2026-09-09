@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   TZ: UTC
   LANG: C
@@ -57,18 +61,18 @@ jobs:
       - name: Check release source locks
         run: |
           set -euo pipefail
-          cargo test --locked -p jamscript-toolchain
-          cargo test --locked -p jamscript-cli
-          cargo clippy --locked -p jamscript-toolchain -- -D warnings
-          ./scripts/check-toolchain-distribution.sh
-          python3 ./tools/release/toolchain/test-llvm-lock.py
+          ./scripts/release/check-release-source.sh \
+            --platform linux-x86_64
       - name: Bootstrap and verify locked Linux LLVM
         run: |
           set -euo pipefail
           out="${RUNNER_TEMP}/jamscript-llvm"
           ./tools/release/toolchain/bootstrap-llvm-linux.sh "${out}"
-          while IFS= read -r line; do echo "${line}" >> "${GITHUB_ENV}"; done < "${out}/llvm.env"
+          set -a
+          source "${out}/llvm.env"
+          set +a
           ./tools/release/toolchain/verify-llvm-linux.sh "${LLVM_ROOT}"
+          cat "${out}/llvm.env" >> "${GITHUB_ENV}"
       - name: Build, verify, and compare Linux bundles
         shell: bash
         run: |
@@ -138,15 +142,8 @@ jobs:
       - name: Check release source locks
         run: |
           set -euo pipefail
-          cargo test --locked -p jamscript-toolchain
-          cargo test --locked -p jamscript-cli
-          cargo clippy --locked -p jamscript-toolchain -- -D warnings
-          ./scripts/check-toolchain-distribution.sh
-          python3 ./tools/release/toolchain/test-llvm-lock.py
-          if grep -Eq '^(clang_sha256|llvm_ar_sha256|ld_lld_sha256) = "0{64}"$' toolchains/llvm/macos-arm64.lock; then
-            echo "macOS LLVM binary hashes must be promoted from a native measurement before release publication" >&2
-            exit 1
-          fi
+          ./scripts/release/check-release-source.sh \
+            --platform macos-arm64
       - name: Bootstrap and verify locked macOS LLVM
         shell: bash
         run: |
@@ -457,13 +454,34 @@ jobs:
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
           if gh release view "${tag}" >/dev/null 2>&1; then
-            echo "release already exists; immutable publication refuses replacement: ${tag}" >&2
-            exit 1
+            remote="${RUNNER_TEMP}/existing-release-assets"
+            mkdir -p "${remote}"
+            while IFS= read -r asset; do
+              gh release download "${tag}" --pattern "${asset}" --dir "${remote}"
+              test -f "${remote}/${asset}"
+              cmp -s "${RUNNER_TEMP}/release-assets/${asset}" "${remote}/${asset}" || {
+                echo "IMMUTABLE_RELEASE_ASSET=FAIL: ${asset}" >&2
+                exit 1
+              }
+            done < <(cd "${RUNNER_TEMP}/release-assets" && find . -maxdepth 1 -type f -printf '%f\n' | sort)
+            expected_assets="${RUNNER_TEMP}/expected-release-assets.txt"
+            actual_assets="${RUNNER_TEMP}/actual-release-assets.txt"
+            (cd "${RUNNER_TEMP}/release-assets" && find . -maxdepth 1 -type f -printf '%f\n' | sort) > "${expected_assets}"
+            (cd "${remote}" && find . -maxdepth 1 -type f -printf '%f\n' | sed 's#^\./##' | sort) > "${actual_assets}"
+            cmp -s "${expected_assets}" "${actual_assets}" || {
+              echo "IMMUTABLE_RELEASE_ASSET=FAIL: release asset set differs" >&2
+              exit 1
+            }
+            sha256sum -c "${remote}/SHA256SUMS"
+            echo "IMMUTABLE_RELEASE_PUBLICATION=PASS (existing bytes verified)"
+            exit 0
           fi
           args=("${tag}" --verify-tag --title "JamScript ${tag}" --notes "Immutable JamScript release assets for ${tag}.")
           if [[ "${tag}" == *-rc.* ]]; then args+=(--prerelease --latest=false); fi
-          gh release create "${args[@]}"
-          gh release upload "${tag}" "${RUNNER_TEMP}/release-assets"/*
+          for asset in "${RUNNER_TEMP}/release-assets"/*; do
+            test -f "${asset}"
+          done
+          gh release create "${args[@]}" "${RUNNER_TEMP}/release-assets"/*
           echo "IMMUTABLE_RELEASE_PUBLICATION=PASS"
 
   validate-published-linux:
@@ -535,5 +553,25 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Confirm both native published-byte gates
-        run: echo "RELEASE_READY=PASS"
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-kill-published-linux
+          path: ${{ runner.temp }}/published-linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-kill-published-macos
+          path: ${{ runner.temp }}/published-macos
+      - name: Confirm release and both native published-byte gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view "${tag}" >/dev/null
+          jq -e '.status == "PASS" and .gates.R2_managed_toolchain_published == true and .gates.R3_immutable_github_release == true and .gates.R4_published_artifact_validation == true' \
+            "${RUNNER_TEMP}/published-linux/release-kill-published-linux.json"
+          jq -e '.status == "PASS" and .gates.R2_managed_toolchain_published == true and .gates.R3_immutable_github_release == true and .gates.R4_published_artifact_validation == true' \
+            "${RUNNER_TEMP}/published-macos/release-kill-published-macos.json"
+          echo "RELEASE_READY=PASS"
