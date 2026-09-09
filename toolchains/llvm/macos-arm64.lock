@@ -11,10 +11,9 @@ clang_relpath = "bin/clang"
 llvm_ar_relpath = "bin/llvm-ar"
 lld_relpath = "bin/ld64.lld"
 
-# The official archive digest above is immutable. The executable digests are
-# deliberately left as an explicit native-measurement sentinel until the
-# macOS ARM64 producer runs on macos-15. bootstrap-llvm-macos.sh refuses to
-# publish a bundle until it has measured and verified these three values.
-clang_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-llvm_ar_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-ld_lld_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+# The official archive digest above is immutable. These executable digests
+# were measured on macos-15 arm64 from that archive for source commit
+# 24493c0c945f72489d0da939db2b113e4033d833.
+clang_sha256 = "44698f93798de0177959f17941dbd889ecd802fabd88124dbe86f5cfd93bc1ba"
+llvm_ar_sha256 = "ecf922aef2d4f4cebdbffaeea5694c90046459fb4f75cd6de9a5b3c0c94bb1c5"
+ld_lld_sha256 = "1c4bf27ee01e45977f8275b7e58d5105bacaa8ae7375270285169c264e217fd9"
