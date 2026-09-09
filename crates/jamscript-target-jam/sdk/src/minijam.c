@@ -144,18 +144,6 @@ minijam_status minijam_result(size_t index, void *output, size_t capacity,
   return fetched == item_size ? MINIJAM_OK : MINIJAM_HOST_ERROR;
 }
 
-minijam_status minijam_service_storage_read(uint32_t service_id,
-                                            const void *key, size_t key_size,
-                                            void *output, size_t capacity,
-                                            size_t *output_size) {
-  uint64_t length = minijam_host_call6(
-      MINIJAM_HOST_READ, (uint64_t)service_id, (uintptr_t)key, key_size,
-      (uintptr_t)output, 0, capacity);
-  if (length == MINIJAM_HOST_NONE) return MINIJAM_NOT_FOUND;
-  if (output_size) *output_size = (size_t)length;
-  return length > capacity ? MINIJAM_BUFFER_TOO_SMALL : MINIJAM_OK;
-}
-
 minijam_status minijam_storage_read(const void *key, size_t key_size,
                                     void *output, size_t capacity,
                                     size_t *output_size) {

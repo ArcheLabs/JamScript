@@ -59,6 +59,7 @@ pub struct NetworkConfig {
     pub kind: String,
     pub deployment_rpc: Option<String>,
     pub node_rpc: Option<String>,
+    pub backend_rpc: Option<String>,
     pub genesis_hash: Option<String>,
 }
 
@@ -76,6 +77,7 @@ pub struct NetworkOverrides {
     pub kind: Option<String>,
     pub deployment_rpc: Option<String>,
     pub node_rpc: Option<String>,
+    pub backend_rpc: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +86,7 @@ pub struct ResolvedNetwork {
     pub kind: NetworkKind,
     pub deployment_rpc: String,
     pub node_rpc: Option<String>,
+    pub backend_rpc: Option<String>,
     pub genesis_hash: Option<String>,
     pub genesis_pinned: bool,
 }
@@ -118,6 +121,9 @@ pub fn validate_networks(
                 validate_http_url(deployment_rpc, "deployment_rpc")?;
                 if let Some(node_rpc) = config.node_rpc.as_deref() {
                     validate_http_url(node_rpc, "node_rpc")?;
+                }
+                if let Some(backend_rpc) = config.backend_rpc.as_deref() {
+                    validate_http_url(backend_rpc, "backend_rpc")?;
                 }
                 if let Some(genesis_hash) = config.genesis_hash.as_deref() {
                     normalize_hash(genesis_hash).map_err(|error| {
@@ -174,6 +180,9 @@ pub fn resolve_network(
     if overrides.node_rpc.is_none() {
         overrides.node_rpc = std::env::var("JAMSCRIPT_NODE_RPC").ok();
     }
+    if overrides.backend_rpc.is_none() {
+        overrides.backend_rpc = std::env::var("JAMSCRIPT_BACKEND_RPC").ok();
+    }
     if overrides.kind.is_none() {
         overrides.kind = std::env::var("JAMSCRIPT_NETWORK_KIND").ok();
     }
@@ -221,6 +230,10 @@ pub fn resolve_network(
         .node_rpc
         .clone()
         .or_else(|| base.and_then(|value| value.node_rpc.clone()));
+    let backend_rpc = overrides
+        .backend_rpc
+        .clone()
+        .or_else(|| base.and_then(|value| value.backend_rpc.clone()));
     let genesis_hash = base
         .and_then(|value| value.genesis_hash.as_deref())
         .map(normalize_hash)
@@ -239,6 +252,9 @@ pub fn resolve_network(
             if let Some(value) = node_rpc.as_deref() {
                 validate_http_url(value, "node_rpc")?;
             }
+            if let Some(value) = backend_rpc.as_deref() {
+                validate_http_url(value, "backend_rpc")?;
+            }
             if genesis_hash.is_some() && node_rpc.is_none() {
                 return Err(DeploymentError::new(
                     ErrorCode::NetworkConfigInvalid,
@@ -250,6 +266,7 @@ pub fn resolve_network(
                 kind,
                 deployment_rpc,
                 node_rpc,
+                backend_rpc,
                 genesis_hash,
                 genesis_pinned: base.and_then(|value| value.genesis_hash.as_ref()).is_some(),
             })
@@ -1187,6 +1204,8 @@ pub enum ErrorCode {
     DeploymentCodeHashMismatch,
     #[error("DEPLOYMENT_OUTCOME_UNKNOWN")]
     DeploymentOutcomeUnknown,
+    #[error("BACKEND_REGISTRATION_FAILED")]
+    BackendRegistrationFailed,
     #[error("DEPLOYMENT_RECORD_WRITE_FAILED")]
     DeploymentRecordWriteFailed,
 }
@@ -1287,6 +1306,7 @@ mod tests {
             kind: NetworkKind::MiniJam,
             deployment_rpc: "http://deploy.test".into(),
             node_rpc: None,
+            backend_rpc: None,
             genesis_hash: None,
             genesis_pinned: false,
         }
@@ -1327,6 +1347,7 @@ mod tests {
                     kind: "minijam".into(),
                     deployment_rpc: Some("http://127.0.0.1:8090".into()),
                     node_rpc: None,
+                    backend_rpc: None,
                     genesis_hash: None,
                 },
             ),
@@ -1336,6 +1357,7 @@ mod tests {
                     kind: "minijam".into(),
                     deployment_rpc: Some("https://community.example".into()),
                     node_rpc: None,
+                    backend_rpc: None,
                     genesis_hash: None,
                 },
             ),
@@ -1371,6 +1393,7 @@ mod tests {
                     kind: "minijam".into(),
                     deployment_rpc: Some("http://local.example".into()),
                     node_rpc: None,
+                    backend_rpc: None,
                     genesis_hash: None,
                 },
             ),
@@ -1380,6 +1403,7 @@ mod tests {
                     kind: "minijam".into(),
                     deployment_rpc: Some("https://staging.example".into()),
                     node_rpc: Some("https://staging-node.example".into()),
+                    backend_rpc: Some("https://staging-backend.example".into()),
                     genesis_hash: None,
                 },
             ),
@@ -1391,6 +1415,7 @@ mod tests {
                 network: Some("staging".into()),
                 deployment_rpc: Some("http://operator.example".into()),
                 node_rpc: Some("http://operator-node.example".into()),
+                backend_rpc: Some("http://operator-backend.example".into()),
                 ..Default::default()
             },
         )
@@ -1400,6 +1425,10 @@ mod tests {
         assert_eq!(
             resolved.node_rpc.as_deref(),
             Some("http://operator-node.example")
+        );
+        assert_eq!(
+            resolved.backend_rpc.as_deref(),
+            Some("http://operator-backend.example")
         );
     }
 
@@ -1491,6 +1520,7 @@ mod tests {
                 kind: "jam".into(),
                 deployment_rpc: None,
                 node_rpc: None,
+                backend_rpc: None,
                 genesis_hash: None,
             },
         )]);

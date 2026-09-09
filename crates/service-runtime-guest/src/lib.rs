@@ -7,8 +7,9 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use service_runtime_core::StateDiffV1;
 use service_runtime_core::{
-    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ManagedStateAccess,
-    RuntimeRefineInputV1, RuntimeRefineOutputV1, ServiceApplication, StateAccessError,
+    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ExternalStateAccess,
+    ExternalStateDependencyV1, ManagedStateAccess, RuntimeRefineInputV1, RuntimeRefineOutputV1,
+    ServiceApplication, StateAccessError,
 };
 use service_runtime_state::ProofState;
 
@@ -464,7 +465,58 @@ type RefineTransition = (
     Vec<ActionReceiptV1>,
     StateDiffV1,
     Option<u64>,
+    Vec<ExternalStateDependencyV1>,
 );
+
+struct ExternalProofStates {
+    states: BTreeMap<u32, ProofState>,
+}
+
+impl ExternalProofStates {
+    fn from_input(
+        input: &[service_runtime_core::ExternalStateWitnessV1],
+    ) -> Result<Self, GuestError> {
+        let mut states = BTreeMap::new();
+        for witness in input {
+            if witness.managed_state.version != service_runtime_core::ManagedStateWitnessV1::VERSION
+                || states.contains_key(&witness.service_id)
+            {
+                return Err(GuestError::InvalidInput);
+            }
+            let mut state = ProofState::from_witness(
+                witness.managed_state.parent_root,
+                &witness.managed_state.storage_proof,
+            )
+            .map_err(|_| GuestError::State)?;
+            for key in &witness.managed_state.access_plan.keys {
+                ManagedStateAccess::get(&mut state, key).map_err(|_| GuestError::State)?;
+            }
+            states.insert(witness.service_id, state);
+        }
+        Ok(Self { states })
+    }
+}
+
+impl ExternalStateAccess for ExternalProofStates {
+    fn get(&mut self, service_id: u32, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
+        self.states
+            .get_mut(&service_id)
+            .ok_or(StateAccessError::Backend)?
+            .get(key)
+    }
+}
+
+fn external_dependencies(
+    witnesses: &[service_runtime_core::ExternalStateWitnessV1],
+) -> Vec<ExternalStateDependencyV1> {
+    witnesses
+        .iter()
+        .map(|witness| ExternalStateDependencyV1 {
+            service_id: witness.service_id,
+            state_root: witness.managed_state.parent_root,
+        })
+        .collect()
+}
 
 pub fn refine<A>(
     application: &A,
@@ -474,13 +526,14 @@ where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
 {
-    let (parent_root, new_root, receipts, diff, transition_valid_until) =
+    let (parent_root, new_root, receipts, diff, transition_valid_until, dependencies) =
         refine_internal(application, input)?;
-    RuntimeRefineOutputV1::from_diff_with_validity(
+    RuntimeRefineOutputV1::from_diff_with_dependencies_and_validity(
         parent_root,
         new_root,
         receipts,
         diff,
+        dependencies,
         transition_valid_until,
     )
     .map_err(|_| GuestError::State)
@@ -510,6 +563,7 @@ where
     {
         return Err(GuestError::InvalidInput);
     }
+    let mut external = ExternalProofStates::from_input(&input.external_state)?;
     let mut state = ProofState::from_witness(
         input.managed_state.parent_root,
         &input.managed_state.storage_proof,
@@ -525,10 +579,11 @@ where
         let action_hash = blake2_256(action);
         state.begin_transaction();
         let (result, action_valid_until) = {
-            let mut context = ExecutionContext::with_access_plan(
+            let mut context = ExecutionContext::with_access_plan_and_external_state(
                 &mut state,
                 None,
                 &input.managed_state.access_plan,
+                &mut external,
             );
             let result = application
                 .execute(&mut context, action)
@@ -601,6 +656,7 @@ where
         receipts,
         diff,
         transition_valid_until,
+        external_dependencies(&input.external_state),
     ))
 }
 
@@ -811,13 +867,14 @@ where
     A::Error: Into<StateAccessError>,
     O: RefineObserver,
 {
-    let (parent_root, new_root, receipts, diff, transition_valid_until) =
+    let (parent_root, new_root, receipts, diff, transition_valid_until, dependencies) =
         refine_internal_owned_with_observer(application, input, observer)?;
-    RuntimeRefineOutputV1::from_diff_with_validity(
+    RuntimeRefineOutputV1::from_diff_with_dependencies_and_validity(
         parent_root,
         new_root,
         receipts,
         diff,
+        dependencies,
         transition_valid_until,
     )
     .map_err(|_| GuestError::State)
@@ -836,6 +893,7 @@ where
     if input.version != 1 || input.managed_state.version != 1 {
         return Err(GuestError::InvalidInput);
     }
+    let mut external = ExternalProofStates::from_input(&input.external_state)?;
     let mut state = ProofState::from_witness_owned_with_observer(
         input.managed_state.parent_root,
         input.managed_state.storage_proof,
@@ -853,10 +911,11 @@ where
         state.begin_transaction();
         observer.stage(STAGE_APPLICATION);
         let (result, action_valid_until) = {
-            let mut context = ExecutionContext::with_access_plan(
+            let mut context = ExecutionContext::with_access_plan_and_external_state(
                 &mut state,
                 None,
                 &input.managed_state.access_plan,
+                &mut external,
             );
             let result = application
                 .execute(&mut context, action)
@@ -940,6 +999,7 @@ where
         receipts,
         diff,
         transition_valid_until,
+        external_dependencies(&input.external_state),
     ))
 }
 
@@ -954,7 +1014,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use service_runtime_core::{
-        ManagedStateWitnessV1, StateAccessPlanV1, StateChangeV1, StateDiffV1,
+        ManagedStateWitnessV1, StateAccessPlanV1, StateChangeV1, StateDiffV1, StateRecoveryV1,
     };
     use service_runtime_state::FullState;
 
@@ -1232,6 +1292,7 @@ mod tests {
                     .into_iter()
                     .collect(),
             },
+            external_state: Vec::new(),
             actions,
         }
     }
@@ -1249,6 +1310,7 @@ mod tests {
                 access_plan: StateAccessPlanV1::from_keys([b"a".as_slice(), b"b"]).unwrap(),
                 storage_proof: proof.into_nodes().into_iter().collect(),
             },
+            external_state: Vec::new(),
             actions: vec![b"fail".to_vec()],
         };
 
@@ -1293,6 +1355,7 @@ mod tests {
                 .unwrap(),
                 storage_proof: proof.into_nodes().into_iter().collect(),
             },
+            external_state: Vec::new(),
             actions: vec![b"fail-business".to_vec()],
         };
 
@@ -1330,6 +1393,7 @@ mod tests {
                 .unwrap(),
                 storage_proof: proof.into_nodes().into_iter().collect(),
             },
+            external_state: Vec::new(),
             actions: vec![b"native-fail".to_vec()],
         };
 

@@ -4,8 +4,9 @@ use jamscript_codegen_rust::{
     generate_builder_application_rust, ManagementPolicyConfig, PortableServiceContext,
 };
 use jamscript_deployment::{
-    load_service_artifact, redact_url, resolve_network, validate_networks, CurlJsonRpcTransport,
-    DeploymentConfig, DeploymentEngine, NetworkConfig, NetworkOverrides,
+    load_service_artifact, redact_url, register_backend_service, resolve_network,
+    validate_networks, CurlJsonRpcTransport, DeploymentConfig, DeploymentEngine, NetworkConfig,
+    NetworkOverrides,
 };
 use jamscript_ir::abi_for_language;
 use jamscript_parser::parse_service_v02;
@@ -85,6 +86,8 @@ enum CommandKind {
         deployment_rpc: Option<String>,
         #[arg(long)]
         node_rpc: Option<String>,
+        #[arg(long)]
+        backend_rpc: Option<String>,
         #[arg(long, default_value = "dist")]
         artifact: PathBuf,
         #[arg(long, default_value = "120s")]
@@ -132,6 +135,7 @@ struct DeployOptions {
     kind: Option<String>,
     deployment_rpc: Option<String>,
     node_rpc: Option<String>,
+    backend_rpc: Option<String>,
     artifact: PathBuf,
     timeout: String,
     json: bool,
@@ -250,6 +254,7 @@ fn main() -> Result<()> {
             kind,
             deployment_rpc,
             node_rpc,
+            backend_rpc,
             artifact,
             timeout,
             json,
@@ -259,6 +264,7 @@ fn main() -> Result<()> {
             kind,
             deployment_rpc,
             node_rpc,
+            backend_rpc,
             artifact,
             timeout,
             json,
@@ -640,6 +646,7 @@ fn network_command(command: NetworkCommand) -> Result<()> {
                         "kind": config.kind,
                         "deploymentRpc": config.deployment_rpc.as_deref().map(redact_url),
                         "nodeRpc": config.node_rpc.as_deref().map(redact_url),
+                        "backendRpc": config.backend_rpc.as_deref().map(redact_url),
                         "genesisHash": config.genesis_hash,
                         "default": manifest.deployment.as_ref()
                             .and_then(|deployment| deployment.default_network.as_deref())
@@ -666,6 +673,14 @@ fn network_command(command: NetworkCommand) -> Result<()> {
                         .unwrap_or_else(|| "not configured".into())
                 );
                 println!(
+                    "Backend RPC\n  {}",
+                    config
+                        .backend_rpc
+                        .as_deref()
+                        .map(redact_url)
+                        .unwrap_or_else(|| "not configured".into())
+                );
+                println!(
                     "Genesis pin\n  {}",
                     config.genesis_hash.as_deref().unwrap_or("not configured")
                 );
@@ -682,6 +697,7 @@ fn deploy(options: DeployOptions) -> Result<()> {
         kind,
         deployment_rpc,
         node_rpc,
+        backend_rpc,
         artifact,
         timeout,
         json,
@@ -705,6 +721,7 @@ fn deploy(options: DeployOptions) -> Result<()> {
             kind,
             deployment_rpc,
             node_rpc,
+            backend_rpc,
         },
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -732,8 +749,9 @@ fn deploy(options: DeployOptions) -> Result<()> {
         println!("  Artifact verification: PASS");
         println!("\nSubmitting deployment...");
     }
+    let backend_rpc = resolved.backend_rpc.clone();
     let result = DeploymentEngine::new(CurlJsonRpcTransport)
-        .deploy(resolved, service_artifact, timeout)
+        .deploy(resolved, service_artifact.clone(), timeout)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let record = jamscript_deployment::write_deployment_record(&project_root, &result)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -769,6 +787,7 @@ fn deploy(options: DeployOptions) -> Result<()> {
                 "finalized": result.finalized,
                 "finalizedBlock": result.finalized_context,
                 "operationId": result.operation_id,
+                "backendRegistration": backend_registration,
                 "record": record,
             }))?
         );

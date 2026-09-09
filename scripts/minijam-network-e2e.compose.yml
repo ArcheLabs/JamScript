@@ -1,0 +1,89 @@
+name: jamscript-minijam-network-e2e
+
+services:
+  node:
+    image: ${MINIJAM_NODE_IMAGE:?set the pinned MiniJAM node image}
+    command:
+      - --dev
+      - --alice
+      - --base-path=/data
+      - --force-authoring
+      - --unsafe-rpc-external
+      - --rpc-methods=unsafe
+      - --rpc-cors=all
+    ports:
+      - "127.0.0.1:9944:9944"
+    volumes:
+      - node-data:/data
+
+  formal-rpc:
+    image: ${MINIJAM_FORMAL_RPC_IMAGE:?set the pinned MiniJAM Formal RPC image}
+    depends_on:
+      - node
+    environment:
+      MINIJAM_RPC_URL: ws://node:9944
+      MINIJAM_FORMAL_RPC_BIND: 0.0.0.0:8080
+      MINIJAM_BUNDLE_DIR: /bundles
+      MINIJAM_RELAYER_URI: ${MINIJAM_FORMAL_RELAYER_URI:?set the test relayer URI}
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - bundle-data:/bundles
+
+  worker-1:
+    image: ${MINIJAM_WORKER_IMAGE:?set the pinned MiniJAM worker image}
+    depends_on:
+      - node
+      - formal-rpc
+    command:
+      - --rpc-url=http://node:9944
+      - --worker-id=0
+      - --key=//Alice
+      - --submit-candidates
+      - --submit-support-votes
+      - --poll-interval-ms=500
+      - --state-db=/data/state.toml
+      - --ipfs-gateway=http://formal-rpc:8080/ipfs
+    volumes:
+      - worker-1-data:/data
+
+  worker-2:
+    image: ${MINIJAM_WORKER_IMAGE:?set the pinned MiniJAM worker image}
+    depends_on:
+      - node
+      - formal-rpc
+    command:
+      - --rpc-url=http://node:9944
+      - --worker-id=1
+      - --key=//Bob
+      - --submit-candidates
+      - --submit-support-votes
+      - --poll-interval-ms=500
+      - --state-db=/data/state.toml
+      - --ipfs-gateway=http://formal-rpc:8080/ipfs
+    volumes:
+      - worker-2-data:/data
+
+  worker-3:
+    image: ${MINIJAM_WORKER_IMAGE:?set the pinned MiniJAM worker image}
+    depends_on:
+      - node
+      - formal-rpc
+    command:
+      - --rpc-url=http://node:9944
+      - --worker-id=2
+      - --key=//Charlie
+      - --submit-candidates
+      - --submit-support-votes
+      - --poll-interval-ms=500
+      - --state-db=/data/state.toml
+      - --ipfs-gateway=http://formal-rpc:8080/ipfs
+    volumes:
+      - worker-3-data:/data
+
+volumes:
+  node-data: {}
+  bundle-data: {}
+  worker-1-data: {}
+  worker-2-data: {}
+  worker-3-data: {}
