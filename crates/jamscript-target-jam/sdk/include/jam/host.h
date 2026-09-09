@@ -2,7 +2,6 @@
 #ifndef JAMSCRIPT_JAM_HOST_H
 #define JAMSCRIPT_JAM_HOST_H
 
-#include <stddef.h>
 #include <stdint.h>
 
 #define MINIJAM_HOST_NONE UINT64_MAX
@@ -39,16 +38,5 @@ static inline uint64_t minijam_host_call6(uint32_t call, uint64_t a0,
   const uint64_t args[6] = {a0, a1, a2, a3, a4, a5};
   return minijam_host_call(call, args);
 }
-
-/*
- * Accumulation-only helper for reading another JAM Service's native storage.
- * `service_id` is the canonical JAM ServiceId passed to the READ host-call.
- * Refine must not use this API: cross-service application state is supplied as
- * an authenticated witness to refine and its root is revalidated in accumulate.
- * Returns the same status values as minijam_storage_read.
- */
-int minijam_service_storage_read(uint32_t service_id, const void *key,
-                                 size_t key_size, void *output,
-                                 size_t capacity, size_t *output_size);
 
 #endif
