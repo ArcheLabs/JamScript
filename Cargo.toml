@@ -19,6 +19,7 @@ members = [
   "crates/jamscript-target-jam",
   "crates/jamscript-toolchain",
   "crates/jamscript-deployment",
+  "crates/jamscript-service-backend",
   "crates/service-build-polkavm",
   "crates/jamscript-cli",
   "examples/rust-managed-state",
