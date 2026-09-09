@@ -1,0 +1,14 @@
+[package]
+name = "jamscript-service-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+service-runtime-core = { path = "../service-runtime-core" }
+service-runtime-host = { path = "../service-runtime-host" }
+thiserror.workspace = true
+
+[dev-dependencies]
+service-runtime-state = { path = "../service-runtime-state" }
+tempfile.workspace = true
