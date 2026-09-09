@@ -93,23 +93,12 @@ pub enum MaterializeDecision {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Default)]
 pub struct BackendState {
     registry: ServiceRegistry,
     provider: FullStateProvider,
     pending: BTreeMap<WorkKey, RuntimeRefineOutputV1>,
     predictions: BTreeMap<WorkKey, RuntimeRefineOutputV1>,
-}
-
-impl Default for BackendState {
-    fn default() -> Self {
-        Self {
-            registry: ServiceRegistry::default(),
-            provider: FullStateProvider::default(),
-            pending: BTreeMap::new(),
-            predictions: BTreeMap::new(),
-        }
-    }
 }
 
 impl BackendState {
