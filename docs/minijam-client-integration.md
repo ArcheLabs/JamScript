@@ -51,9 +51,9 @@ code hash, builds one WorkItem, stores its bundle, then submits the opaque
 package through the configured ingress relayer. It does not decode JamScript
 payloads or provide application query execution.
 
-The endpoint also exposes GET /health/ready after the chain client connects
-and the bundle directory is initialized. It applies an 8 MiB request-body
-limit and a bounded 32-request admission semaphore.
+The endpoint also exposes GET `/healthz` and `/readinessz` after the artifact
+store is initialized and the configured node is reachable. It applies bounded
+headers and request bodies and a bounded connection admission limit.
 
 `queryLatest` first reads the managed-state commitment from finalized Service
 storage, then requests that explicit root from the provider. It checks the

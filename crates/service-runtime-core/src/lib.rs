@@ -12,6 +12,14 @@ pub const MANAGED_STATE_LAYOUT_VERSION: u8 = 1;
 pub const RECOVERY_FORMAT_VERSION: u8 = 1;
 pub const STATE_VIEW_VERSION: u8 = 1;
 pub const SCRIPT_ACTION_RESULT_VERSION: u8 = 1;
+/// Version of the bounded metadata entry exposed by every dynamically hosted
+/// service artifact.
+pub const BACKEND_METADATA_VERSION: u8 = 1;
+pub const BACKEND_PLANNER_VERSION: u32 = 1;
+pub const BACKEND_MANAGED_STATE_VERSION: u32 = 1;
+pub const PLANNER_NEED_STATE_VERSION: u8 = 1;
+pub const PLANNER_NEED_STATE_MAGIC: [u8; 4] = *b"JSP1";
+pub const PLANNER_NEED_EXTERNAL_STATE_MAGIC: [u8; 4] = *b"JSE1";
 pub const EMPTY_STATE_ROOT_V1: StateRoot = [
     0x03, 0x17, 0x0a, 0x2e, 0x75, 0x97, 0xb7, 0xb7, 0xe3, 0xd8, 0x4c, 0x05, 0x39, 0x1d, 0x13, 0x9a,
     0x62, 0xb1, 0x57, 0xe7, 0x87, 0x86, 0xd8, 0xc0, 0x82, 0xf2, 0x9d, 0xcf, 0x4c, 0x11, 0x13, 0x14,
@@ -38,6 +46,13 @@ pub const MAX_SCRIPT_ACTION_RESULT_BYTES: usize = MAX_RECOVERY_BYTES;
 pub const MAX_WITNESS_NODES: usize = 4096;
 pub const MAX_WITNESS_NODE_BYTES: usize = 64 * 1024;
 pub const MAX_WITNESS_BYTES: usize = 1024 * 1024;
+/// Maximum number of read-only Service witnesses accepted by one refine.
+pub const MAX_EXTERNAL_STATE_WITNESSES: usize = 64;
+/// Aggregate encoded storage-proof bytes accepted for external witnesses.
+pub const MAX_EXTERNAL_WITNESS_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_RUNTIME_ACTION_BYTES: usize = MAX_RECOVERY_BYTES;
+pub const MAX_RUNTIME_ACTION_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_PLANNER_OUTPUT_BYTES: usize = 4 + 1 + 4 + MAX_STATE_KEY_BYTES;
 pub const MAX_WITNESS_ENCODED_BYTES: usize =
     1 + 32 + 4 + (MAX_WITNESS_NODES * 4) + MAX_WITNESS_BYTES;
 pub const MAX_ACCESS_PLAN_ENCODED_BYTES: usize = MAX_STATE_VIEW_BYTES;
@@ -68,6 +83,140 @@ impl ServiceKeyV1 {
             bytes.try_into().map_err(|_| WireError::InvalidLength)?,
         ))
     }
+}
+
+/// Small, strict metadata record read through the PVM backend entrypoint.
+/// This is intentionally independent of JSON and filesystem paths so the
+/// same bytes identify the same deployed service on every backend host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackendMetadataV1 {
+    pub service_key: ServiceKeyV1,
+    pub abi_version: u32,
+    pub planner_version: u32,
+    pub managed_state_version: u32,
+}
+
+impl BackendMetadataV1 {
+    pub const ENCODED_LEN: usize = 1 + 32 + 4 + 4 + 4;
+
+    pub fn encode(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0u8; Self::ENCODED_LEN];
+        bytes[0] = BACKEND_METADATA_VERSION;
+        bytes[1..33].copy_from_slice(self.service_key.as_bytes());
+        bytes[33..37].copy_from_slice(&self.abi_version.to_le_bytes());
+        bytes[37..41].copy_from_slice(&self.planner_version.to_le_bytes());
+        bytes[41..45].copy_from_slice(&self.managed_state_version.to_le_bytes());
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() != Self::ENCODED_LEN {
+            return Err(WireError::InvalidLength);
+        }
+        if bytes[0] != BACKEND_METADATA_VERSION {
+            return Err(WireError::UnsupportedVersion);
+        }
+        let metadata = Self {
+            service_key: ServiceKeyV1::decode(&bytes[1..33])?,
+            abi_version: u32::from_le_bytes(
+                bytes[33..37]
+                    .try_into()
+                    .map_err(|_| WireError::InvalidLength)?,
+            ),
+            planner_version: u32::from_le_bytes(
+                bytes[37..41]
+                    .try_into()
+                    .map_err(|_| WireError::InvalidLength)?,
+            ),
+            managed_state_version: u32::from_le_bytes(
+                bytes[41..45]
+                    .try_into()
+                    .map_err(|_| WireError::InvalidLength)?,
+            ),
+        };
+        if metadata.planner_version != BACKEND_PLANNER_VERSION
+            || metadata.managed_state_version != BACKEND_MANAGED_STATE_VERSION
+        {
+            return Err(WireError::UnsupportedVersion);
+        }
+        Ok(metadata)
+    }
+}
+
+/// The planner entry returns this bounded envelope when another state key is
+/// needed. It is deliberately not a RuntimeRefineOutput, so a backend cannot
+/// confuse preflight discovery with an accepted transition.
+pub fn encode_planner_need_state(key: &[u8]) -> Result<Vec<u8>, WireError> {
+    if key.len() > MAX_STATE_KEY_BYTES {
+        return Err(WireError::TooManyItems);
+    }
+    let mut bytes = Vec::with_capacity(MAX_PLANNER_OUTPUT_BYTES.min(9 + key.len()));
+    bytes.extend_from_slice(&PLANNER_NEED_STATE_MAGIC);
+    bytes.push(PLANNER_NEED_STATE_VERSION);
+    bytes.extend_from_slice(
+        &(u32::try_from(key.len()).map_err(|_| WireError::LengthOverflow)?).to_le_bytes(),
+    );
+    bytes.extend_from_slice(key);
+    Ok(bytes)
+}
+
+pub fn decode_planner_need_state(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
+    if bytes.len() < 9 || bytes.len() > MAX_PLANNER_OUTPUT_BYTES {
+        return Err(WireError::InvalidLength);
+    }
+    if bytes[..4] != PLANNER_NEED_STATE_MAGIC || bytes[4] != PLANNER_NEED_STATE_VERSION {
+        return Err(WireError::InvalidEncoding);
+    }
+    let length = u32::from_le_bytes(
+        bytes[5..9]
+            .try_into()
+            .map_err(|_| WireError::InvalidLength)?,
+    ) as usize;
+    if length > MAX_STATE_KEY_BYTES || bytes.len() != 9 + length {
+        return Err(WireError::InvalidEncoding);
+    }
+    Ok(bytes[9..].to_vec())
+}
+
+pub fn encode_planner_need_external_state(
+    service_id: u32,
+    key: &[u8],
+) -> Result<Vec<u8>, WireError> {
+    if key.len() > MAX_STATE_KEY_BYTES {
+        return Err(WireError::TooManyItems);
+    }
+    let mut bytes = Vec::with_capacity(13 + key.len());
+    bytes.extend_from_slice(&PLANNER_NEED_EXTERNAL_STATE_MAGIC);
+    bytes.push(PLANNER_NEED_STATE_VERSION);
+    bytes.extend_from_slice(&service_id.to_le_bytes());
+    bytes.extend_from_slice(
+        &(u32::try_from(key.len()).map_err(|_| WireError::LengthOverflow)?).to_le_bytes(),
+    );
+    bytes.extend_from_slice(key);
+    Ok(bytes)
+}
+
+pub fn decode_planner_need_external_state(bytes: &[u8]) -> Result<(u32, Vec<u8>), WireError> {
+    if bytes.len() < 13 || bytes.len() > MAX_PLANNER_OUTPUT_BYTES + 4 {
+        return Err(WireError::InvalidLength);
+    }
+    if bytes[..4] != PLANNER_NEED_EXTERNAL_STATE_MAGIC || bytes[4] != PLANNER_NEED_STATE_VERSION {
+        return Err(WireError::InvalidEncoding);
+    }
+    let service_id = u32::from_le_bytes(
+        bytes[5..9]
+            .try_into()
+            .map_err(|_| WireError::InvalidLength)?,
+    );
+    let length = u32::from_le_bytes(
+        bytes[9..13]
+            .try_into()
+            .map_err(|_| WireError::InvalidLength)?,
+    ) as usize;
+    if length > MAX_STATE_KEY_BYTES || bytes.len() != 13 + length {
+        return Err(WireError::InvalidEncoding);
+    }
+    Ok((service_id, bytes[13..].to_vec()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1209,6 +1358,7 @@ pub enum StateAccessError {
     Backend,
     ReservedKey,
     NeedState(Vec<u8>),
+    NeedExternalState { service_id: u32, key: Vec<u8> },
     Rejected(u32),
     ApplicationFailed(u32),
 }
@@ -1678,5 +1828,119 @@ mod tests {
         let header = RuntimeRefineOutputV1::decode_transition_header(&encoded).unwrap();
         assert_eq!(header.transition_valid_until, Some(42));
         assert_eq!(header.recovery_commitment, output.recovery_commitment);
+    }
+
+    #[test]
+    fn backend_metadata_and_planner_need_state_envelopes_are_strict() {
+        let metadata = BackendMetadataV1 {
+            service_key: ServiceKeyV1::new([7; 32]),
+            abi_version: 1,
+            planner_version: BACKEND_PLANNER_VERSION,
+            managed_state_version: BACKEND_MANAGED_STATE_VERSION,
+        };
+        assert_eq!(BackendMetadataV1::decode(&metadata.encode()), Ok(metadata));
+        let mut metadata_with_trailing_byte = metadata.encode().to_vec();
+        metadata_with_trailing_byte.push(0);
+        assert_eq!(
+            BackendMetadataV1::decode(&metadata_with_trailing_byte),
+            Err(WireError::InvalidLength)
+        );
+
+        let local = encode_planner_need_state(b"local/key").unwrap();
+        assert_eq!(decode_planner_need_state(&local), Ok(b"local/key".to_vec()));
+        let external = encode_planner_need_external_state(42, b"remote/key").unwrap();
+        assert_eq!(
+            decode_planner_need_external_state(&external),
+            Ok((42, b"remote/key".to_vec()))
+        );
+        let mut tampered = external;
+        tampered[9] = 0xff;
+        assert!(decode_planner_need_external_state(&tampered).is_err());
+    }
+
+    #[test]
+    fn external_witnesses_and_dependencies_are_bounded_and_canonical() {
+        let witness = ManagedStateWitnessV1 {
+            version: ManagedStateWitnessV1::VERSION,
+            parent_root: [4; 32],
+            access_plan: StateAccessPlanV1::from_keys([b"external".as_slice()]).unwrap(),
+            storage_proof: vec![vec![5, 6]],
+        };
+        let input = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: witness.clone(),
+            external_state: vec![ExternalStateWitnessV1 {
+                service_id: 7,
+                managed_state: witness,
+            }],
+            actions: vec![vec![7]],
+        };
+        assert_eq!(
+            RuntimeRefineInputV1::decode(&input.encode().unwrap()),
+            Ok(input)
+        );
+
+        let output = RuntimeRefineOutputV1::from_diff_with_dependencies_and_validity(
+            [1; 32],
+            [2; 32],
+            Vec::new(),
+            StateDiffV1::default(),
+            vec![
+                ExternalStateDependencyV1 {
+                    service_id: 9,
+                    state_root: [9; 32],
+                },
+                ExternalStateDependencyV1 {
+                    service_id: 2,
+                    state_root: [2; 32],
+                },
+                ExternalStateDependencyV1 {
+                    service_id: 9,
+                    state_root: [9; 32],
+                },
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            output.external_dependencies,
+            vec![
+                ExternalStateDependencyV1 {
+                    service_id: 2,
+                    state_root: [2; 32],
+                },
+                ExternalStateDependencyV1 {
+                    service_id: 9,
+                    state_root: [9; 32],
+                },
+            ]
+        );
+        let encoded = output.encode().unwrap();
+        assert_eq!(
+            RuntimeRefineOutputV1::decode_transition_header(&encoded)
+                .unwrap()
+                .external_dependencies,
+            output.external_dependencies
+        );
+        assert_eq!(
+            RuntimeRefineOutputV1::from_diff_with_dependencies_and_validity(
+                [1; 32],
+                [2; 32],
+                Vec::new(),
+                StateDiffV1::default(),
+                vec![
+                    ExternalStateDependencyV1 {
+                        service_id: 3,
+                        state_root: [3; 32],
+                    },
+                    ExternalStateDependencyV1 {
+                        service_id: 3,
+                        state_root: [4; 32],
+                    },
+                ],
+                None,
+            ),
+            Err(WireError::DuplicateServiceId)
+        );
     }
 }

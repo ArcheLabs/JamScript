@@ -37,6 +37,7 @@ anyhow = "1.0.100"
 base64 = "0.22.1"
 blake2b_simd = { version = "1.0.4", default-features = false }
 jam-program-blob-common = { version = "=0.1.28", default-features = false, features = ["std", "polkavm"] }
+polkavm = "=0.30.0"
 polkavm-linker = "=0.30.0"
 clap = { version = "4.5.45", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }

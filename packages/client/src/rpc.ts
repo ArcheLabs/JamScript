@@ -52,6 +52,14 @@ export type ManagedStateResult = {
   proofBase64: string[];
 };
 
+export type BackendCapabilitiesV1 = {
+  protocolVersion: number;
+  managedStateVersion: number;
+  multiService: boolean;
+  externalStateWitness: boolean;
+  dynamicPvmServices: boolean;
+};
+
 export class RpcError extends Error {
   constructor(
     message: string,

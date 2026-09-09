@@ -23,9 +23,23 @@ static const struct minijam_export_metadata_v1 minijam_accumulate_metadata
     __attribute__((section(".polkavm_metadata"), used)) = {
         1, 0, sizeof(minijam_accumulate_symbol) - 1, minijam_accumulate_symbol,
         0, 0};
+static const uint8_t jamscript_plan_symbol[]
+    __attribute__((section(".polkavm_metadata"), used)) = "jamscript_plan_v1";
+static const struct minijam_export_metadata_v1 jamscript_plan_metadata
+    __attribute__((section(".polkavm_metadata"), used)) = {
+        1, 0, sizeof(jamscript_plan_symbol) - 1, jamscript_plan_symbol, 0, 2};
+static const uint8_t jamscript_backend_metadata_symbol[]
+    __attribute__((section(".polkavm_metadata"), used)) =
+        "jamscript_backend_metadata_v1";
+static const struct minijam_export_metadata_v1 jamscript_backend_metadata
+    __attribute__((section(".polkavm_metadata"), used)) = {
+        1, 0, sizeof(jamscript_backend_metadata_symbol) - 1,
+        jamscript_backend_metadata_symbol, 0, 2};
 
 extern minijam_refine_output minijam_refine(void);
 extern void minijam_accumulate(void);
+extern minijam_refine_output jamscript_plan_v1(void);
+extern minijam_refine_output jamscript_backend_metadata_v1(void);
 
 __asm__(".pushsection .polkavm_exports,\"aR\",@note\n"
         ".byte 1\n"
@@ -34,6 +48,12 @@ __asm__(".pushsection .polkavm_exports,\"aR\",@note\n"
         ".byte 1\n"
         ".8byte minijam_accumulate_metadata\n"
         ".8byte minijam_accumulate\n"
+        ".byte 1\n"
+        ".8byte jamscript_plan_metadata\n"
+        ".8byte jamscript_plan_v1\n"
+        ".byte 1\n"
+        ".8byte jamscript_backend_metadata\n"
+        ".8byte jamscript_backend_metadata_v1\n"
         ".popsection\n");
 #endif
 
@@ -139,8 +159,16 @@ minijam_status minijam_service_storage_read(uint32_t service_id,
 minijam_status minijam_storage_read(const void *key, size_t key_size,
                                     void *output, size_t capacity,
                                     size_t *output_size) {
+  return minijam_service_storage_read(UINT32_MAX, key, key_size,
+                                       output, capacity, output_size);
+}
+
+minijam_status minijam_service_storage_read(uint32_t service_id,
+                                             const void *key, size_t key_size,
+                                             void *output, size_t capacity,
+                                             size_t *output_size) {
   uint64_t length = minijam_host_call6(
-      MINIJAM_HOST_READ, MINIJAM_HOST_NONE, (uintptr_t)key, key_size,
+      MINIJAM_HOST_READ, service_id, (uintptr_t)key, key_size,
       (uintptr_t)output, 0, capacity);
   if (length == MINIJAM_HOST_NONE) return MINIJAM_NOT_FOUND;
   if (output_size) *output_size = (size_t)length;

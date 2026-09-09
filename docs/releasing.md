@@ -25,13 +25,18 @@ ships the JAM target ABI and its own target SDK. MiniJAM compatibility is
 checked separately by the optional downstream network E2E; a MiniJAM or
 Jambda checkout is not part of a JamScript build or release input.
 
-The Builder/Provider process is deployed per Service. It statically compiles the generated host
-application and the same native C sources used by the PVM Service. Loading arbitrary native
-libraries into a shared daemon is not supported.
+The public backend is one multi-Service process. Each deployment is registered
+by `serviceId`, `serviceKey`, `codeHash`, ABI version, and a digest-addressed
+planner/application artifact. The backend registry routes work and proof
+construction by Service identity; deploying another Service does not require
+rebuilding the daemon. The production artifact is the content-addressed PVM;
+the older generated Builder adapter is a legacy MiniJAM compatibility wrapper.
 
-Provider persistence is enabled with `JAMSCRIPT_PROVIDER_STORE`. The append-only recovery log is
-replayed and cryptographically revalidated on startup. Finalized JAM/MiniJAM storage remains the
-only source of canonical roots; the Provider supplies data and proofs for explicit roots.
+Backend persistence is enabled with `JAMSCRIPT_BACKEND_DATA`. The registry,
+content-addressed PVM artifacts, and append-only recovery log are replayed and
+cryptographically revalidated on startup. Finalized JAM/MiniJAM storage
+remains the only source of canonical roots; the Provider supplies data and
+proofs for explicit roots.
 
 ## Operator workflow
 
@@ -73,9 +78,10 @@ rewritten as a successful run.
 1. Build the Service with `jams build`.
 2. Verify the deployment bundle with `jams inspect <bundle>`.
 3. Select a named MiniJAM network and deploy with `jams deploy --network <name>`.
-4. Compile and run the generated Builder application as a per-Service Formal RPC sidecar.
-5. Configure the browser client with separate node, work, and managed-state Provider endpoints.
-6. When a downstream network is available, run the manual MiniJAM network E2E
+4. Run one `jamscript-service-backend` process and configure its internal Node and Formal RPCs.
+5. Let the backend discover each deployed Service and prewarm its PVM artifact.
+6. Configure the browser client with the single public backend endpoint.
+7. When a downstream network is available, run the manual MiniJAM network E2E
    as a compatibility check before publishing the release artifacts.
 
 The deployment command is intentionally a separate control-plane operation, not an application
@@ -152,6 +158,8 @@ rerun rules, and failure classification.
 
 ## Explicit exclusions
 
-The preview does not claim mainnet readiness. User gas payment, sponsorship, DoS economics,
-distributed Provider replication, garbage collection, generic PVM-only witness discovery, and
-cross-Service managed state remain outside the v0 scope.
+The preview does not claim mainnet readiness. User gas payment, sponsorship,
+DoS economics, distributed Provider replication, and garbage collection remain
+outside the v0 scope. Cross-Service managed state follows the frozen
+proof/dependency protocol; application DSL surface coverage remains narrow in
+this preview.

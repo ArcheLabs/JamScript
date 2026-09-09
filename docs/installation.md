@@ -99,9 +99,10 @@ with `jams toolchain path`.
 
 `jams build` compiles the canonical JAM guest/service path with the managed
 LLVM, Rust, ScriptC, vendored dependencies, and JAM SDK in the bundle. It does
-not compile the generated Builder host application. If a user separately
-compiles `generated_builder_application.rs` into the native managed-state
-adapter, that host binary links against Apple's arm64 ABI and therefore needs
+not compile the generated Builder host application. The generated Builder and
+its native adapter are legacy compatibility/test artifacts; they are not
+required by the production backend. If a user separately compiles
+`generated_builder_application.rs` into that adapter, the host binary links against Apple's arm64 ABI and therefore needs
 the macOS SDK / Xcode Command Line Tools (or an explicitly supplied `SDKROOT`).
 Those Apple components are not bundled or redistributable by JamScript. The
 native release closure and clean-consumer gate test this boundary explicitly;

@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use service_runtime_core::StateDiffV1;
 use service_runtime_core::{
@@ -433,11 +434,13 @@ pub mod guest_support {
     pub fn reset_runtime() {}
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GuestError {
     InvalidInput,
     State,
     Application,
+    NeedState(Vec<u8>),
+    NeedExternalState { service_id: u32, key: Vec<u8> },
 }
 
 pub trait RefineObserver {
@@ -548,11 +551,11 @@ where
                     .map_err(|_| GuestError::State)?;
                 return Err(GuestError::State);
             }
-            Err(StateAccessError::NeedState(_)) => {
+            Err(StateAccessError::NeedState(key)) => {
                 state
                     .rollback_transaction()
                     .map_err(|_| GuestError::State)?;
-                return Err(GuestError::State);
+                return Err(GuestError::NeedState(key));
             }
             Err(StateAccessError::ApplicationFailed(error_code)) => {
                 if error_code & 0x8000_0000 != 0 {
@@ -599,6 +602,203 @@ where
         diff,
         transition_valid_until,
     ))
+}
+
+/// Execute only the application's read/write discovery logic against a
+/// bounded planning state. Known keys are represented as absent values; the
+/// first unknown key is returned as a structured NeedState result instead of
+/// being confused with an invalid proof.
+pub fn plan_owned<A>(application: &A, input: RuntimeRefineInputV1) -> Result<(), GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
+    plan_owned_internal(application, input, None)
+}
+
+pub fn plan_owned_with_external<A>(
+    application: &A,
+    input: RuntimeRefineInputV1,
+) -> Result<(), GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
+    let mut external = PlanningExternalProofStates::new(&input.external_state)?;
+    plan_owned_internal(application, input, Some(&mut external))
+}
+
+fn plan_owned_internal<A>(
+    application: &A,
+    input: RuntimeRefineInputV1,
+    mut external: Option<&mut PlanningExternalProofStates>,
+) -> Result<(), GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
+    if input.version != RuntimeRefineInputV1::VERSION
+        || input.managed_state.version != service_runtime_core::ManagedStateWitnessV1::VERSION
+    {
+        return Err(GuestError::InvalidInput);
+    }
+    let mut state = PlanningProofState::new(
+        input.managed_state.parent_root,
+        input.managed_state.storage_proof,
+        &input.managed_state.access_plan.keys,
+    )?;
+    for action in &input.actions {
+        let result = match external.as_deref_mut() {
+            Some(external) => {
+                let mut context = ExecutionContext::with_access_plan_and_external_state(
+                    &mut state,
+                    None,
+                    &input.managed_state.access_plan,
+                    external,
+                );
+                application
+                    .execute(&mut context, action)
+                    .map_err(Into::into)
+            }
+            None => {
+                let mut context = ExecutionContext::with_access_plan(
+                    &mut state,
+                    None,
+                    &input.managed_state.access_plan,
+                );
+                application
+                    .execute(&mut context, action)
+                    .map_err(Into::into)
+            }
+        };
+        match result {
+            Ok(())
+            | Err(StateAccessError::Rejected(_))
+            | Err(StateAccessError::ApplicationFailed(_)) => {}
+            Err(StateAccessError::NeedState(key)) => return Err(GuestError::NeedState(key)),
+            Err(StateAccessError::NeedExternalState { service_id, key }) => {
+                return Err(GuestError::NeedExternalState { service_id, key })
+            }
+            Err(StateAccessError::MissingWitness | StateAccessError::InvalidProof) => {
+                return Err(GuestError::State)
+            }
+            Err(_) => return Err(GuestError::Application),
+        }
+    }
+    Ok(())
+}
+
+struct PlanningExternalProofStates {
+    states: BTreeMap<u32, PlanningProofState>,
+}
+
+impl PlanningExternalProofStates {
+    fn new(witnesses: &[service_runtime_core::ExternalStateWitnessV1]) -> Result<Self, GuestError> {
+        let mut states = BTreeMap::new();
+        for witness in witnesses {
+            if states.contains_key(&witness.service_id) {
+                return Err(GuestError::InvalidInput);
+            }
+            let state = PlanningProofState::new(
+                witness.managed_state.parent_root,
+                witness.managed_state.storage_proof.clone(),
+                &witness.managed_state.access_plan.keys,
+            )
+            .map_err(|error| match error {
+                GuestError::NeedState(key) => GuestError::NeedExternalState {
+                    service_id: witness.service_id,
+                    key,
+                },
+                other => other,
+            })?;
+            states.insert(witness.service_id, state);
+        }
+        Ok(Self { states })
+    }
+}
+
+impl ExternalStateAccess for PlanningExternalProofStates {
+    fn get(&mut self, service_id: u32, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
+        let state = self.states.get_mut(&service_id).ok_or_else(|| {
+            StateAccessError::NeedExternalState {
+                service_id,
+                key: key.to_vec(),
+            }
+        })?;
+        state.get(key).map_err(|error| match error {
+            StateAccessError::NeedState(key) => {
+                StateAccessError::NeedExternalState { service_id, key }
+            }
+            other => other,
+        })
+    }
+}
+
+/// A proof-backed state view for planning. The backend supplies a proof for
+/// the keys discovered so far; reads outside that explicit plan become a
+/// deterministic NeedState response, while reads inside it retain the actual
+/// value so second-order accesses can be discovered correctly.
+struct PlanningProofState {
+    proof: ProofState,
+    known: BTreeSet<Vec<u8>>,
+}
+
+impl PlanningProofState {
+    fn new(
+        parent_root: service_runtime_core::StateRoot,
+        storage_proof: Vec<Vec<u8>>,
+        keys: &[Vec<u8>],
+    ) -> Result<Self, GuestError> {
+        let mut proof =
+            ProofState::from_witness(parent_root, &storage_proof).map_err(|_| GuestError::State)?;
+        let known = keys.iter().cloned().collect::<BTreeSet<_>>();
+        for key in &known {
+            match ManagedStateAccess::get(&mut proof, key) {
+                Ok(_) => {}
+                Err(StateAccessError::MissingWitness) => {
+                    return Err(GuestError::NeedState(key.clone()))
+                }
+                Err(_) => return Err(GuestError::State),
+            }
+        }
+        Ok(Self { proof, known })
+    }
+
+    fn require_known(&self, key: &[u8]) -> Result<(), StateAccessError> {
+        self.known
+            .contains(key)
+            .then_some(())
+            .ok_or_else(|| StateAccessError::NeedState(key.to_vec()))
+    }
+}
+
+impl ManagedStateAccess for PlanningProofState {
+    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
+        self.require_known(key)?;
+        ManagedStateAccess::get(&mut self.proof, key)
+    }
+
+    fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), StateAccessError> {
+        self.require_known(key)?;
+        ManagedStateAccess::set(&mut self.proof, key, value)
+    }
+
+    fn delete(&mut self, key: &[u8]) -> Result<(), StateAccessError> {
+        self.require_known(key)?;
+        ManagedStateAccess::delete(&mut self.proof, key)
+    }
+
+    fn begin_transaction(&mut self) -> Result<(), StateAccessError> {
+        ManagedStateAccess::begin_transaction(&mut self.proof)
+    }
+
+    fn commit_transaction(&mut self) -> Result<(), StateAccessError> {
+        ManagedStateAccess::commit_transaction(&mut self.proof)
+    }
+
+    fn rollback_transaction(&mut self) -> Result<(), StateAccessError> {
+        ManagedStateAccess::rollback_transaction(&mut self.proof)
+    }
 }
 
 pub fn refine_owned_with_observer<A, O>(
@@ -684,6 +884,12 @@ where
                     .rollback_transaction()
                     .map_err(|_| GuestError::State)?;
                 return Err(GuestError::State);
+            }
+            Err(StateAccessError::NeedState(key)) => {
+                state
+                    .rollback_transaction()
+                    .map_err(|_| GuestError::State)?;
+                return Err(GuestError::NeedState(key));
             }
             Err(StateAccessError::ApplicationFailed(error_code)) => {
                 if error_code & 0x8000_0000 != 0 {
@@ -834,6 +1040,182 @@ mod tests {
                 _ => Err(StateAccessError::Backend),
             }
         }
+    }
+
+    struct ExternalReader;
+
+    impl ServiceApplication for ExternalReader {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            _input: &[u8],
+        ) -> Result<(), Self::Error> {
+            let value = context
+                .external_get(7, b"external")?
+                .ok_or(StateAccessError::Backend)?;
+            context.state().set(b"result", &value)
+        }
+    }
+
+    struct SecondOrderReader;
+
+    impl ServiceApplication for SecondOrderReader {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            _input: &[u8],
+        ) -> Result<(), Self::Error> {
+            let pointer = context
+                .state()
+                .get(b"first")?
+                .ok_or(StateAccessError::Backend)?;
+            let value = context
+                .state()
+                .get(&pointer)?
+                .ok_or(StateAccessError::Backend)?;
+            context.state().set(b"result", &value)
+        }
+    }
+
+    #[test]
+    fn planner_uses_proven_values_for_second_order_state_access() {
+        let base = FullState::from_pairs([
+            (b"first".as_slice(), b"second".as_slice()),
+            (b"second".as_slice(), b"value".as_slice()),
+        ])
+        .unwrap();
+        let first_only = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: ManagedStateWitnessV1 {
+                version: ManagedStateWitnessV1::VERSION,
+                parent_root: base.root(),
+                access_plan: StateAccessPlanV1::from_keys([b"first".as_slice()]).unwrap(),
+                storage_proof: base
+                    .proof_for(&[b"first"])
+                    .unwrap()
+                    .into_nodes()
+                    .into_iter()
+                    .collect(),
+            },
+            external_state: Vec::new(),
+            actions: vec![vec![]],
+        };
+        assert_eq!(
+            plan_owned(&SecondOrderReader, first_only),
+            Err(GuestError::NeedState(b"second".to_vec()))
+        );
+
+        let complete = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: ManagedStateWitnessV1 {
+                version: ManagedStateWitnessV1::VERSION,
+                parent_root: base.root(),
+                access_plan: StateAccessPlanV1::from_keys([
+                    b"first".as_slice(),
+                    b"second".as_slice(),
+                    b"result".as_slice(),
+                ])
+                .unwrap(),
+                storage_proof: base
+                    .proof_for(&[b"first", b"second", b"result"])
+                    .unwrap()
+                    .into_nodes()
+                    .into_iter()
+                    .collect(),
+            },
+            external_state: Vec::new(),
+            actions: vec![vec![]],
+        };
+        assert_eq!(plan_owned(&SecondOrderReader, complete), Ok(()));
+    }
+
+    #[test]
+    fn external_state_is_proof_backed_read_only_and_emits_service_id_dependency() {
+        let local = FullState::empty();
+        let external =
+            FullState::from_pairs([(b"external".as_slice(), b"value".as_slice())]).unwrap();
+        let input = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: ManagedStateWitnessV1 {
+                version: ManagedStateWitnessV1::VERSION,
+                parent_root: local.root(),
+                access_plan: StateAccessPlanV1::from_keys([b"result".as_slice()]).unwrap(),
+                storage_proof: local
+                    .proof_for(&[b"result"])
+                    .unwrap()
+                    .into_nodes()
+                    .into_iter()
+                    .collect(),
+            },
+            external_state: vec![service_runtime_core::ExternalStateWitnessV1 {
+                service_id: 7,
+                managed_state: ManagedStateWitnessV1 {
+                    version: ManagedStateWitnessV1::VERSION,
+                    parent_root: external.root(),
+                    access_plan: StateAccessPlanV1::from_keys([b"external".as_slice()]).unwrap(),
+                    storage_proof: external
+                        .proof_for(&[b"external"])
+                        .unwrap()
+                        .into_nodes()
+                        .into_iter()
+                        .collect(),
+                },
+            }],
+            actions: vec![vec![]],
+        };
+        let output = refine(&ExternalReader, &input).unwrap();
+        assert_eq!(
+            output.external_dependencies,
+            vec![service_runtime_core::ExternalStateDependencyV1 {
+                service_id: 7,
+                state_root: external.root(),
+            }]
+        );
+        let recovery = StateRecoveryV1::decode(&output.recovery_payload).unwrap();
+        assert_eq!(recovery.diff.changes[0].value, Some(b"value".to_vec()));
+    }
+
+    #[test]
+    fn invalid_external_proof_is_rejected_before_application_execution() {
+        let local = FullState::empty();
+        let external =
+            FullState::from_pairs([(b"external".as_slice(), b"value".as_slice())]).unwrap();
+        let mut nodes: Vec<Vec<u8>> = external
+            .proof_for(&[b"external"])
+            .unwrap()
+            .into_nodes()
+            .into_iter()
+            .collect();
+        nodes[0][0] ^= 1;
+        let input = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: ManagedStateWitnessV1 {
+                version: ManagedStateWitnessV1::VERSION,
+                parent_root: local.root(),
+                access_plan: StateAccessPlanV1::from_keys([b"result".as_slice()]).unwrap(),
+                storage_proof: local
+                    .proof_for(&[b"result"])
+                    .unwrap()
+                    .into_nodes()
+                    .into_iter()
+                    .collect(),
+            },
+            external_state: vec![service_runtime_core::ExternalStateWitnessV1 {
+                service_id: 7,
+                managed_state: ManagedStateWitnessV1 {
+                    version: ManagedStateWitnessV1::VERSION,
+                    parent_root: external.root(),
+                    access_plan: StateAccessPlanV1::from_keys([b"external".as_slice()]).unwrap(),
+                    storage_proof: nodes,
+                },
+            }],
+            actions: vec![vec![]],
+        };
+        assert_eq!(refine(&ExternalReader, &input), Err(GuestError::State));
     }
 
     fn witness_input(base: &FullState, actions: Vec<Vec<u8>>) -> RuntimeRefineInputV1 {

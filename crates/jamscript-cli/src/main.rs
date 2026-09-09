@@ -499,7 +499,10 @@ fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Re
         instance
             .call_typed_and_get_result::<(), _>(&mut (), export, ())
             .map_err(|error| anyhow::anyhow!("PVM execution: {error:?}"))?;
-    } else if export == "minijam_refine" {
+    } else if matches!(
+        export,
+        "minijam_refine" | "jamscript_plan_v1" | "jamscript_backend_metadata_v1"
+    ) {
         instance
             .call_typed_and_get_result::<u64, _>(&mut (), export, ())
             .map_err(|error| anyhow::anyhow!("PVM execution: {error:?}"))?;
@@ -734,6 +737,22 @@ fn deploy(options: DeployOptions) -> Result<()> {
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let record = jamscript_deployment::write_deployment_record(&project_root, &result)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let backend_registration = if let Some(endpoint) = backend_rpc {
+        Some(
+            match register_backend_service(
+                &CurlJsonRpcTransport,
+                &endpoint,
+                result.service_id,
+                &service_artifact,
+                timeout,
+            ) {
+                Ok(value) => serde_json::json!({"status": "PASS", "result": value}),
+                Err(error) => serde_json::json!({"status": "FAILED", "error": error.to_string()}),
+            },
+        )
+    } else {
+        None
+    };
     if json {
         println!(
             "{}",
@@ -777,6 +796,23 @@ fn deploy(options: DeployOptions) -> Result<()> {
             }
         );
         println!("\nDeployment record\n  {}", record.display());
+        println!(
+            "\nBackend registration\n  {}",
+            if backend_registration.is_some() {
+                if backend_registration
+                    .as_ref()
+                    .and_then(|value| value.get("status"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("PASS")
+                {
+                    "PASS"
+                } else {
+                    "FAILED (on-chain deployment remains finalized)"
+                }
+            } else {
+                "not configured"
+            }
+        );
         println!("\nDEPLOYMENT=PASS");
     }
     Ok(())

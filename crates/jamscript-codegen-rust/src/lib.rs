@@ -97,6 +97,7 @@ fn generate_no_std_rust_with_backend(
     };
     let runtime_input_type = "RuntimeRefineInputV1";
     let runtime_input_version = 1;
+    let backend_metadata = backend_metadata_literal(context.service_key);
     Ok(format!(
         r##"#![no_std]
 #![allow(static_mut_refs)]
@@ -106,7 +107,7 @@ compile_error!("generated service must be built with the official PolkaVM target
 pub const JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = {runtime_input_version};
 
 use service_runtime_core::{{
-    ManagedStateCommitmentV1, {runtime_input_type}, RuntimeRefineOutputV1, StateRoot,
+    BackendMetadataV1, ManagedStateCommitmentV1, {runtime_input_type}, RuntimeRefineOutputV1, StateRoot,
     MANAGED_STATE_COMMITMENT_KEY_V1,
 }};
 #[repr(C)]
@@ -126,35 +127,93 @@ static mut OUTPUT: [u8; 2097152] = [0; 2097152];
 
 {application_source}
 
-#[no_mangle]
-pub extern "C" fn minijam_refine() -> RefineOutput {{
+fn run_refine() -> Result<RuntimeRefineOutputV1, service_runtime_guest::GuestError> {{
     service_runtime_guest::guest_support::reset_runtime();
     {stage_entry}
     let mut input_size = 0usize;
     let status = unsafe {{ minijam_payload(INPUT.as_mut_ptr(), 1048576, &mut input_size) }};
-    if status != 0 {{ return error_output(1); }}
+    if status != 0 {{ return Err(service_runtime_guest::GuestError::InvalidInput); }}
     {stage_payload}
     let input = unsafe {{ core::slice::from_raw_parts(INPUT.as_ptr(), input_size) }};
     let runtime_input = match {runtime_input_type}::decode(input) {{
         Ok(value) => value,
-        Err(_) => return error_output(1),
+        Err(_) => return Err(service_runtime_guest::GuestError::InvalidInput),
     }};
     {stage_input_decode}
     let output = match {refine_call} {{
         Ok(value) => value,
-        Err(error) => return error_output(match error {{
-            service_runtime_guest::GuestError::InvalidInput => 1,
-            service_runtime_guest::GuestError::State => 2,
-            service_runtime_guest::GuestError::Application => 3,
-        }}),
+        Err(error) => return Err(error),
+    }};
+    {stage_refine_return}
+    Ok(output)
+}}
+
+fn run_plan() -> Result<(), service_runtime_guest::GuestError> {{
+    service_runtime_guest::guest_support::reset_runtime();
+    let mut input_size = 0usize;
+    let status = unsafe {{ minijam_payload(INPUT.as_mut_ptr(), 1048576, &mut input_size) }};
+    if status != 0 {{ return Err(service_runtime_guest::GuestError::InvalidInput); }}
+    let input = unsafe {{ core::slice::from_raw_parts(INPUT.as_ptr(), input_size) }};
+    let runtime_input = match {runtime_input_type}::decode(input) {{
+        Ok(value) => value,
+        Err(_) => return Err(service_runtime_guest::GuestError::InvalidInput),
+    }};
+    service_runtime_guest::plan_owned_with_external(&GeneratedApplication, runtime_input)
+}}
+
+fn output_for(planning: bool) -> RefineOutput {{
+    if planning {{
+        return match run_plan() {{
+            Ok(()) => planner_done_output(),
+            Err(service_runtime_guest::GuestError::NeedState(key)) => {{
+                let encoded = match service_runtime_core::encode_planner_need_state(&key) {{
+                    Ok(value) => value,
+                    Err(_) => return error_output(2),
+                }};
+                if encoded.len() > 2097152 {{ return error_output(14); }}
+                unsafe {{ OUTPUT[..encoded.len()].copy_from_slice(&encoded); }}
+                RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size: encoded.len() }}
+            }}
+            Err(service_runtime_guest::GuestError::NeedExternalState {{ service_id, key }}) => {{
+                let encoded = match service_runtime_core::encode_planner_need_external_state(service_id, &key) {{
+                    Ok(value) => value,
+                    Err(_) => return error_output(2),
+                }};
+                if encoded.len() > 2097152 {{ return error_output(14); }}
+                unsafe {{ OUTPUT[..encoded.len()].copy_from_slice(&encoded); }}
+                RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size: encoded.len() }}
+            }}
+            Err(service_runtime_guest::GuestError::InvalidInput) => error_output(1),
+            Err(service_runtime_guest::GuestError::State) => error_output(2),
+            Err(service_runtime_guest::GuestError::Application) => error_output(3),
+        }};
+    }}
+    let output = match run_refine() {{
+        Ok(output) => output,
+        Err(service_runtime_guest::GuestError::NeedState(key)) if planning => {{
+            let encoded = match service_runtime_core::encode_planner_need_state(&key) {{
+                Ok(value) => value,
+                Err(_) => return error_output(2),
+            }};
+            if encoded.len() > 2097152 {{ return error_output(14); }}
+            unsafe {{ OUTPUT[..encoded.len()].copy_from_slice(&encoded); }}
+            return RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size: encoded.len() }};
+        }}
+        Err(service_runtime_guest::GuestError::InvalidInput) => return error_output(1),
+        Err(service_runtime_guest::GuestError::State) => return error_output(2),
+        Err(service_runtime_guest::GuestError::Application) => return error_output(3),
+        Err(service_runtime_guest::GuestError::NeedState(_)) => return error_output(2),
+        Err(service_runtime_guest::GuestError::NeedExternalState {{ .. }}) => return error_output(2),
     }};
     if output.receipts.len() == 1 {{
-        if let Some(error_code) = output.receipts[0].error_code.filter(|code| code & 0x8000_0000 != 0) {{
+        if let Some(error_code) = output.receipts[0]
+            .error_code
+            .filter(|code| code & 0x8000_0000 != 0)
+        {{
             service_runtime_guest::guest_support::diagnostic_stage(b"jamscript:native-error-output");
             return error_output(error_code);
         }}
     }}
-    {stage_refine_return}
     {stage_output_encode}
     let encoded = match output.encode() {{
         Ok(value) => value,
@@ -163,6 +222,25 @@ pub extern "C" fn minijam_refine() -> RefineOutput {{
     if encoded.len() > 2097152 {{ return error_output(14); }}
     unsafe {{ OUTPUT[..encoded.len()].copy_from_slice(&encoded); }}
     {stage_output_return}
+    RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size: encoded.len() }}
+}}
+
+#[no_mangle]
+pub extern "C" fn minijam_refine() -> RefineOutput {{ output_for(false) }}
+
+#[no_mangle]
+pub extern "C" fn jamscript_plan_v1() -> RefineOutput {{ output_for(true) }}
+
+#[no_mangle]
+pub extern "C" fn jamscript_backend_metadata_v1() -> RefineOutput {{
+    let metadata = BackendMetadataV1 {{
+        service_key: service_runtime_core::ServiceKeyV1::new({backend_metadata}),
+        abi_version: 1,
+        planner_version: service_runtime_core::BACKEND_PLANNER_VERSION,
+        managed_state_version: service_runtime_core::BACKEND_MANAGED_STATE_VERSION,
+    }};
+    let encoded = metadata.encode();
+    unsafe {{ OUTPUT[..encoded.len()].copy_from_slice(&encoded); }}
     RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size: encoded.len() }}
 }}
 
@@ -224,6 +302,7 @@ fn read_current_commitment() -> Result<StateRoot, ()> {{
 }}
 
 fn error_output(code: u32) -> RefineOutput {{ unsafe {{ OUTPUT[..4].copy_from_slice(&code.to_le_bytes()); RefineOutput {{ data: OUTPUT.as_ptr(), size: 4 }} }} }}
+fn planner_done_output() -> RefineOutput {{ unsafe {{ OUTPUT[0] = 0; RefineOutput {{ data: OUTPUT.as_ptr(), size: 1 }} }} }}
 fn read_fnencode(input: &[u8], offset: &mut usize) -> Result<u64, ()> {{
     let first = *input.get(*offset).ok_or(())?;
     *offset += 1;
@@ -793,6 +872,10 @@ fn byte_array_literal(bytes: &[u8]) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn backend_metadata_literal(service_key: [u8; 32]) -> String {
+    byte_array_literal(&service_key)
 }
 
 fn management_policy_literal(policy: ManagementPolicyConfig) -> String {

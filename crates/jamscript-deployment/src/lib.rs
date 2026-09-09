@@ -302,7 +302,9 @@ fn validate_network_name(value: &str) -> Result<(), DeploymentError> {
 pub struct ServiceArtifact {
     pub directory: PathBuf,
     pub blob_path: PathBuf,
+    pub pvm_path: Option<PathBuf>,
     pub blob: Vec<u8>,
+    pub pvm: Option<Vec<u8>>,
     pub code_hash: [u8; 32],
     pub build_id: String,
     pub service_key: Option<[u8; 32]>,
@@ -321,6 +323,7 @@ pub fn load_service_artifact(directory: &Path) -> Result<ServiceArtifact, Deploy
         )
     })?;
     let blob_path = directory.join("service.blob");
+    let pvm_path = directory.join("service.pvm");
     let build_path = directory.join("build.json");
     let checksums_path = directory.join("checksums.json");
     let blob = fs::read(&blob_path).map_err(|error| {
@@ -329,6 +332,7 @@ pub fn load_service_artifact(directory: &Path) -> Result<ServiceArtifact, Deploy
             format!("missing service.blob: {error}"),
         )
     })?;
+    let pvm = fs::read(&pvm_path).ok();
     let build_bytes = fs::read(&build_path).map_err(|error| {
         DeploymentError::new(
             ErrorCode::ArtifactNotFound,
@@ -373,7 +377,9 @@ pub fn load_service_artifact(directory: &Path) -> Result<ServiceArtifact, Deploy
     Ok(ServiceArtifact {
         directory,
         blob_path,
+        pvm_path: pvm.as_ref().map(|_| pvm_path),
         blob,
+        pvm,
         code_hash,
         build_id,
         service_key,
@@ -487,6 +493,103 @@ pub trait JsonRpcTransport {
         timeout: Duration,
         mutating: bool,
     ) -> Result<serde_json::Value, DeploymentError>;
+}
+
+/// Register a successfully deployed Service with the application backend.
+/// This is deliberately a separate control-plane call from on-chain Service
+/// creation so a failed registration can be retried without creating another
+/// Service.
+pub fn register_backend_service<T: JsonRpcTransport>(
+    transport: &T,
+    endpoint: &str,
+    service_id: u32,
+    artifact: &ServiceArtifact,
+    timeout: Duration,
+) -> Result<serde_json::Value, DeploymentError> {
+    let registration = serde_json::json!({
+        "serviceId": service_id,
+        "expectedCodeHash": hash_hex(&artifact.code_hash),
+    });
+    let result = match transport.call(
+        endpoint,
+        "jamscript_registerServiceV1",
+        registration,
+        timeout,
+        true,
+    ) {
+        Ok(result) => result,
+        Err(first_error) => {
+            let Some(pvm) = artifact.pvm.as_ref() else {
+                return Err(DeploymentError::new(
+                    ErrorCode::BackendRegistrationFailed,
+                    format!(
+                        "on-chain Service {service_id} is deployed, but backend registration failed: {}",
+                        first_error.message
+                    ),
+                ));
+            };
+            let digest = blake2_hash(pvm);
+            transport
+                .call(
+                    endpoint,
+                    "jamscript_putArtifactV1",
+                    serde_json::json!({
+                        "format": "jamscript-pvm-v1",
+                        "digest": hash_hex(&digest),
+                        "bytesBase64": BASE64.encode(pvm),
+                    }),
+                    timeout,
+                    true,
+                )
+                .map_err(|error| {
+                    DeploymentError::new(
+                        ErrorCode::BackendRegistrationFailed,
+                        format!(
+                            "backend artifact upload failed after registration fallback: {}",
+                            error.message
+                        ),
+                    )
+                })?;
+            transport
+                .call(
+                    endpoint,
+                    "jamscript_registerServiceV1",
+                    serde_json::json!({
+                        "serviceId": service_id,
+                        "expectedCodeHash": hash_hex(&artifact.code_hash),
+                        "artifactDigest": hash_hex(&digest),
+                    }),
+                    timeout,
+                    true,
+                )
+                .map_err(|error| {
+                    DeploymentError::new(
+                        ErrorCode::BackendRegistrationFailed,
+                        format!(
+                            "backend registration failed after artifact upload: {}",
+                            error.message
+                        ),
+                    )
+                })?
+        }
+    };
+    let returned_id = result
+        .get("serviceId")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            DeploymentError::new(
+                ErrorCode::BackendRegistrationFailed,
+                "backend registration response omitted serviceId",
+            )
+        })?;
+    if returned_id != service_id {
+        return Err(DeploymentError::new(
+            ErrorCode::BackendRegistrationFailed,
+            format!("backend registered unexpected serviceId {returned_id}; expected {service_id}"),
+        ));
+    }
+    Ok(result)
 }
 
 impl<T: JsonRpcTransport + ?Sized> JsonRpcTransport for &T {
@@ -1194,8 +1297,10 @@ mod tests {
         ServiceArtifact {
             directory: PathBuf::from("dist"),
             blob_path: PathBuf::from("dist/service.blob"),
+            pvm_path: None,
             code_hash: blake2_hash(&blob),
             blob,
+            pvm: None,
             build_id: "build-id".into(),
             service_key: None,
             min_item_gas: 1,
@@ -1327,6 +1432,38 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].0.ends_with(":minijam_createServiceV1"));
         assert!(calls[0].2);
+    }
+
+    #[test]
+    fn backend_registration_is_separate_and_does_not_send_a_local_locator() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut artifact = artifact();
+        artifact.directory = directory.path().to_path_buf();
+        artifact.service_key = Some([7; 32]);
+        let transport = MockTransport::with_responses(vec![Ok(serde_json::json!({
+            "serviceId": 7,
+        }))]);
+        let result = register_backend_service(
+            &transport,
+            "http://backend.test",
+            7,
+            &artifact,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(result["serviceId"], 7);
+        let calls = transport.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].0,
+            "http://backend.test:jamscript_registerServiceV1"
+        );
+        assert_eq!(
+            calls[0].1["expectedCodeHash"],
+            hash_hex(&artifact.code_hash)
+        );
+        assert!(calls[0].1.get("adminToken").is_none());
+        assert!(calls[0].1.get("plannerArtifact").is_none());
     }
 
     #[test]
