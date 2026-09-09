@@ -57,7 +57,7 @@ copy_file "${NODE_BIN}" bin/node
 copy_file "${CLANG_BIN}" bin/clang
 copy_file "${LLVM_AR_BIN}" bin/llvm-ar
 copy_file "${LLVM_AR_BIN}" bin/ar
-copy_file "${LLD_BIN}" bin/ld.lld
+copy_file "${LLD_BIN}" bin/ld64.lld
 copy_file "${LLVM_READELF_BIN}" bin/llvm-readelf
 copy_file "${ROOT}/tools/release/toolchain/jamscript-host-linker" bin/jamscript-host-linker
 copy_file "${RUSTC_BIN}" bin/rustc
@@ -265,7 +265,7 @@ declare -a MACOS_ROOT_BINARIES=(
   "${STAGE}/bin/node"
   "${STAGE}/bin/clang"
   "${STAGE}/bin/llvm-ar"
-  "${STAGE}/bin/ld.lld"
+  "${STAGE}/bin/ld64.lld"
   "${STAGE}/bin/llvm-readelf"
   "${STAGE}/bin/rustc"
   "${STAGE}/bin/cargo"
@@ -284,7 +284,7 @@ staged_version_gate() {
 staged_version_gate STAGED_NODE "${STAGE}/bin/node"
 staged_version_gate STAGED_CLANG "${STAGE}/bin/clang"
 staged_version_gate STAGED_LLVM_AR "${STAGE}/bin/llvm-ar"
-staged_version_gate STAGED_LLD "${STAGE}/bin/ld.lld"
+staged_version_gate STAGED_LLD "${STAGE}/bin/ld64.lld"
 staged_version_gate STAGED_LLVM_READELF "${STAGE}/bin/llvm-readelf"
 staged_version_gate STAGED_RUSTC "${STAGE}/bin/rustc"
 staged_version_gate STAGED_CARGO "${STAGE}/bin/cargo"

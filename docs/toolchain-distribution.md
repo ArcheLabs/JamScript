@@ -10,7 +10,8 @@ JamScript CLI + source + target
 ```
 
 The distribution owns Node, LLVM/Clang, `llvm-ar` (also exposed as the
-ScriptC-compatible `ar` command), `ld.lld`, `llvm-readelf`, Rust, rust-src and
+ScriptC-compatible `ar` command), the native LLD driver (`ld.lld` on Linux or
+`ld64.lld` on macOS), `llvm-readelf`, Rust, rust-src and
 compiler-builtins, ScriptC's prepared npm tree, compiler/runtime source crates,
 Cargo's vendored dependencies, and the JAM target SDK. It is described by
 [`toolchains/distribution-v1.toml`](../toolchains/distribution-v1.toml).

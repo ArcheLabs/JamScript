@@ -10,7 +10,7 @@ use jamscript_deployment::{
 use jamscript_ir::abi_for_language;
 use jamscript_parser::parse_service_v02;
 use jamscript_target_jam::{verify_deployment_bundle, JamTarget, NativeModule};
-use jamscript_toolchain::ToolchainManager;
+use jamscript_toolchain::{lld_executable_name, ToolchainManager};
 use polkavm::{
     BackendKind, Config as PvmConfig, Engine, Linker, MemoryAccessError, Module, ModuleConfig, Reg,
 };
@@ -306,6 +306,7 @@ fn doctor(json: bool) -> Result<()> {
     let manager = ToolchainManager::new()?;
     let status = manager.status();
     let root = status.path.clone();
+    let lld_name = lld_executable_name(&status.platform);
     let jams_binary = std::env::current_exe().ok();
     let tool_paths = root.as_ref().map(|root| {
         serde_json::json!({
@@ -315,7 +316,7 @@ fn doctor(json: bool) -> Result<()> {
             "scriptc": root.join("scriptc"),
             "clang": root.join("bin/clang"),
             "llvm_ar": root.join("bin/llvm-ar"),
-            "lld": root.join("bin/ld.lld"),
+            "lld": root.join("bin").join(lld_name),
             "readelf": root.join("bin/llvm-readelf"),
             "host_linker": root.join("bin/jamscript-host-linker"),
             "polkavm": root.join("toolchains/polkavm.lock"),
@@ -332,7 +333,7 @@ fn doctor(json: bool) -> Result<()> {
             root.join("scriptc"),
             root.join("bin/clang"),
             root.join("bin/llvm-ar"),
-            root.join("bin/ld.lld"),
+            root.join("bin").join(lld_name),
             root.join("bin/llvm-readelf"),
             root.join("bin/jamscript-host-linker"),
             root.join("toolchains/polkavm.lock"),
@@ -399,7 +400,7 @@ fn doctor(json: bool) -> Result<()> {
             ("Node", root.join("bin/node")),
             ("ScriptC", root.join("scriptc")),
             ("Clang", root.join("bin/clang")),
-            ("LLVM/Clang linker", root.join("bin/ld.lld")),
+            ("LLVM/Clang linker", root.join("bin").join(lld_name)),
             ("LLVM ELF inspector", root.join("bin/llvm-readelf")),
             (
                 "Managed host linker",

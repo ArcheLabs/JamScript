@@ -22,7 +22,7 @@ run_gate() {
   fi
 }
 
-for binary in node clang llvm-ar ld.lld llvm-readelf rustc cargo; do
+for binary in node clang llvm-ar ld64.lld llvm-readelf rustc cargo; do
   path="${BUNDLE_ROOT}/bin/${binary}"
   test -x "${path}" || { echo "managed executable is missing: ${path}" >&2; exit 1; }
   description="$(file -b "${path}")"
@@ -44,7 +44,7 @@ done
 printf '%s\n' 'int main(void) { return 0; }' > "${RUN_ROOT}/hello.c"
 run_gate MANAGED_CLANG_HOST_LINK \
   "${BUNDLE_ROOT}/bin/clang" -fuse-ld=lld \
-  "--ld-path=${BUNDLE_ROOT}/bin/ld.lld" "${RUN_ROOT}/hello.c" -o "${RUN_ROOT}/hello-c"
+  "--ld-path=${BUNDLE_ROOT}/bin/ld64.lld" "${RUN_ROOT}/hello.c" -o "${RUN_ROOT}/hello-c"
 
 printf '%s\n' 'fn main() {}' > "${RUN_ROOT}/hello.rs"
 run_gate MANAGED_RUST_HOST_LINK \

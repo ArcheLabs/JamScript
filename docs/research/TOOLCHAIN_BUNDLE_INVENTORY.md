@@ -9,7 +9,7 @@ and unpacked byte set; `verify-bundle.py` rejects any missing or modified file.
 | Component | Required | Source of truth / validation |
 | --- | --- | --- |
 | Node | YES | `bin/node`, pinned `NODE_VERSION`, executable identity check |
-| LLVM/Clang | YES | `bin/clang`, `bin/llvm-ar`, `bin/ar`, `bin/ld.lld`, locked hashes |
+| LLVM/Clang | YES | `bin/clang`, `bin/llvm-ar`, `bin/ar`, native `bin/ld.lld` or `bin/ld64.lld`, locked hashes |
 | Native shared libraries | YES | `build-linux.sh` ldd closure; executable version probes after install |
 | Rust compiler | YES | `bin/rustc`, nightly identity, copied `lib/rustlib` |
 | Cargo | YES | `bin/cargo`, bundled `cargo/config.toml` |
@@ -27,7 +27,7 @@ The bundle layout is:
 
 ```text
 manifest.json, Cargo.lock
-bin/{node,clang,llvm-ar,ar,ld.lld,jamscript-host-linker,rustc,cargo}
+bin/{node,clang,llvm-ar,ar,ld.lld|ld64.lld,jamscript-host-linker,rustc,cargo}
 lib/{native runtime closure,rustlib}
 scriptc/{m2,node_modules,package-lock.json}
 runtime/{Cargo.lock,crates}
@@ -38,7 +38,7 @@ toolchains/polkavm.lock
 ```
 
 The bundle also contains `bin/jamscript-host-linker`. It is a relocatable
-wrapper that invokes the bundled Clang with the bundled `ld.lld`; the managed
+wrapper that invokes the bundled Clang with the bundled native LLD driver; the managed
 execution-closure verifier must pass before a second reproducibility bundle is
 built and before the bundle can be consumed by Release Kill Test 001.
 
@@ -59,7 +59,7 @@ under `JAMSCRIPT_TOOLCHAIN_HOME`.
 | Cargo | rustc | YES | `RUSTC` absolute installed bundle path |
 | host rustc | host linker | YES | `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER` to `bin/jamscript-host-linker` |
 | host linker | clang | YES | wrapper-relative `bin/clang` |
-| clang | ld.lld | YES | wrapper-relative `bin/ld.lld` via `--ld-path` |
+| clang | native LLD | YES | wrapper-relative `bin/ld.lld` (Linux) or `bin/ld64.lld` (macOS) via `--ld-path` |
 | Cargo build.rs | native executable | generated | linked by the managed host chain |
 | Cargo proc-macro | native dylib | generated | linked by the managed host chain |
 | guest rustc | rust-lld | YES / sysroot | Rust sysroot and locked PolkaVM target |
