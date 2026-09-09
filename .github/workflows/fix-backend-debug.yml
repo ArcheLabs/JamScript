@@ -19,17 +19,33 @@ jobs:
         with:
           toolchain: nightly-2026-05-02
           components: rustfmt, clippy
-      - name: Remove unnecessary BackendState Debug derive
+      - name: Fix BackendState derives
         shell: python
         run: |
           from pathlib import Path
           path = Path("crates/jamscript-service-backend/src/lib.rs")
           text = path.read_text()
-          old = "#[derive(Clone, Debug)]\npub struct BackendState {"
-          new = "#[derive(Clone)]\npub struct BackendState {"
-          if old not in text:
+          old_derive = "#[derive(Clone, Debug)]\npub struct BackendState {"
+          new_derive = "#[derive(Clone, Default)]\npub struct BackendState {"
+          old_default = '''impl Default for BackendState {
+              fn default() -> Self {
+                  Self {
+                      registry: ServiceRegistry::default(),
+                      provider: FullStateProvider::default(),
+                      pending: BTreeMap::new(),
+                      predictions: BTreeMap::new(),
+                  }
+              }
+          }
+
+          '''
+          if old_derive not in text:
               raise SystemExit("target BackendState derive not found")
-          path.write_text(text.replace(old, new, 1))
+          if old_default not in text:
+              raise SystemExit("manual BackendState Default impl not found")
+          text = text.replace(old_derive, new_derive, 1)
+          text = text.replace(old_default, "", 1)
+          path.write_text(text)
       - name: Validate
         shell: bash
         run: |
@@ -45,5 +61,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add crates/jamscript-service-backend/src/lib.rs
-          git commit -m "fix: remove unnecessary BackendState Debug derive"
+          git commit -m "fix: derive BackendState without Debug"
           git push
