@@ -304,12 +304,13 @@ python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
   --jam-blob-encoder-version "$(sed -n 's/^jam_blob_encoder_version = \"\(.*\)\"/\1/p' "${ROOT}/toolchains/distribution-v1.toml")" \
   --scriptc-revision "$(sed -n 's/^commit=//p' "${ROOT}/toolchains/scriptc/REVISION")"
 
-# BSD tar is used on the native runner. zstd remains an internal bundle
-# format; it is never required by the end-user CLI bootstrap archive.
-find "${STAGE}" -type f -exec touch -t 197001010000 {} +
-find "${STAGE}" -type d -exec touch -t 197001010000 {} +
+# zstd remains an internal bundle format; it is never required by the end-user
+# CLI bootstrap archive. The packer fixes tar metadata and member ordering so
+# independent stages produce byte-identical archives on native macOS runners.
 ARCHIVE="${OUT}/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
-(cd "${STAGE}" && tar --format pax --uid 0 --gid 0 --uname root --gname root -cf - . | zstd -q -T0 -19 -o "${ARCHIVE}")
+(python3 "${ROOT}/tools/release/toolchain/create-deterministic-archive.py" \
+  --root "${STAGE}" --source-date-epoch "${SOURCE_DATE_EPOCH}" | \
+  zstd -q -T1 -19 -o "${ARCHIVE}")
 if command -v shasum >/dev/null 2>&1; then shasum -a 256 "${ARCHIVE}"; else sha256sum "${ARCHIVE}"; fi
 wc -c < "${ARCHIVE}"
 cp -L "${STAGE}/manifest.json" "${OUT}/toolchain-manifest-macos-arm64.json"

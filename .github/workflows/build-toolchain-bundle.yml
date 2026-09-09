@@ -450,7 +450,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmp -s "${BUNDLE_A}" "${BUNDLE_B}"
+          if ! cmp -s "${BUNDLE_A}" "${BUNDLE_B}"; then
+            echo "macOS bundle reproducibility mismatch" >&2
+            echo "=== compressed hashes ===" >&2
+            shasum -a 256 "${BUNDLE_A}" "${BUNDLE_B}" >&2
+            diagnostics="${RUNNER_TEMP}/macos-bundle-reproducibility"
+            mkdir -p "${diagnostics}"
+            echo "=== decompressed tar hashes ===" >&2
+            zstd -q -d -c "${BUNDLE_A}" | shasum -a 256 >&2
+            zstd -q -d -c "${BUNDLE_B}" | shasum -a 256 >&2
+            echo "=== member order ===" >&2
+            zstd -q -d -c "${BUNDLE_A}" | tar -tf - > "${diagnostics}/bundle-a.list"
+            zstd -q -d -c "${BUNDLE_B}" | tar -tf - > "${diagnostics}/bundle-b.list"
+            diff -u "${diagnostics}/bundle-a.list" "${diagnostics}/bundle-b.list" || true
+            echo "BUNDLE_REPRODUCIBILITY=FAIL"
+            exit 1
+          fi
           echo "MACOS_BUNDLE_A_B_REPRODUCIBILITY=PASS"
 
       - name: Prepare validated macOS artifact

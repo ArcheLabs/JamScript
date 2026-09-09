@@ -2,6 +2,7 @@
 set -euo pipefail
 
 python3 tools/release/toolchain/test-llvm-lock.py
+python3 tools/release/toolchain/test-deterministic-archive.py
 python3 tools/release/test-write-release-manifest.py
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
