@@ -11,6 +11,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use jamscript_service_backend::{RecoveryEnvelopeV1, WorkKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use service_runtime_core::{
@@ -41,8 +42,8 @@ struct Config {
 #[derive(Default)]
 struct AdapterState {
     provider: FullStateProvider,
-    pending: BTreeMap<String, RuntimeRefineOutputV1>,
-    predictions: BTreeMap<String, RuntimeRefineOutputV1>,
+    pending: BTreeMap<WorkKey, RuntimeRefineOutputV1>,
+    predictions: BTreeMap<WorkKey, RuntimeRefineOutputV1>,
     query_fault: Option<String>,
 }
 
@@ -160,6 +161,27 @@ impl FinalizedManagedStateSource for NodeSource<'_> {
             &self.config.node_url,
             "minijam_getServiceStorageAt",
             json!([hex(&context.block_hash), self.config.service_id, hex(key)]),
+        )? {
+            Value::Null => Ok(None),
+            Value::String(encoded) => Ok(Some(decode_state_value(&parse_hex(&encoded)?)?)),
+            _ => Err("invalid Service storage response".into()),
+        }
+    }
+
+    fn service_storage_at_id(
+        &mut self,
+        context: &FinalizedContextV1,
+        service_id: u32,
+        service: ServiceKeyV1,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        if service != self.config.service_key || key != MANAGED_STATE_COMMITMENT_KEY_V1 {
+            return Err("unexpected managed-state identity".into());
+        }
+        match rpc_call(
+            &self.config.node_url,
+            "minijam_getServiceStorageAt",
+            json!([hex(&context.block_hash), service_id, hex(key)]),
         )? {
             Value::Null => Ok(None),
             Value::String(encoded) => Ok(Some(decode_state_value(&parse_hex(&encoded)?)?)),
@@ -289,7 +311,7 @@ impl Adapter {
         let result = rpc_call(
             &self.config.formal_url,
             "minijam_submitWorkV1",
-            serde_json::to_value(request).expect("request serializes"),
+            serde_json::to_value(&request).expect("request serializes"),
         )
         .map_err(RpcFailure::downstream)?;
         let package_hash = result
@@ -297,13 +319,13 @@ impl Adapter {
             .and_then(Value::as_str)
             .ok_or_else(|| RpcFailure::chain("formal RPC omitted packageHash"))?
             .to_owned();
+        let work_key = WorkKey {
+            service_id: request.service_id,
+            package_hash: parse_hash(&package_hash).map_err(RpcFailure::chain)?,
+        };
         if !tamper_witness {
-            state
-                .pending
-                .insert(package_hash.to_lowercase(), predicted_output.clone());
-            state
-                .predictions
-                .insert(package_hash.to_lowercase(), predicted_output);
+            state.pending.insert(work_key, predicted_output.clone());
+            state.predictions.insert(work_key, predicted_output);
         }
         Ok(result)
     }
@@ -317,12 +339,16 @@ impl Adapter {
         .map_err(RpcFailure::downstream)?;
         if result.get("status").and_then(Value::as_str) == Some("imported") {
             self.materialize(&request.package_hash)?;
+            let work_key = WorkKey {
+                service_id: self.config.service_id,
+                package_hash: parse_hash(&request.package_hash).map_err(RpcFailure::invalid)?,
+            };
             if let Some(output) = self
                 .state
                 .lock()
                 .expect("adapter state lock")
                 .predictions
-                .get(&request.package_hash.to_lowercase())
+                .get(&work_key)
                 .cloned()
             {
                 if let Some(object) = result.as_object_mut() {
@@ -334,12 +360,16 @@ impl Adapter {
     }
 
     fn materialize(&self, package_hash: &str) -> Result<(), RpcFailure> {
+        let work_key = WorkKey {
+            service_id: self.config.service_id,
+            package_hash: parse_hash(package_hash).map_err(RpcFailure::invalid)?,
+        };
         let output = self
             .state
             .lock()
             .expect("adapter state lock")
             .pending
-            .get(&package_hash.to_lowercase())
+            .get(&work_key)
             .cloned();
         let Some(output) = output else { return Ok(()) };
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -353,7 +383,7 @@ impl Adapter {
                     .lock()
                     .expect("adapter state lock")
                     .pending
-                    .remove(&package_hash.to_lowercase());
+                    .remove(&work_key);
                 return Ok(());
             }
             let mut source = NodeSource {
@@ -381,9 +411,15 @@ impl Adapter {
                     .apply_recovery(self.config.service_key, &output)
                     .map_err(|error| RpcFailure::builder(format!("recovery: {error:?}")))?;
                 if let Some(path) = &self.config.provider_store {
-                    append_recovery(path, &output).map_err(RpcFailure::builder)?;
+                    append_recovery(
+                        path,
+                        self.config.service_id,
+                        self.config.service_key,
+                        &output,
+                    )
+                    .map_err(RpcFailure::builder)?;
                 }
-                state.pending.remove(&package_hash.to_lowercase());
+                state.pending.remove(&work_key);
                 return Ok(());
             }
             if root != output.parent_root || Instant::now() >= deadline {
@@ -454,12 +490,16 @@ impl Adapter {
     }
 
     fn prediction(&self, package_hash: &str) -> RpcResult {
+        let work_key = WorkKey {
+            service_id: self.config.service_id,
+            package_hash: parse_hash(package_hash).map_err(RpcFailure::invalid)?,
+        };
         let output = self
             .state
             .lock()
             .expect("adapter state lock")
             .predictions
-            .get(&package_hash.to_lowercase())
+            .get(&work_key)
             .cloned()
             .ok_or_else(|| RpcFailure::new(-32013, "prediction not found", None))?;
         Ok(json!({
@@ -538,7 +578,11 @@ fn main() -> Result<(), String> {
         test_methods: env::var("JAMSCRIPT_E2E_TEST_METHODS").as_deref() == Ok("true"),
         provider_store: env::var_os("JAMSCRIPT_PROVIDER_STORE").map(PathBuf::from),
     };
-    let provider = load_provider(config.provider_store.as_deref(), config.service_key)?;
+    let provider = load_provider(
+        config.provider_store.as_deref(),
+        config.service_id,
+        config.service_key,
+    )?;
     let listener = TcpListener::bind(&config.bind).map_err(|error| error.to_string())?;
     let adapter = Adapter {
         config,
@@ -565,7 +609,11 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-fn load_provider(path: Option<&Path>, service: ServiceKeyV1) -> Result<FullStateProvider, String> {
+fn load_provider(
+    path: Option<&Path>,
+    service_id: u32,
+    service: ServiceKeyV1,
+) -> Result<FullStateProvider, String> {
     let Some(path) = path else {
         return Ok(FullStateProvider::default());
     };
@@ -588,22 +636,34 @@ fn load_provider(path: Option<&Path>, service: ServiceKeyV1) -> Result<FullState
             .get(offset..offset + length)
             .ok_or("truncated Provider recovery log entry")?;
         offset += length;
-        let output = RuntimeRefineOutputV1::decode(encoded)
+        let envelope = RecoveryEnvelopeV1::decode(encoded)
             .map_err(|_| "invalid Provider recovery log entry")?;
+        if envelope.service_id != service_id || envelope.service_key != service {
+            return Err("Provider recovery Service identity mismatch".into());
+        }
         provider
-            .apply_recovery(service, &output)
+            .apply_recovery(service, &envelope.output)
             .map_err(|error| format!("invalid Provider recovery chain: {error:?}"))?;
     }
     Ok(provider)
 }
 
-fn append_recovery(path: &Path, output: &RuntimeRefineOutputV1) -> Result<(), String> {
+fn append_recovery(
+    path: &Path,
+    service_id: u32,
+    service_key: ServiceKeyV1,
+    output: &RuntimeRefineOutputV1,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let encoded = output
-        .encode()
-        .map_err(|error| format!("encoding Provider recovery: {error:?}"))?;
+    let encoded = RecoveryEnvelopeV1 {
+        service_id,
+        service_key,
+        output: output.clone(),
+    }
+    .encode()
+    .map_err(|error| format!("encoding Provider recovery: {error:?}"))?;
     let length = u32::try_from(encoded.len()).map_err(|_| "Provider recovery entry too large")?;
     let mut file = OpenOptions::new()
         .create(true)

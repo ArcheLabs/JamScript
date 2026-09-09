@@ -1,8 +1,8 @@
 use service_runtime_core::{
-    ExecutionContext, ManagedStateAccess, ManagedStateCommitmentV1, RuntimeRefineInputV1,
-    RuntimeRefineOutputV1, ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1,
-    StateDiffV1, StateQueryResponseV1, StateRecoveryV1, StateRoot, EMPTY_STATE_ROOT_V1,
-    MANAGED_STATE_COMMITMENT_KEY_V1,
+    ExecutionContext, ExternalStateAccess, ExternalStateWitnessV1, ManagedStateAccess,
+    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV1, ServiceApplication,
+    ServiceKeyV1, StateAccessError, StateAccessPlanV1, StateDiffV1, StateQueryResponseV1,
+    StateRecoveryV1, StateRoot, EMPTY_STATE_ROOT_V1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
 use service_runtime_guest::refine;
 use service_runtime_state::{FullState, StateError, StateTransaction};
@@ -96,6 +96,27 @@ pub trait FinalizedManagedStateSource {
         service: ServiceKeyV1,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, Self::Error>;
+
+    /// Resolve a canonical commitment by JAM ServiceId. Implementations that
+    /// can address Service storage by id should override this; the default
+    /// keeps the single-Service/reference source compatible.
+    fn service_storage_at_id(
+        &mut self,
+        context: &FinalizedContextV1,
+        service_id: u32,
+        service: ServiceKeyV1,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        let _ = service_id;
+        self.service_storage_at(context, service, key)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalServiceSpec {
+    pub service_id: u32,
+    pub service_key: ServiceKeyV1,
+    pub access_plan: StateAccessPlanV1,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -171,6 +192,24 @@ where
         Application: ServiceApplication,
         Application::Error: Into<StateAccessError>,
     {
+        self.build_actions_with_external(service, application, actions, &[])
+    }
+
+    /// Build a local transition with explicitly provisioned, proof-backed
+    /// read-only external Services. The caller supplies the access plan for
+    /// each dependency; planner artifacts can discover and populate these
+    /// plans before calling this method.
+    pub fn build_actions_with_external<Application>(
+        &mut self,
+        service: ServiceKeyV1,
+        application: &Application,
+        actions: Vec<Vec<u8>>,
+        external_services: &[ExternalServiceSpec],
+    ) -> Result<BuiltManagedWork, WorkBuilderError<Source::Error, Provider::Error>>
+    where
+        Application: ServiceApplication,
+        Application::Error: Into<StateAccessError>,
+    {
         let context = self
             .source
             .finalized_context()
@@ -188,6 +227,51 @@ where
             None => EMPTY_STATE_ROOT_V1,
         };
 
+        let mut external_witnesses = Vec::with_capacity(external_services.len());
+        let mut known_external = BTreeMap::new();
+        let mut seen_external = BTreeMap::new();
+        for external in external_services {
+            if seen_external
+                .insert(external.service_id, external.service_key)
+                .is_some()
+            {
+                return Err(WorkBuilderError::InvalidExternalServices);
+            }
+            let commitment = self
+                .source
+                .service_storage_at_id(
+                    &context,
+                    external.service_id,
+                    external.service_key,
+                    MANAGED_STATE_COMMITMENT_KEY_V1,
+                )
+                .map_err(WorkBuilderError::Source)?
+                .ok_or(WorkBuilderError::MissingExternalCommitment)?;
+            let root = ManagedStateCommitmentV1::decode(&commitment)
+                .map_err(|_| WorkBuilderError::InvalidCommitment)?
+                .root;
+            let witness = self
+                .provider
+                .build_witness(external.service_key, root, &external.access_plan)
+                .map_err(WorkBuilderError::Provider)?;
+            let values = external
+                .access_plan
+                .keys
+                .iter()
+                .map(|key| {
+                    self.provider
+                        .value_at(external.service_key, root, key)
+                        .map(|value| (key.clone(), value))
+                        .map_err(WorkBuilderError::Provider)
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            known_external.insert(external.service_id, values);
+            external_witnesses.push(ExternalStateWitnessV1 {
+                service_id: external.service_id,
+                managed_state: witness,
+            });
+        }
+
         let mut keys = initial_runtime_keys(&actions);
         let mut known = BTreeMap::new();
         for key in &keys {
@@ -203,8 +287,15 @@ where
             let plan =
                 StateAccessPlanV1::from_keys(keys.iter()).map_err(WorkBuilderError::StateWire)?;
             let mut planning_state = PlanningState::new(known.clone());
-            let result = planning_execute(application, &mut planning_state, &plan, &actions)
-                .map_err(WorkBuilderError::Application)?;
+            let mut planning_external = PlanningExternalState::new(known_external.clone());
+            let result = planning_execute(
+                application,
+                &mut planning_state,
+                &plan,
+                &actions,
+                Some(&mut planning_external),
+            )
+            .map_err(WorkBuilderError::Application)?;
             match result {
                 PlanningOutcome::NeedState(key) => {
                     if known.contains_key(&key) {
@@ -238,6 +329,7 @@ where
         let refine_input = RuntimeRefineInputV1 {
             version: RuntimeRefineInputV1::VERSION,
             managed_state: witness,
+            external_state: external_witnesses,
             actions,
         };
         let predicted_output =
@@ -280,6 +372,7 @@ fn planning_execute<Application>(
     state: &mut PlanningState,
     plan: &StateAccessPlanV1,
     actions: &[Vec<u8>],
+    mut external: Option<&mut dyn ExternalStateAccess>,
 ) -> Result<PlanningOutcome, StateAccessError>
 where
     Application: ServiceApplication,
@@ -288,10 +381,22 @@ where
     for action in actions {
         state.begin_transaction()?;
         let result = {
-            let mut context = ExecutionContext::with_access_plan(state, None, plan);
-            application
-                .execute(&mut context, action)
-                .map_err(Into::into)
+            match external.as_deref_mut() {
+                Some(external) => {
+                    let mut context = ExecutionContext::with_access_plan_and_external_state(
+                        state, None, plan, external,
+                    );
+                    application
+                        .execute(&mut context, action)
+                        .map_err(Into::into)
+                }
+                None => {
+                    let mut context = ExecutionContext::with_access_plan(state, None, plan);
+                    application
+                        .execute(&mut context, action)
+                        .map_err(Into::into)
+                }
+            }
         };
         match result {
             Ok(()) => state.commit_transaction()?,
@@ -314,6 +419,27 @@ struct PlanningState {
     base: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     transactions: Vec<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+}
+
+struct PlanningExternalState {
+    values: BTreeMap<u32, BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+}
+
+impl PlanningExternalState {
+    fn new(values: BTreeMap<u32, BTreeMap<Vec<u8>, Option<Vec<u8>>>>) -> Self {
+        Self { values }
+    }
+}
+
+impl ExternalStateAccess for PlanningExternalState {
+    fn get(&mut self, service_id: u32, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
+        self.values
+            .get(&service_id)
+            .ok_or(StateAccessError::Backend)?
+            .get(key)
+            .cloned()
+            .ok_or_else(|| StateAccessError::NeedState(key.to_vec()))
+    }
 }
 
 impl PlanningState {
@@ -398,6 +524,8 @@ pub enum WorkBuilderError<SourceError, ProviderError> {
     Verification,
     ProviderInconsistent,
     PlanningLimit,
+    MissingExternalCommitment,
+    InvalidExternalServices,
 }
 
 #[derive(Clone, Default)]
@@ -525,7 +653,7 @@ mod tests {
     use jamscript_crypto::SR25519_CONTEXT;
     use jamscript_protocol::SignedActionV1;
     use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
-    use service_runtime_core::ActionStatusV1;
+    use service_runtime_core::{ActionStatusV1, ExternalStateDependencyV1};
     use service_runtime_guest::refine;
     use service_runtime_state::{ManagedState, ProofState};
     use std::collections::VecDeque;
@@ -856,6 +984,7 @@ mod tests {
         let input = RuntimeRefineInputV1 {
             version: 1,
             managed_state: witness,
+            external_state: Vec::new(),
             actions: actions.into_iter().map(|action| action.to_vec()).collect(),
         };
         refine(&Counter, &input).unwrap()
@@ -1000,6 +1129,7 @@ mod tests {
         let invalid_input = RuntimeRefineInputV1 {
             version: 1,
             managed_state: witness,
+            external_state: Vec::new(),
             actions: vec![b"inc".to_vec()],
         };
         assert!(refine(&Counter, &invalid_input).is_err());
@@ -1034,5 +1164,103 @@ mod tests {
             Err(ProviderError::InvalidRecovery)
         );
         assert_eq!(provider.materialized_root(SERVICE).unwrap(), parent_root);
+    }
+
+    struct CrossServiceApplication;
+
+    impl ServiceApplication for CrossServiceApplication {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            _input: &[u8],
+        ) -> Result<(), Self::Error> {
+            let value = context
+                .external_get(7, b"source")?
+                .ok_or(StateAccessError::Backend)?;
+            context.state().set(b"copy", &value)
+        }
+    }
+
+    struct CrossServiceSource {
+        context: Option<FinalizedContextV1>,
+        local_root: StateRoot,
+        external_root: StateRoot,
+    }
+
+    impl FinalizedManagedStateSource for CrossServiceSource {
+        type Error = ();
+
+        fn finalized_context(&mut self) -> Result<FinalizedContextV1, Self::Error> {
+            self.context.take().ok_or(())
+        }
+
+        fn service_storage_at(
+            &mut self,
+            _context: &FinalizedContextV1,
+            _service: ServiceKeyV1,
+            _key: &[u8],
+        ) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(Some(
+                ManagedStateCommitmentV1::new(self.local_root)
+                    .encode()
+                    .to_vec(),
+            ))
+        }
+
+        fn service_storage_at_id(
+            &mut self,
+            _context: &FinalizedContextV1,
+            service_id: u32,
+            _service: ServiceKeyV1,
+            _key: &[u8],
+        ) -> Result<Option<Vec<u8>>, Self::Error> {
+            let root = if service_id == 7 {
+                self.external_root
+            } else {
+                self.local_root
+            };
+            Ok(Some(ManagedStateCommitmentV1::new(root).encode().to_vec()))
+        }
+    }
+
+    #[test]
+    fn authenticated_builder_constructs_external_witness_and_dependency() {
+        let local_key = ServiceKeyV1::new([1; 32]);
+        let external_key = ServiceKeyV1::new([8; 32]);
+        let mut provider = FullStateProvider::default();
+        let external_root = provider.insert(
+            external_key,
+            FullState::from_pairs([(b"source".as_slice(), b"value".as_slice())]).unwrap(),
+        );
+        let local_root = EMPTY_STATE_ROOT_V1;
+        let context = finalized(20);
+        let mut source = CrossServiceSource {
+            context: Some(context),
+            local_root,
+            external_root,
+        };
+        let external_plan = StateAccessPlanV1::from_keys([b"source".as_slice()]).unwrap();
+        let built = AuthenticatedWorkBuilder::new(&mut source, &provider)
+            .build_actions_with_external(
+                local_key,
+                &CrossServiceApplication,
+                vec![vec![]],
+                &[ExternalServiceSpec {
+                    service_id: 7,
+                    service_key: external_key,
+                    access_plan: external_plan,
+                }],
+            )
+            .unwrap();
+        assert_eq!(built.refine_input.external_state.len(), 1);
+        assert_eq!(
+            built.predicted_output.external_dependencies,
+            vec![ExternalStateDependencyV1 {
+                service_id: 7,
+                state_root: external_root,
+            }]
+        );
     }
 }

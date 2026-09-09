@@ -52,6 +52,13 @@ export type ManagedStateResult = {
   proofBase64: string[];
 };
 
+export type BackendCapabilitiesV1 = {
+  protocolVersion: number;
+  managedStateVersion: number;
+  multiService: boolean;
+  externalStateWitness: boolean;
+};
+
 export class RpcError extends Error {
   constructor(
     message: string,
@@ -113,6 +120,7 @@ export class FetchRpcTransport implements RpcTransport {
 }
 
 export type WorkRpc = RpcTransport & {
+  capabilities(): Promise<BackendCapabilitiesV1>;
   finalizedContext(): Promise<FinalizedContext>;
   genesisHash(): Promise<string>;
   serviceStorageAt(blockHash: string, serviceId: number, key: string): Promise<string | null>;
@@ -122,12 +130,13 @@ export type WorkRpc = RpcTransport & {
     keyBase64: string,
   ): Promise<ManagedStateResult>;
   submitWork(request: SubmitWorkRequest): Promise<SubmitWorkResult>;
-  workStatus(packageHash: string): Promise<WorkStatusResult>;
+  workStatus(packageHash: string, serviceId?: number): Promise<WorkStatusResult>;
 };
 
 export function asWorkRpc(transport: RpcTransport): WorkRpc {
   return {
     call: transport.call.bind(transport),
+    capabilities: () => transport.call("jamscript_getCapabilitiesV1"),
     finalizedContext: () => transport.call("minijam_getFinalizedContext"),
     genesisHash: () => transport.call("chain_getBlockHash", [0]),
     serviceStorageAt: (blockHash, serviceId, key) =>
@@ -135,7 +144,7 @@ export function asWorkRpc(transport: RpcTransport): WorkRpc {
     managedStateAt: (serviceId, stateRoot, keyBase64) =>
       transport.call("minijam_getManagedStateV1", { serviceId, stateRoot, keyBase64 }),
     submitWork: (request) => transport.call("minijam_submitWorkV1", request),
-    workStatus: (packageHash) =>
-      transport.call("minijam_getWorkStatusV1", { packageHash }),
+    workStatus: (packageHash, serviceId) =>
+      transport.call("minijam_getWorkStatusV1", serviceId === undefined ? { packageHash } : { packageHash, serviceId }),
   };
 }

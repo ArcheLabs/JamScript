@@ -17,6 +17,7 @@ test("RuntimeRefineOutputV1 matches the Rust golden vector", () => {
     version: 1,
     parentRoot: parseHex(vector.parentRoot, 32),
     newRoot: parseHex(vector.newRoot, 32),
+    externalDependencies: [],
     transitionValidUntil: BigInt(vector.transitionValidUntil),
     recoveryCommitment: parseHex(vector.recoveryCommitment, 32),
     receipts: vector.receipts.map((receipt) => ({

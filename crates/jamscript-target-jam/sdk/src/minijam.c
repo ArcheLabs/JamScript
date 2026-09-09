@@ -127,8 +127,16 @@ minijam_status minijam_result(size_t index, void *output, size_t capacity,
 minijam_status minijam_storage_read(const void *key, size_t key_size,
                                     void *output, size_t capacity,
                                     size_t *output_size) {
+  return minijam_service_storage_read(MINIJAM_HOST_NONE, key, key_size,
+                                       output, capacity, output_size);
+}
+
+minijam_status minijam_service_storage_read(uint32_t service_id,
+                                             const void *key, size_t key_size,
+                                             void *output, size_t capacity,
+                                             size_t *output_size) {
   uint64_t length = minijam_host_call6(
-      MINIJAM_HOST_READ, MINIJAM_HOST_NONE, (uintptr_t)key, key_size,
+      MINIJAM_HOST_READ, service_id, (uintptr_t)key, key_size,
       (uintptr_t)output, 0, capacity);
   if (length == MINIJAM_HOST_NONE) return MINIJAM_NOT_FOUND;
   if (output_size) *output_size = (size_t)length;

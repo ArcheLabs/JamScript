@@ -38,6 +38,12 @@ pub const MAX_SCRIPT_ACTION_RESULT_BYTES: usize = MAX_RECOVERY_BYTES;
 pub const MAX_WITNESS_NODES: usize = 4096;
 pub const MAX_WITNESS_NODE_BYTES: usize = 64 * 1024;
 pub const MAX_WITNESS_BYTES: usize = 1024 * 1024;
+/// Maximum number of read-only Service witnesses accepted by one refine.
+pub const MAX_EXTERNAL_STATE_WITNESSES: usize = 64;
+/// Aggregate encoded storage-proof bytes accepted for external witnesses.
+pub const MAX_EXTERNAL_WITNESS_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_RUNTIME_ACTION_BYTES: usize = MAX_RECOVERY_BYTES;
+pub const MAX_RUNTIME_ACTION_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_WITNESS_ENCODED_BYTES: usize =
     1 + 32 + 4 + (MAX_WITNESS_NODES * 4) + MAX_WITNESS_BYTES;
 pub const MAX_ACCESS_PLAN_ENCODED_BYTES: usize = MAX_STATE_VIEW_BYTES;
@@ -131,6 +137,8 @@ pub enum WireError {
     UnsortedKeys,
     TooManyItems,
     ReservedKey,
+    DuplicateServiceId,
+    UnsortedDependencies,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -773,6 +781,7 @@ impl ManagedStateWitnessV1 {
 pub struct RuntimeRefineInputV1 {
     pub version: u8,
     pub managed_state: ManagedStateWitnessV1,
+    pub external_state: Vec<ExternalStateWitnessV1>,
     pub actions: Vec<Vec<u8>>,
 }
 
@@ -784,11 +793,23 @@ impl RuntimeRefineInputV1 {
             return Err(WireError::UnsupportedVersion);
         }
         let witness = self.managed_state.encode()?;
+        let external_state = encode_external_witnesses(&self.external_state)?;
         let mut writer = Writer::new();
         writer.u8(self.version);
         writer.bytes_u32(&witness)?;
+        writer.bytes_u32(&external_state)?;
         writer.u32(u32::try_from(self.actions.len()).map_err(|_| WireError::LengthOverflow)?);
+        let mut action_bytes = 0usize;
         for action in &self.actions {
+            if action.len() > MAX_RUNTIME_ACTION_BYTES {
+                return Err(WireError::TooManyItems);
+            }
+            action_bytes = action_bytes
+                .checked_add(action.len())
+                .ok_or(WireError::LengthOverflow)?;
+            if action_bytes > MAX_RUNTIME_ACTION_TOTAL_BYTES {
+                return Err(WireError::TooManyItems);
+            }
             writer.bytes_u32(action)?;
         }
         Ok(writer.finish())
@@ -802,13 +823,23 @@ impl RuntimeRefineInputV1 {
         }
         let managed_state =
             ManagedStateWitnessV1::decode(&reader.bytes_limited(MAX_WITNESS_V1_ENCODED_BYTES)?)?;
+        let external_state =
+            decode_external_witnesses(&reader.bytes_limited(MAX_EXTERNAL_WITNESS_TOTAL_BYTES)?)?;
         let count = reader.u32()? as usize;
         if count > MAX_RUNTIME_ACTIONS {
             return Err(WireError::TooManyItems);
         }
         let mut actions = Vec::with_capacity(count);
+        let mut action_bytes = 0usize;
         for _ in 0..count {
-            actions.push(reader.bytes_u32()?);
+            let action = reader.bytes_limited(MAX_RUNTIME_ACTION_BYTES)?;
+            action_bytes = action_bytes
+                .checked_add(action.len())
+                .ok_or(WireError::LengthOverflow)?;
+            if action_bytes > MAX_RUNTIME_ACTION_TOTAL_BYTES {
+                return Err(WireError::TooManyItems);
+            }
+            actions.push(action);
         }
         if reader.remaining() != 0 {
             return Err(WireError::InvalidEncoding);
@@ -816,6 +847,7 @@ impl RuntimeRefineInputV1 {
         Ok(Self {
             version,
             managed_state,
+            external_state,
             actions,
         })
     }
@@ -836,22 +868,40 @@ pub struct ActionReceiptV1 {
     pub error_code: Option<u32>,
 }
 
+/// A consensus-visible dependency on another JAM Service's canonical managed
+/// root. Consensus identifies the dependency by numeric ServiceId because it
+/// can perform a ServiceId-scoped storage READ, but cannot resolve a backend
+/// ServiceKey to a ServiceId by itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExternalStateDependencyV1 {
+    pub service_id: u32,
+    pub state_root: StateRoot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalStateWitnessV1 {
+    pub service_id: u32,
+    pub managed_state: ManagedStateWitnessV1,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeRefineOutputV1 {
     pub version: u8,
     pub parent_root: StateRoot,
     pub new_root: StateRoot,
+    pub external_dependencies: Vec<ExternalStateDependencyV1>,
     pub transition_valid_until: Option<u64>,
     pub receipts: Vec<ActionReceiptV1>,
     pub recovery_commitment: StateRoot,
     pub recovery_payload: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeRefineTransitionHeaderV1 {
     pub version: u8,
     pub parent_root: StateRoot,
     pub new_root: StateRoot,
+    pub external_dependencies: Vec<ExternalStateDependencyV1>,
     pub transition_valid_until: Option<u64>,
     pub recovery_commitment: StateRoot,
 }
@@ -873,6 +923,28 @@ impl RuntimeRefineOutputV1 {
         diff: StateDiffV1,
         transition_valid_until: Option<u64>,
     ) -> Result<Self, WireError> {
+        Self::from_diff_with_dependencies_and_validity(
+            parent_root,
+            new_root,
+            receipts,
+            diff,
+            Vec::new(),
+            transition_valid_until,
+        )
+    }
+
+    pub fn from_diff_with_dependencies_and_validity(
+        parent_root: StateRoot,
+        new_root: StateRoot,
+        receipts: Vec<ActionReceiptV1>,
+        diff: StateDiffV1,
+        mut external_dependencies: Vec<ExternalStateDependencyV1>,
+        transition_valid_until: Option<u64>,
+    ) -> Result<Self, WireError> {
+        canonicalize_dependencies(&mut external_dependencies)?;
+        if external_dependencies.len() > MAX_EXTERNAL_STATE_WITNESSES {
+            return Err(WireError::TooManyItems);
+        }
         let recovery = StateRecoveryV1::new(diff)?;
         let recovery_payload = recovery.encode()?;
         let recovery_commitment = blake2_256(&recovery_payload);
@@ -880,6 +952,7 @@ impl RuntimeRefineOutputV1 {
             version: MANAGED_STATE_PROTOCOL_VERSION,
             parent_root,
             new_root,
+            external_dependencies,
             transition_valid_until,
             receipts,
             recovery_commitment,
@@ -898,6 +971,16 @@ impl RuntimeRefineOutputV1 {
         writer.u8(self.version);
         writer.raw(&self.parent_root);
         writer.raw(&self.new_root);
+        let mut dependencies = self.external_dependencies.clone();
+        canonicalize_dependencies(&mut dependencies)?;
+        if dependencies.len() > MAX_EXTERNAL_STATE_WITNESSES {
+            return Err(WireError::TooManyItems);
+        }
+        writer.u32(u32::try_from(dependencies.len()).map_err(|_| WireError::LengthOverflow)?);
+        for dependency in dependencies {
+            writer.u32(dependency.service_id);
+            writer.raw(&dependency.state_root);
+        }
         match self.transition_valid_until {
             Some(valid_until) => {
                 writer.u8(1);
@@ -932,6 +1015,7 @@ impl RuntimeRefineOutputV1 {
         }
         let parent_root = reader.array::<32>()?;
         let new_root = reader.array::<32>()?;
+        let external_dependencies = decode_dependencies(&mut reader)?;
         let transition_valid_until = match reader.u8()? {
             0 => None,
             1 => Some(reader.u64()?),
@@ -956,10 +1040,15 @@ impl RuntimeRefineOutputV1 {
                 _ => return Err(WireError::InvalidEncoding),
             }
         }
+        let _ = reader.bytes_limited(MAX_RECOVERY_BYTES)?;
+        if reader.remaining() != 0 {
+            return Err(WireError::InvalidEncoding);
+        }
         Ok(RuntimeRefineTransitionHeaderV1 {
             version,
             parent_root,
             new_root,
+            external_dependencies,
             transition_valid_until,
             recovery_commitment,
         })
@@ -976,6 +1065,7 @@ impl RuntimeRefineOutputV1 {
         }
         let parent_root = reader.array::<32>()?;
         let new_root = reader.array::<32>()?;
+        let external_dependencies = decode_dependencies(&mut reader)?;
         let transition_valid_until = match reader.u8()? {
             0 => None,
             1 => Some(reader.u64()?),
@@ -1014,6 +1104,7 @@ impl RuntimeRefineOutputV1 {
             version,
             parent_root,
             new_root,
+            external_dependencies,
             transition_valid_until,
             receipts,
             recovery_commitment,
@@ -1025,6 +1116,120 @@ impl RuntimeRefineOutputV1 {
         StateRecoveryV1::decode(&output.recovery_payload)?;
         Ok(output)
     }
+}
+
+fn canonicalize_dependencies(
+    dependencies: &mut Vec<ExternalStateDependencyV1>,
+) -> Result<(), WireError> {
+    dependencies.sort_by_key(|dependency| dependency.service_id);
+    let mut canonical: Vec<ExternalStateDependencyV1> = Vec::with_capacity(dependencies.len());
+    for dependency in dependencies.drain(..) {
+        match canonical.last() {
+            Some(previous) if previous.service_id == dependency.service_id => {
+                if previous.state_root != dependency.state_root {
+                    return Err(WireError::DuplicateServiceId);
+                }
+            }
+            _ => canonical.push(dependency),
+        }
+    }
+    *dependencies = canonical;
+    Ok(())
+}
+
+fn encode_external_witnesses(witnesses: &[ExternalStateWitnessV1]) -> Result<Vec<u8>, WireError> {
+    if witnesses.len() > MAX_EXTERNAL_STATE_WITNESSES {
+        return Err(WireError::TooManyItems);
+    }
+    let mut ordered = witnesses.to_vec();
+    ordered.sort_by_key(|witness| witness.service_id);
+    let mut writer = Writer::new();
+    writer.u32(u32::try_from(ordered.len()).map_err(|_| WireError::LengthOverflow)?);
+    let mut previous = None;
+    let mut total = 0usize;
+    for witness in ordered {
+        if previous == Some(witness.service_id) {
+            return Err(WireError::DuplicateServiceId);
+        }
+        previous = Some(witness.service_id);
+        let encoded = witness.managed_state.encode()?;
+        total = total
+            .checked_add(encoded.len())
+            .ok_or(WireError::LengthOverflow)?;
+        if total > MAX_EXTERNAL_WITNESS_TOTAL_BYTES {
+            return Err(WireError::TooManyItems);
+        }
+        writer.u32(witness.service_id);
+        writer.bytes_u32(&encoded)?;
+    }
+    let encoded = writer.finish();
+    if encoded.len() > MAX_EXTERNAL_WITNESS_TOTAL_BYTES {
+        return Err(WireError::TooManyItems);
+    }
+    Ok(encoded)
+}
+
+fn decode_external_witnesses(bytes: &[u8]) -> Result<Vec<ExternalStateWitnessV1>, WireError> {
+    let mut reader = Reader::new(bytes);
+    let count = reader.u32()? as usize;
+    if count > MAX_EXTERNAL_STATE_WITNESSES {
+        return Err(WireError::TooManyItems);
+    }
+    let mut witnesses = Vec::with_capacity(count);
+    let mut previous = None;
+    for _ in 0..count {
+        let service_id = reader.u32()?;
+        if previous.is_some_and(|previous| service_id <= previous) {
+            return Err(if previous == Some(service_id) {
+                WireError::DuplicateServiceId
+            } else {
+                WireError::UnsortedDependencies
+            });
+        }
+        previous = Some(service_id);
+        let managed_state =
+            ManagedStateWitnessV1::decode(&reader.bytes_limited(MAX_WITNESS_V1_ENCODED_BYTES)?)?;
+        witnesses.push(ExternalStateWitnessV1 {
+            service_id,
+            managed_state,
+        });
+    }
+    if reader.remaining() != 0 {
+        return Err(WireError::InvalidEncoding);
+    }
+    Ok(witnesses)
+}
+
+fn decode_dependencies(
+    reader: &mut Reader<'_>,
+) -> Result<Vec<ExternalStateDependencyV1>, WireError> {
+    let count = reader.u32()? as usize;
+    if count > MAX_EXTERNAL_STATE_WITNESSES {
+        return Err(WireError::TooManyItems);
+    }
+    let mut dependencies: Vec<ExternalStateDependencyV1> = Vec::with_capacity(count);
+    let mut previous = None;
+    for _ in 0..count {
+        let service_id = reader.u32()?;
+        if previous.is_some_and(|previous| service_id < previous) {
+            return Err(WireError::UnsortedDependencies);
+        }
+        let dependency = ExternalStateDependencyV1 {
+            service_id,
+            state_root: reader.array::<32>()?,
+        };
+        if let Some(existing) = dependencies.last() {
+            if existing.service_id == service_id {
+                if existing.state_root != dependency.state_root {
+                    return Err(WireError::DuplicateServiceId);
+                }
+                continue;
+            }
+        }
+        previous = Some(service_id);
+        dependencies.push(dependency);
+    }
+    Ok(dependencies)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1075,13 +1280,6 @@ impl RecoveryRecordV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExternalStateWitnessV1 {
-    pub service_key: ServiceKeyV1,
-    pub state_root: StateRoot,
-    pub proof: Vec<Vec<u8>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateQueryResponseV1 {
     pub service_key: ServiceKeyV1,
     pub state_root: StateRoot,
@@ -1107,9 +1305,21 @@ pub trait ServiceApplication {
     fn execute(&self, context: &mut ExecutionContext<'_>, input: &[u8]) -> Result<(), Self::Error>;
 }
 
+/// Read-only state exposed to a refine application for a different Service.
+/// It deliberately has no mutation or transaction methods.
+pub trait ReadOnlyManagedState {
+    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError>;
+}
+
+/// Collection of proof-backed external Service views available during refine.
+pub trait ExternalStateAccess {
+    fn get(&mut self, service_id: u32, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError>;
+}
+
 pub struct ExecutionContext<'a> {
     state: &'a mut dyn ManagedStateAccess,
     access_plan: Option<&'a StateAccessPlanV1>,
+    external_state: Option<&'a mut dyn ExternalStateAccess>,
     sender: Option<[u8; 32]>,
     transition_valid_until: Option<u64>,
 }
@@ -1119,6 +1329,7 @@ impl<'a> ExecutionContext<'a> {
         Self {
             state,
             access_plan: None,
+            external_state: None,
             sender,
             transition_valid_until: None,
         }
@@ -1132,6 +1343,22 @@ impl<'a> ExecutionContext<'a> {
         Self {
             state,
             access_plan: Some(access_plan),
+            external_state: None,
+            sender,
+            transition_valid_until: None,
+        }
+    }
+
+    pub fn with_access_plan_and_external_state(
+        state: &'a mut dyn ManagedStateAccess,
+        sender: Option<[u8; 32]>,
+        access_plan: &'a StateAccessPlanV1,
+        external_state: &'a mut dyn ExternalStateAccess,
+    ) -> Self {
+        Self {
+            state,
+            access_plan: Some(access_plan),
+            external_state: Some(external_state),
             sender,
             transition_valid_until: None,
         }
@@ -1139,6 +1366,17 @@ impl<'a> ExecutionContext<'a> {
 
     pub fn state(&mut self) -> &mut dyn ManagedStateAccess {
         self.state
+    }
+
+    pub fn external_get(
+        &mut self,
+        service_id: u32,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, StateAccessError> {
+        self.external_state
+            .as_deref_mut()
+            .ok_or(StateAccessError::Backend)?
+            .get(service_id, key)
     }
 
     pub fn state_view(&mut self) -> Result<StateViewV1, StateAccessError> {
@@ -1215,6 +1453,15 @@ pub enum StateAccessError {
 
 pub trait RawJamStorage {
     fn read(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, RawJamError>;
+    /// ServiceId-scoped READ. The default preserves the current-Service
+    /// behavior for reference implementations that only model one Service.
+    fn read_service(
+        &mut self,
+        _service_id: u32,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, RawJamError> {
+        self.read(key)
+    }
     fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), RawJamError>;
     fn delete(&mut self, key: &[u8]) -> Result<(), RawJamError>;
 }
@@ -1250,6 +1497,38 @@ impl<'a, S: RawJamStorage> AccumulateContext<'a, S> {
 
     pub fn read(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, RawJamError> {
         self.storage.read(key)
+    }
+
+    pub fn read_service(
+        &mut self,
+        service_id: u32,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, RawJamError> {
+        self.storage.read_service(service_id, key)
+    }
+
+    pub fn read_service_commitment(
+        &mut self,
+        service_id: u32,
+    ) -> Result<Option<StateRoot>, RawJamError> {
+        let Some(bytes) = self.read_service(service_id, MANAGED_STATE_COMMITMENT_KEY_V1)? else {
+            return Ok(None);
+        };
+        ManagedStateCommitmentV1::decode(&bytes)
+            .map(|commitment| Some(commitment.root))
+            .map_err(|_| RawJamError::Host)
+    }
+
+    pub fn external_dependencies_match(
+        &mut self,
+        dependencies: &[ExternalStateDependencyV1],
+    ) -> Result<bool, RawJamError> {
+        for dependency in dependencies {
+            if self.read_service_commitment(dependency.service_id)? != Some(dependency.state_root) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), RawJamError> {
@@ -1375,11 +1654,24 @@ mod tests {
     #[derive(Default)]
     struct TestStorage {
         writes: Vec<(Vec<u8>, Vec<u8>)>,
+        service_reads: Vec<(u32, Vec<u8>)>,
     }
 
     impl RawJamStorage for TestStorage {
         fn read(&mut self, _key: &[u8]) -> Result<Option<Vec<u8>>, RawJamError> {
             Ok(None)
+        }
+
+        fn read_service(
+            &mut self,
+            service_id: u32,
+            _key: &[u8],
+        ) -> Result<Option<Vec<u8>>, RawJamError> {
+            Ok(self
+                .service_reads
+                .iter()
+                .find(|(id, _)| *id == service_id)
+                .map(|(_, value)| value.clone()))
         }
 
         fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), RawJamError> {
@@ -1484,6 +1776,7 @@ mod tests {
         let input_v1 = RuntimeRefineInputV1 {
             version: RuntimeRefineInputV1::VERSION,
             managed_state: witness_v1,
+            external_state: Vec::new(),
             actions: vec![vec![7]],
         };
         assert_eq!(
@@ -1509,6 +1802,34 @@ mod tests {
             ManagedStateCommitmentV1::decode(&storage.writes[0].1),
             Ok(ManagedStateCommitmentV1::new([7; 32]))
         );
+    }
+
+    #[test]
+    fn accumulate_external_dependency_checks_are_service_id_scoped_and_fail_closed() {
+        let root = [9; 32];
+        let mut storage = TestStorage {
+            writes: Vec::new(),
+            service_reads: vec![(7, ManagedStateCommitmentV1::new(root).encode().to_vec())],
+        };
+        let mut context = AccumulateContext::new(&mut storage);
+        assert!(context
+            .external_dependencies_match(&[ExternalStateDependencyV1 {
+                service_id: 7,
+                state_root: root,
+            }])
+            .unwrap());
+        assert!(!context
+            .external_dependencies_match(&[ExternalStateDependencyV1 {
+                service_id: 8,
+                state_root: root,
+            }])
+            .unwrap());
+        assert!(!context
+            .external_dependencies_match(&[ExternalStateDependencyV1 {
+                service_id: 7,
+                state_root: [8; 32],
+            }])
+            .unwrap());
     }
 
     #[test]
@@ -1671,12 +1992,98 @@ mod tests {
         let encoded = output.encode().unwrap();
         assert_eq!(
             hex::encode(&encoded),
-            "0101010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202012a000000000000002c60e8b423b234cec3a82162cb14e733d3f4302f84dbdb69b4253052abe42c06010000000303030303030303030303030303030303030303030303030303030303030303000015000000011000000001010000000100000001010100000002"
+            "010101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020200000000012a000000000000002c60e8b423b234cec3a82162cb14e733d3f4302f84dbdb69b4253052abe42c06010000000303030303030303030303030303030303030303030303030303030303030303000015000000011000000001010000000100000001010100000002"
         );
         let decoded = RuntimeRefineOutputV1::decode(&encoded).unwrap();
         assert_eq!(decoded, output);
         let header = RuntimeRefineOutputV1::decode_transition_header(&encoded).unwrap();
         assert_eq!(header.transition_valid_until, Some(42));
         assert_eq!(header.recovery_commitment, output.recovery_commitment);
+    }
+
+    #[test]
+    fn external_witnesses_and_dependencies_are_bounded_and_canonical() {
+        let witness = ManagedStateWitnessV1 {
+            version: ManagedStateWitnessV1::VERSION,
+            parent_root: [4; 32],
+            access_plan: StateAccessPlanV1::from_keys([b"external".as_slice()]).unwrap(),
+            storage_proof: vec![vec![5, 6]],
+        };
+        let input = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: witness.clone(),
+            external_state: vec![ExternalStateWitnessV1 {
+                service_id: 7,
+                managed_state: witness,
+            }],
+            actions: vec![vec![7]],
+        };
+        assert_eq!(
+            RuntimeRefineInputV1::decode(&input.encode().unwrap()),
+            Ok(input)
+        );
+
+        let output = RuntimeRefineOutputV1::from_diff_with_dependencies_and_validity(
+            [1; 32],
+            [2; 32],
+            Vec::new(),
+            StateDiffV1::default(),
+            vec![
+                ExternalStateDependencyV1 {
+                    service_id: 9,
+                    state_root: [9; 32],
+                },
+                ExternalStateDependencyV1 {
+                    service_id: 2,
+                    state_root: [2; 32],
+                },
+                ExternalStateDependencyV1 {
+                    service_id: 9,
+                    state_root: [9; 32],
+                },
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            output.external_dependencies,
+            vec![
+                ExternalStateDependencyV1 {
+                    service_id: 2,
+                    state_root: [2; 32],
+                },
+                ExternalStateDependencyV1 {
+                    service_id: 9,
+                    state_root: [9; 32],
+                },
+            ]
+        );
+        let encoded = output.encode().unwrap();
+        assert_eq!(
+            RuntimeRefineOutputV1::decode_transition_header(&encoded)
+                .unwrap()
+                .external_dependencies,
+            output.external_dependencies
+        );
+        assert_eq!(
+            RuntimeRefineOutputV1::from_diff_with_dependencies_and_validity(
+                [1; 32],
+                [2; 32],
+                Vec::new(),
+                StateDiffV1::default(),
+                vec![
+                    ExternalStateDependencyV1 {
+                        service_id: 3,
+                        state_root: [3; 32],
+                    },
+                    ExternalStateDependencyV1 {
+                        service_id: 3,
+                        state_root: [4; 32],
+                    },
+                ],
+                None,
+            ),
+            Err(WireError::DuplicateServiceId)
+        );
     }
 }
