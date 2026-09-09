@@ -7,10 +7,14 @@ on:
       - codex/toolchain-distribution-v1
     paths:
       - '.github/workflows/build-toolchain-bundle.yml'
+      - '.github/workflows/promote-macos-llvm-lock.yml'
+      - '.github/workflows/release-candidate.yml'
+      - '.github/workflows/release-preflight.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'scripts/check-release-pipeline-policy.py'
       - 'scripts/release/**'
       - 'scripts/check-toolchain-distribution.sh'
       - 'toolchains/**'
@@ -18,10 +22,14 @@ on:
   pull_request:
     paths:
       - '.github/workflows/build-toolchain-bundle.yml'
+      - '.github/workflows/promote-macos-llvm-lock.yml'
+      - '.github/workflows/release-candidate.yml'
+      - '.github/workflows/release-preflight.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'scripts/check-release-pipeline-policy.py'
       - 'scripts/release/**'
       - 'scripts/check-toolchain-distribution.sh'
       - 'toolchains/**'
@@ -108,21 +116,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! cargo test --locked -p jamscript-toolchain; then
-            echo "TOOLCHAIN_TESTS=FAIL"
-            exit 1
-          fi
-          if ! cargo test --locked -p jamscript-cli; then
-            echo "TOOLCHAIN_TESTS=FAIL"
-            exit 1
-          fi
-          if ! cargo clippy --locked -p jamscript-toolchain -- -D warnings; then
-            echo "TOOLCHAIN_TESTS=FAIL"
-            exit 1
-          fi
-          ./scripts/check-toolchain-distribution.sh
-          python3 ./tools/release/toolchain/test-llvm-lock.py
-          echo "TOOLCHAIN_TESTS=PASS"
+          ./scripts/release/check-release-source.sh \
+            --platform linux-x86_64
 
       - name: Bootstrap exact LLVM distribution
         shell: bash
@@ -130,9 +125,11 @@ jobs:
           set -euo pipefail
           llvm_out="${RUNNER_TEMP}/jamscript-llvm"
           ./tools/release/toolchain/bootstrap-llvm-linux.sh "${llvm_out}"
-          while IFS= read -r line; do
-            echo "${line}" >> "${GITHUB_ENV}"
-          done < "${llvm_out}/llvm.env"
+          set -a
+          source "${llvm_out}/llvm.env"
+          set +a
+          ./tools/release/toolchain/verify-llvm-linux.sh "${LLVM_ROOT}"
+          cat "${llvm_out}/llvm.env" >> "${GITHUB_ENV}"
 
       - name: Verify exact LLVM identity
         shell: bash
@@ -409,11 +406,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p jamscript-toolchain
-          cargo test --locked -p jamscript-cli
-          cargo clippy --locked -p jamscript-toolchain -- -D warnings
-          ./scripts/check-toolchain-distribution.sh
-          python3 ./tools/release/toolchain/test-llvm-lock.py
+          ./scripts/release/check-release-source.sh \
+            --platform macos-arm64
 
       - name: Bootstrap and verify official macOS LLVM
         shell: bash

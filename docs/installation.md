@@ -13,12 +13,15 @@ release path.
 
 ## Quick install
 
-The installer and the requested release are pinned to the same immutable tag:
+Choose an existing published version from GitHub Releases and keep the
+installer URL and requested release on that same immutable tag. The failed
+`v0.1.0-rc.2` tag is retained for provenance and has no release assets.
 
 ```bash
+VERSION='v0.1.0-rc.N'
 curl -fsSL \
-  https://raw.githubusercontent.com/ArcheLabs/JamScript/v0.1.0-rc.2/install.sh \
-  | bash -s -- --version v0.1.0-rc.2
+  "https://raw.githubusercontent.com/ArcheLabs/JamScript/${VERSION}/install.sh" \
+  | bash -s -- --version "${VERSION}"
 ```
 
 The installer detects the host platform, downloads the matching gzip CLI
@@ -66,7 +69,7 @@ default CLI destination is `~/.local/bin/jams`; no `sudo` is used and no shell
 profile is changed. A custom destination can be selected with:
 
 ```bash
-./install.sh --version v0.1.0-rc.2 --bin-dir "$HOME/bin"
+./install.sh --version <VERSION> --bin-dir "$HOME/bin"
 ```
 
 The managed bundle is cached under a platform-specific, SHA-256-addressed

@@ -1,0 +1,95 @@
+name: Promote macOS ARM64 LLVM Lock
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact commit or ref to measure
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-macos-llvm-lock-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure-native-llvm:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact measurement source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+          submodules: false
+
+      - name: Verify native runner and source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          source_sha="$(git rev-parse HEAD)"
+          test "${#source_sha}" -eq 40
+          echo "MEASUREMENT_SOURCE_SHA=${source_sha}"
+          echo "MEASUREMENT_SOURCE_SHA=${source_sha}" >> "${GITHUB_ENV}"
+
+      - name: Measure official locked LLVM executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/jamscript-llvm"
+          ./tools/release/toolchain/bootstrap-llvm-macos.sh "${out}"
+          set -a
+          source "${out}/llvm.env"
+          set +a
+          ./tools/release/toolchain/verify-llvm-macos.sh "${JAMSCRIPT_LLVM_ROOT}"
+          for value in "${LLVM_CLANG_SHA256_MEASURED}" "${LLVM_AR_SHA256_MEASURED}" "${LLVM_LD_LLD_SHA256_MEASURED}"; do
+            [[ "${value}" =~ ^[0-9a-f]{64}$ ]]
+            test "${value}" != "$(printf '0%.0s' {1..64})"
+          done
+          python3 ./tools/release/toolchain/promote-llvm-lock.py \
+            --input toolchains/llvm/macos-arm64.lock \
+            --output "${RUNNER_TEMP}/macos-arm64.lock.promoted" \
+            --clang-sha256 "${LLVM_CLANG_SHA256_MEASURED}" \
+            --llvm-ar-sha256 "${LLVM_AR_SHA256_MEASURED}" \
+            --ld-lld-sha256 "${LLVM_LD_LLD_SHA256_MEASURED}"
+          python3 ./tools/release/toolchain/check-llvm-lock-promoted.py \
+            "${RUNNER_TEMP}/macos-arm64.lock.promoted" --platform macos-arm64
+          {
+            echo "MACOS_LLVM_NATIVE_MEASUREMENT=PASS"
+            echo "clang_sha256=${LLVM_CLANG_SHA256_MEASURED}"
+            echo "llvm_ar_sha256=${LLVM_AR_SHA256_MEASURED}"
+            echo "ld_lld_sha256=${LLVM_LD_LLD_SHA256_MEASURED}"
+          } | tee "${RUNNER_TEMP}/macos-llvm-native-measurement.txt"
+          cp -L "${out}/llvm.env" "${RUNNER_TEMP}/llvm.env"
+
+      - name: Publish native measurement evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## macOS ARM64 LLVM lock measurement"
+            echo
+            echo "- Source: ${MEASUREMENT_SOURCE_SHA}"
+            echo "- Archive and executable identities were verified on macos-15 arm64."
+            echo
+            cat "${RUNNER_TEMP}/macos-llvm-native-measurement.txt"
+            echo
+            echo "Commit the promoted lock from this evidence in a reviewed change; this workflow does not mutate git refs."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload promotion candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-llvm-lock-promotion
+          path: |
+            ${{ runner.temp }}/macos-arm64.lock.promoted
+            ${{ runner.temp }}/macos-llvm-native-measurement.txt
+            ${{ runner.temp }}/llvm.env
+          if-no-files-found: error
+          retention-days: 14

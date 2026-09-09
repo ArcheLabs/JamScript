@@ -9,10 +9,14 @@ RELEASE_WORKFLOW = ROOT / ".github/workflows/release-candidate.yml"
 
 EXPECTED_PATHS = {
     ".github/workflows/build-toolchain-bundle.yml",
+    ".github/workflows/promote-macos-llvm-lock.yml",
+    ".github/workflows/release-candidate.yml",
+    ".github/workflows/release-preflight.yml",
     "Cargo.lock",
     "Cargo.toml",
     "rust-toolchain.toml",
     "crates/**",
+    "scripts/check-release-pipeline-policy.py",
     "scripts/release/**",
     "scripts/check-toolchain-distribution.sh",
     "toolchains/**",

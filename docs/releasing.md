@@ -127,23 +127,28 @@ release scope.
 
 ## Promotion protocol
 
-The pre-installer tag `v0.1.0-rc.1` remains immutable. The intended sequence
-for this installer release is branch validation, merge to `main`, main
-validation, then tag `v0.1.0-rc.2`. The tag workflow checks out the exact source, builds
-the managed toolchain and `jams` CLI, runs the compiler-builtins regression,
-assembles the immutable assets, runs Release Kill Test 001 with `--asset-dir`,
-and only then creates the GitHub prerelease. A fresh runner downloads the
-published bytes and runs the same test with `--release-url` before the workflow
-emits `RELEASE_READY`.
+The release candidate workflow is never a substitute for preflight. The
+manual [`release-preflight.yml`](../.github/workflows/release-preflight.yml)
+must first validate one exact candidate ref and emit
+`RELEASE_PREFLIGHT_READY=PASS`. Only then may an operator create and push the
+next immutable candidate tag. The tag workflow checks out that exact tag,
+rebuilds the managed toolchain and `jams` CLI, runs the compiler-builtins
+regression, assembles immutable assets, runs Release Kill Test 001 with
+`--asset-dir`, and only then publishes the GitHub prerelease. Fresh native
+consumers download the published bytes and run the same test with
+`--release-url` before the workflow emits `RELEASE_READY=PASS`.
 The checked-in distribution record stays unpublished until a reviewed release
 promotion records the exact URL, digest, and byte size; changing it to
 `published = true` without those bytes is rejected by the toolchain manager.
 
 The installer published in user documentation must be fetched from the exact
-release tag and request that same release version. Since `v0.1.0-rc.1` already
-exists, the installer will ship in `v0.1.0-rc.2`; its RC path uses
-`v0.1.0-rc.2/install.sh` and `--version v0.1.0-rc.2`. Documentation must not
-combine a mutable branch installer with a different release tag.
+published release tag and request that same release version. The retained
+failed tag `v0.1.0-rc.2` has no GitHub Release assets; documentation must not
+construct download URLs for it or combine a mutable branch installer with a
+different release tag.
+
+See [`release-process.md`](release-process.md) for the release state machine,
+rerun rules, and failure classification.
 
 ## Explicit exclusions
 
