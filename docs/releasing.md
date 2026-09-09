@@ -47,9 +47,15 @@ candidate distribution workflow is
 [`build-toolchain-bundle.yml`](../.github/workflows/build-toolchain-bundle.yml).
 It has separate native Linux x86_64 and macOS arm64 producers, builds and
 verifies two identical archives per target, and uploads short-lived Actions
-validation artifacts. The tag workflow
+validation artifacts. On branches and pull requests, this expensive workflow
+is path-filtered to compiler, toolchain, release-engineering, and validation
+inputs; documentation-only changes do not rebuild native bundles. Maintainers
+can force it at any time with `workflow_dispatch`. The tag workflow
 [`release-candidate.yml`](../.github/workflows/release-candidate.yml) is the
 only publication path; there is no mutable “latest toolchain” workflow.
+Release tags are never path-filtered: the tag workflow always rebuilds and
+validates the exact tagged source before immutable publication, rather than
+reusing a branch validation artifact.
 
 The checked-in distribution record is intentionally marked unpublished until
 each release bundle has been built and its exact SHA-256 and byte size promoted
