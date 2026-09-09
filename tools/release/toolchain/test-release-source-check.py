@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression test for the publication-grade LLVM sentinel gate."""
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -34,7 +35,14 @@ with tempfile.TemporaryDirectory(prefix="jamscript-release-source-test-") as dir
     original = LOCK.read_text(encoding="utf-8")
     valid = original
     for key, value in VALID_HASHES.items():
-        valid = valid.replace(f'{key} = "{"0" * 64}"', f'{key} = "{value}"')
+        valid, count = re.subn(
+            rf'^{key} = "[0-9a-f]+"$',
+            f'{key} = "{value}"',
+            valid,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        assert count == 1, key
     fixture.write_text(valid, encoding="utf-8")
     result = run(fixture)
     assert result.returncode == 0, result.stderr + result.stdout
