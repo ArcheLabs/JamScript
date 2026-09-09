@@ -1,0 +1,49 @@
+name: Fix backend Debug derive
+
+on:
+  push:
+    branches:
+      - codex/jamscript-backend-multiservice-v1
+    paths:
+      - .github/workflows/fix-backend-debug.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rustfmt, clippy
+      - name: Remove unnecessary BackendState Debug derive
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("crates/jamscript-service-backend/src/lib.rs")
+          text = path.read_text()
+          old = "#[derive(Clone, Debug)]\npub struct BackendState {"
+          new = "#[derive(Clone)]\npub struct BackendState {"
+          if old not in text:
+              raise SystemExit("target BackendState derive not found")
+          path.write_text(text.replace(old, new, 1))
+      - name: Validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check --workspace --locked
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Commit fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/jamscript-service-backend/src/lib.rs
+          git commit -m "fix: remove unnecessary BackendState Debug derive"
+          git push
