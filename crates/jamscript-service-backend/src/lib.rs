@@ -1,6 +1,4 @@
-use service_runtime_core::{
-    RuntimeRefineOutputV1, ServiceKeyV1, StateQueryResponseV1, StateRoot,
-};
+use service_runtime_core::{RuntimeRefineOutputV1, ServiceKeyV1, StateQueryResponseV1, StateRoot};
 use service_runtime_host::{
     FullStateProvider, MaterializedServiceStateProvider, ServiceStateProvider,
 };
@@ -430,7 +428,10 @@ mod tests {
         registry.register(upgraded).unwrap();
         assert_eq!(registry.len(), 2);
         assert_eq!(registry.get(10), Some(&upgraded));
-        assert_eq!(registry.service_id_for_key(ServiceKeyV1::new([2; 32])), Some(11));
+        assert_eq!(
+            registry.service_id_for_key(ServiceKeyV1::new([2; 32])),
+            Some(11)
+        );
     }
 
     #[test]
