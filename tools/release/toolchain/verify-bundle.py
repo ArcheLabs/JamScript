@@ -47,6 +47,7 @@ manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
 if not isinstance(manifest, dict):
     raise SystemExit("internal manifest is not an object")
 platform = manifest.get("platform")
+lld_binary = "bin/ld64.lld" if platform == "macos-arm64" else "bin/ld.lld"
 lock_match = re.search(
     rf'"{re.escape(platform)}"\s*=\s*"([^"]+)"',
     re.search(r"^llvm_locks\s*=\s*\{([^}]*)\}$", distribution_text, re.MULTILINE).group(0)
@@ -149,7 +150,7 @@ required_files = [
     "bin/clang",
     "bin/llvm-ar",
     "bin/ar",
-    "bin/ld.lld",
+    lld_binary,
     "bin/llvm-readelf",
     "bin/jamscript-host-linker",
     "bin/rustc",
@@ -171,7 +172,7 @@ for name in required_directories:
     if not (root / name).is_dir():
         raise SystemExit(f"required bundle directory is missing: {name}")
 
-for name, key in (("bin/clang", "clang_sha256"), ("bin/llvm-ar", "llvm_ar_sha256"), ("bin/ld.lld", "ld_lld_sha256")):
+for name, key in (("bin/clang", "clang_sha256"), ("bin/llvm-ar", "llvm_ar_sha256"), (lld_binary, "ld_lld_sha256")):
     expected_hash = llvm_lock_values[key]
     if expected_hash == "0" * 64:
         expected_hash = manifest_llvm[llvm_digest_manifest_keys[key]]
@@ -186,7 +187,7 @@ if node_version != distribution["node_version"]:
 clang_version = run_version(root / "bin/clang").splitlines()[0]
 if distribution["clang_version"] not in clang_version:
     raise SystemExit(f"Clang identity mismatch: {clang_version}")
-for name in ["bin/llvm-ar", "bin/ld.lld", "bin/llvm-readelf", "bin/rustc", "bin/cargo"]:
+for name in ["bin/llvm-ar", lld_binary, "bin/llvm-readelf", "bin/rustc", "bin/cargo"]:
     if not run_version(root / name):
         raise SystemExit(f"tool version query returned no output: {name}")
 if not os.access(root / "bin/jamscript-host-linker", os.X_OK):

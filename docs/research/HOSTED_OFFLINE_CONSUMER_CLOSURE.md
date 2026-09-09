@@ -69,7 +69,8 @@ so proc-macro2 failed before the PolkaVM guest linker phase.
 
 Fix: pass managed Clang, `llvm-ar`, and a bundle-relative host linker wrapper
 through `PolkaVmBuildConfig`. The wrapper invokes the bundled Clang with the
-bundled `ld.lld`, while the guest keeps its explicit PolkaVM linker selection.
+native bundled LLD driver (`ld.lld` on Linux and `ld64.lld` on macOS), while
+the guest keeps its explicit PolkaVM linker selection.
 The consumer PATH remains restricted.
 
 The hosted UI exposed only the step failure and smoke log path; the supplied

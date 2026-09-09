@@ -43,10 +43,12 @@ def parse_lock(path):
         "linux-x86_64": {
             "distribution": "llvm-official-linux-x64",
             "archive_filename": "LLVM-20.1.8-Linux-X64.tar.xz",
+            "lld_relpath": "bin/ld.lld",
         },
         "macos-arm64": {
             "distribution": "llvm-official-macos-arm64",
             "archive_filename": "LLVM-20.1.8-macOS-ARM64.tar.xz",
+            "lld_relpath": "bin/ld64.lld",
         },
     }.get(platform)
     if expected is None:
@@ -66,6 +68,8 @@ def parse_lock(path):
         raise LockError("LLVM archive URL is not pinned to llvmorg-20.1.8")
     if values["archive_filename"] != expected["archive_filename"]:
         raise LockError(f"unexpected LLVM archive filename for {platform}")
+    if values["lld_relpath"] != expected["lld_relpath"]:
+        raise LockError(f"unexpected LLD driver for {platform}")
     if not url.endswith("/" + values["archive_filename"]):
         raise LockError("archive filename does not match URL")
     for key in ("archive_sha256", "clang_sha256", "llvm_ar_sha256", "ld_lld_sha256"):

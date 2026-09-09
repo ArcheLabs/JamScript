@@ -9,7 +9,7 @@ archive_filename = "LLVM-20.1.8-macOS-ARM64.tar.xz"
 archive_sha256 = "a9a22f450d35f1f73cd61ab6a17c6f27d8f6051d56197395c1eb397f0c9bbec4"
 clang_relpath = "bin/clang"
 llvm_ar_relpath = "bin/llvm-ar"
-lld_relpath = "bin/ld.lld"
+lld_relpath = "bin/ld64.lld"
 
 # The official archive digest above is immutable. The executable digests are
 # deliberately left as an explicit native-measurement sentinel until the

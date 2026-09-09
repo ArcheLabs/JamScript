@@ -340,7 +340,7 @@ impl ToolchainManager {
             node: executable("node"),
             clang: executable("clang"),
             llvm_ar: executable("llvm-ar"),
-            lld: executable("ld.lld"),
+            lld: executable(lld_executable_name(&self.platform)),
             readelf: executable("llvm-readelf"),
             host_linker: executable("jamscript-host-linker"),
             rustc: executable("rustc"),
@@ -443,6 +443,14 @@ pub fn platform_for(os: &str, arch: &str) -> Result<String> {
         ("windows", "x86_64") => Ok("windows-x86_64".into()),
         ("macos", "aarch64") => Ok("macos-arm64".into()),
         _ => bail!("unsupported host platform: {os}-{arch}"),
+    }
+}
+
+pub fn lld_executable_name(platform: &str) -> &'static str {
+    if platform == "macos-arm64" {
+        "ld64.lld"
+    } else {
+        "ld.lld"
     }
 }
 
@@ -806,6 +814,12 @@ mod tests {
         assert_eq!(platform_for("windows", "x86_64").unwrap(), "windows-x86_64");
         assert!(platform_for("macos", "x86_64").is_err());
         assert!(platform_for("linux", "aarch64").is_err());
+    }
+
+    #[test]
+    fn lld_driver_matches_platform() {
+        assert_eq!(lld_executable_name("linux-x86_64"), "ld.lld");
+        assert_eq!(lld_executable_name("macos-arm64"), "ld64.lld");
     }
 
     #[test]

@@ -67,6 +67,7 @@ with tempfile.TemporaryDirectory() as directory:
         .replace('archive_url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz"', 'archive_url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-macOS-ARM64.tar.xz"')
         .replace('archive_filename = "LLVM-20.1.8-Linux-X64.tar.xz"', 'archive_filename = "LLVM-20.1.8-macOS-ARM64.tar.xz"')
         .replace('archive_sha256 = "1ead36b3dfcb774b57be530df42bec70ab2d239fbce9889447c7a29a4ddc1ae6"', 'archive_sha256 = "a9a22f450d35f1f73cd61ab6a17c6f27d8f6051d56197395c1eb397f0c9bbec4"')
+        .replace('lld_relpath = "bin/ld.lld"', 'lld_relpath = "bin/ld64.lld"')
         .replace(EXPECTED_TOOLS["clang_sha256"], "0" * 64)
         .replace(EXPECTED_TOOLS["llvm_ar_sha256"], "0" * 64)
         .replace(EXPECTED_TOOLS["ld_lld_sha256"], "0" * 64))
@@ -74,6 +75,7 @@ with tempfile.TemporaryDirectory() as directory:
     values = llvm_lock.parse_lock(path)
     assert values["platform"] == "macos-arm64"
     assert values["archive_sha256"] == "a9a22f450d35f1f73cd61ab6a17c6f27d8f6051d56197395c1eb397f0c9bbec4"
+    assert values["lld_relpath"] == "bin/ld64.lld"
 
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory) / "lock.toml"
