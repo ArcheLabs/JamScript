@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/jamscript-service-backend",
   "crates/service-state-plane",
   "crates/service-runtime-core",
   "crates/service-runtime-state",

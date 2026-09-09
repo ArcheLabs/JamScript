@@ -40,6 +40,11 @@ minijam_status minijam_result(size_t index, void *output, size_t output_capacity
 minijam_status minijam_storage_read(const void *key, size_t key_size,
                                     void *output, size_t output_capacity,
                                     size_t *output_size);
+/* Accumulate-only ServiceId-scoped variant. It reuses the JAM READ hostcall. */
+minijam_status minijam_service_storage_read(uint32_t service_id,
+                                             const void *key, size_t key_size,
+                                             void *output, size_t output_capacity,
+                                             size_t *output_size);
 minijam_status minijam_storage_write(const void *key, size_t key_size,
                                      const void *value, size_t value_size);
 minijam_status minijam_storage_delete(const void *key, size_t key_size);

@@ -1994,6 +1994,19 @@ name = "jamscript-runtime-scriptc"
 version = "0.1.0"
 
 [[package]]
+name = "jamscript-service-backend"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "service-runtime-core",
+ "service-runtime-host",
+ "service-runtime-state",
+ "tempfile",
+]
+
+[[package]]
 name = "jamscript-target-jam"
 version = "0.1.0"
 dependencies = [
@@ -2241,6 +2254,7 @@ dependencies = [
  "base64",
  "cc",
  "jamscript-runtime-core",
+ "jamscript-service-backend",
  "serde",
  "serde_json",
  "service-runtime-core",

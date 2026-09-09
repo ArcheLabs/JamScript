@@ -5,8 +5,8 @@ JamScript v0 is released as a testnet developer preview. Its supported product p
 ```text
 JamScript source
   -> canonical PolkaVM Service artifact
-  -> generated, statically linked Builder application
-  -> Formal Work RPC
+  -> portable planner/application artifact
+  -> one multi-Service JamScript backend
   -> finalized managed-state commitment
   -> proof-verified client query
 ```
@@ -25,9 +25,13 @@ ships the JAM target ABI and its own target SDK. MiniJAM compatibility is
 checked separately by the optional downstream network E2E; a MiniJAM or
 Jambda checkout is not part of a JamScript build or release input.
 
-The Builder/Provider process is deployed per Service. It statically compiles the generated host
-application and the same native C sources used by the PVM Service. Loading arbitrary native
-libraries into a shared daemon is not supported.
+The public backend is one multi-Service process. Each deployment is registered
+by `serviceId`, `serviceKey`, `codeHash`, ABI version, and a digest-addressed
+planner/application artifact. The backend registry routes work and proof
+construction by Service identity; deploying another Service does not require
+rebuilding the daemon. The older generated Builder adapter remains a
+MiniJAM compatibility wrapper while the portable artifact loader is supplied
+by the backend deployment.
 
 Provider persistence is enabled with `JAMSCRIPT_PROVIDER_STORE`. The append-only recovery log is
 replayed and cryptographically revalidated on startup. Finalized JAM/MiniJAM storage remains the
@@ -73,17 +77,20 @@ rewritten as a successful run.
 1. Build the Service with `jams build`.
 2. Verify the deployment bundle with `jams inspect <bundle>`.
 3. Select a named MiniJAM network and deploy with `jams deploy --network <name>`.
-4. Compile and run the generated Builder application as a per-Service Formal RPC sidecar.
-5. Configure the browser client with separate node, work, and managed-state Provider endpoints.
-6. When a downstream network is available, run the manual MiniJAM network E2E
+4. Run one `jamscript-service-backend` process and configure its internal Node and Formal RPCs.
+5. Register each deployed Service through the restricted backend control plane.
+6. Configure the browser client with the single public backend endpoint.
+7. When a downstream network is available, run the manual MiniJAM network E2E
    as a compatibility check before publishing the release artifacts.
 
 The deployment command is intentionally a separate control-plane operation, not an application
 RPC. In v0.1 it targets the formal MiniJAM Stage-1
 `minijam_createServiceV1` method, verifies the artifact and optional node genesis identity before
 mutation, waits for the finalized result returned by the deployment RPC, and stores a local
-deployment record. Wallet calls remain in the TypeScript/browser client so the wallet receives one
-standard `signRaw` request and private keys never enter the CLI. JAM deployment is recognized in
+deployment record. Backend registration is a separate retryable operation and
+does not recreate an already finalized Service. Wallet calls remain in the
+TypeScript/browser client so the wallet receives one standard `signRaw` request
+and private keys never enter the CLI. JAM deployment is recognized in
 configuration but remains unsupported in v0.1.
 
 ## Release gates

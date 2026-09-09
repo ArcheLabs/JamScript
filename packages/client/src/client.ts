@@ -11,7 +11,7 @@ import {
   toHex,
   type SignedActionV1,
 } from "./crypto.js";
-import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, FetchRpcTransport, RpcError, type ActionReceipt, type BackendCapabilitiesV1, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
@@ -30,21 +30,37 @@ export type QueryResult = {
 
 export type JamScriptClientOptions = {
   stateProvider?: StateProvider;
+  endpoint?: string;
+  deployment?: DeploymentDescriptor;
+  signer?: JamSigner;
 };
 
 export class JamScriptClient {
   private readonly rpc: WorkRpc;
+  private readonly defaultSigner?: JamSigner;
+  private readonly deployment: DeploymentDescriptor;
 
   constructor(
-    private readonly deployment: DeploymentDescriptor,
-    transport: RpcTransport,
+    deploymentOrOptions: DeploymentDescriptor | (JamScriptClientOptions & { endpoint: string; deployment: DeploymentDescriptor }),
+    transport?: RpcTransport,
     private readonly options: JamScriptClientOptions = {},
   ) {
-    if (deployment.abiVersion !== 1 || deployment.abi.abiVersion !== 1) {
+    const optionsObject = "endpoint" in deploymentOrOptions;
+    this.deployment = optionsObject
+      ? deploymentOrOptions.deployment
+      : deploymentOrOptions;
+    const resolvedOptions = optionsObject ? deploymentOrOptions : options;
+    const resolvedTransport = transport
+      ?? (resolvedOptions.endpoint ? new FetchRpcTransport(resolvedOptions.endpoint) : undefined);
+    if (!resolvedTransport) {
+      throw new Error("a single backend endpoint or RPC transport is required");
+    }
+    if (this.deployment.abiVersion !== 1 || this.deployment.abi.abiVersion !== 1) {
       throw new Error("unsupported JamScript ABI version");
     }
-    this.rpc = asWorkRpc(transport);
-    this.stateProvider = options.stateProvider ?? new RpcStateProvider(transport);
+    this.defaultSigner = resolvedOptions.signer;
+    this.rpc = asWorkRpc(resolvedTransport);
+    this.stateProvider = resolvedOptions.stateProvider ?? new RpcStateProvider(resolvedTransport);
   }
 
   private readonly stateProvider: StateProvider;
@@ -54,6 +70,10 @@ export class JamScriptClient {
     if (!sameHex(genesis, this.deployment.genesisHash)) {
       throw new Error("deployment genesis hash does not match the chain");
     }
+  }
+
+  getCapabilities(): Promise<BackendCapabilitiesV1> {
+    return this.rpc.capabilities();
   }
 
   async readNonce(publicKey: Uint8Array, context?: FinalizedContext): Promise<bigint> {
@@ -71,20 +91,22 @@ export class JamScriptClient {
   async submitAction(
     actionName: string,
     input: Record<string, CodecValue>,
-    signer: JamSigner,
+    signer?: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number } = {},
   ): Promise<SubmitWorkResult> {
     await this.validateDeployment();
+    const activeSigner = signer ?? this.defaultSigner;
+    if (!activeSigner) throw new Error("submitAction requires a signer");
     const action = actionByName(this.deployment.abi, actionName);
     if (action.auth !== "wallet") throw new Error("submitAction requires a wallet-authenticated action");
-    if (signer.publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
+    if (activeSigner.publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
     const payload = encodeActionPayload(this.deployment.abi, actionName, input);
     const selector = actionSelector(actionName);
     if (!sameHex(toHex(selector), action.selector)) {
       throw new Error("deployment ABI selector does not match the canonical selector");
     }
     const initialContext = await this.rpc.finalizedContext();
-    const nonce = await this.readNonce(signer.publicKey, initialContext);
+    const nonce = await this.readNonce(activeSigner.publicKey, initialContext);
     const ttl = options.ttl ?? 64n;
     const validUntil = BigInt(initialContext.slot) + ttl;
     const unsigned: Omit<SignedActionV1, "signature"> = {
@@ -93,13 +115,13 @@ export class JamScriptClient {
       serviceKey: parseHex(this.deployment.serviceKey, 32),
       actionSelector: selector,
       signerScheme: 0,
-      publicKey: signer.publicKey,
+      publicKey: activeSigner.publicKey,
       nonce,
       validUntil,
       payloadHash: blake2(payload),
       payload,
     };
-    const signature = await signer.signRaw(signingDigestV1(unsigned));
+    const signature = await activeSigner.signRaw(signingDigestV1(unsigned));
     if (signature.length !== 64) throw new Error("sr25519 signRaw must return a 64-byte signature");
     const signed = encodeSignedActionV1({ ...unsigned, signature });
     const actionHash = toHex(blake2(signed));
@@ -191,7 +213,7 @@ export class JamScriptClient {
   }
 
   workStatus(packageHash: string): Promise<WorkStatusResult> {
-    return this.rpc.workStatus(packageHash);
+    return this.rpc.workStatus(packageHash, this.deployment.serviceId);
   }
 
   async waitForWork(

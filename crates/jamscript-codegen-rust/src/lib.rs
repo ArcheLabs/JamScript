@@ -117,6 +117,7 @@ extern "C" {{
     fn minijam_result_count() -> usize;
     fn minijam_result(index: usize, output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
     fn minijam_storage_read(key: *const u8, key_size: usize, output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
+    fn minijam_service_storage_read(service_id: u32, key: *const u8, key_size: usize, output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
     fn minijam_storage_write(key: *const u8, key_size: usize, value: *const u8, value_size: usize) -> u32;
 }}
 
@@ -195,6 +196,12 @@ pub extern "C" fn minijam_accumulate() {{
         let Ok(header) = RuntimeRefineOutputV1::decode_transition_header(refined) else {{ continue; }};
         if header.parent_root != current {{ continue; }}
         if header.transition_valid_until.is_some_and(|valid_until| authoritative_tick > valid_until) {{ continue; }}
+        let mut dependencies_valid = true;
+        for dependency in &header.external_dependencies {{
+            let Ok(canonical) = read_service_commitment(dependency.service_id) else {{ dependencies_valid = false; break; }};
+            if canonical != dependency.state_root {{ dependencies_valid = false; break; }}
+        }}
+        if !dependencies_valid {{ continue; }}
         current = header.new_root;
         advanced = true;
     }}
@@ -216,6 +223,21 @@ fn read_current_commitment() -> Result<StateRoot, ()> {{
     }};
     match status {{
         1 => Ok(service_runtime_core::EMPTY_STATE_ROOT_V1),
+        0 if size == bytes.len() => ManagedStateCommitmentV1::decode(&bytes)
+            .map(|commitment| commitment.root)
+            .map_err(|_| ()),
+        _ => Err(()),
+    }}
+}}
+
+fn read_service_commitment(service_id: u32) -> Result<StateRoot, ()> {{
+    let key = MANAGED_STATE_COMMITMENT_KEY_V1;
+    let mut bytes = [0u8; 34];
+    let mut size = 0usize;
+    let status = unsafe {{
+        minijam_service_storage_read(service_id, key.as_ptr(), key.len(), bytes.as_mut_ptr(), bytes.len(), &mut size)
+    }};
+    match status {{
         0 if size == bytes.len() => ManagedStateCommitmentV1::decode(&bytes)
             .map(|commitment| commitment.root)
             .map_err(|_| ()),
@@ -1010,8 +1032,8 @@ mod tests {
         assert!(source.contains("RuntimeRefineOutputV1::decode_transition_header"));
         assert!(source.contains("MANAGED_STATE_COMMITMENT_KEY_V1"));
         assert!(source.contains("SERVICE_KEY"));
-        assert!(!source.contains("SERVICE_ID"));
-        assert!(!source.contains("service_id"));
+        assert!(source.contains("minijam_service_storage_read"));
+        assert!(source.contains("read_service_commitment"));
         assert!(!source.contains("minijam_storage_write(state_key"));
         assert!(!source.contains("decode_refined_action"));
 

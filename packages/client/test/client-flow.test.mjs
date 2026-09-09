@@ -121,8 +121,12 @@ test("submitAction reads finalized nonce and signs exactly once across stale ret
     },
   };
 
-  const client = new JamScriptClient(deployment, transport);
-  const result = await client.submitAction("submit", { score: 9n }, signer);
+  const client = new JamScriptClient({
+    endpoint: "https://backend.example",
+    deployment,
+    signer,
+  }, transport);
+  const result = await client.submitAction("submit", { score: 9n });
 
   assert.equal(result.context.blockHash, refreshedContext.blockHash);
   assert.equal(signatures, 1);
