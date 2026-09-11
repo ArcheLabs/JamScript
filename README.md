@@ -178,6 +178,11 @@ separate MiniJAM checkout):
 
     ./scripts/minijam-network-e2e.sh
 
+To consume an already-running local MiniJAM Stage-1 provider without managing
+its lifecycle:
+
+    ./scripts/minijam-consumer-e2e.sh
+
 For contributors building from this repository, use
 `JAMSCRIPT_DEV_TOOLCHAIN=1` with the repository's target SDK. Canonical user
 builds use the managed bundle and do not require host Node, LLVM, Rust, Docker,

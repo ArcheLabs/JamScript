@@ -63,7 +63,7 @@ async function managedStateValue(backend, deployment, key) {
   assert.deepEqual(Array.from(commitment.slice(0, 2)), [1, 1]);
   const stateRoot = commitment.slice(2);
   const response = await backend.call("minijam_getManagedStateV1", {
-    serviceId,
+    serviceId: deployment.serviceId,
     stateRoot: toHex(stateRoot),
     keyBase64: Buffer.from(key).toString("base64"),
   });
