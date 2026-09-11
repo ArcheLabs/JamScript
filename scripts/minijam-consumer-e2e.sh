@@ -24,6 +24,15 @@ DEPLOY_TIMEOUT="${JAMSCRIPT_E2E_DEPLOY_TIMEOUT:-240s}"
 NPM_REGISTRY="${JAMSCRIPT_NPM_REGISTRY:-}"
 backend_pid=""
 
+# A source checkout uses its local rustup/Cargo toolchain by default. Release
+# validation can explicitly select the published managed distribution with 0.
+export JAMSCRIPT_DEV_TOOLCHAIN="${JAMSCRIPT_DEV_TOOLCHAIN:-1}"
+if [[ "${JAMSCRIPT_DEV_TOOLCHAIN}" == "1" ]]; then
+  echo "JAMSCRIPT_TOOLCHAIN_MODE=developer"
+else
+  echo "JAMSCRIPT_TOOLCHAIN_MODE=managed"
+fi
+
 for command in cargo curl jq node npm sha256sum; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "${command} is required" >&2

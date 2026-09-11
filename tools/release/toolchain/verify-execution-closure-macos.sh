@@ -26,6 +26,16 @@ echo "MACOS_APPLE_SDK=PASS"
 
 RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/jamscript-macos-closure.XXXXXX")"
 trap 'rm -rf -- "${RUN_ROOT}"' EXIT
+mkdir -p "${RUN_ROOT}/home" "${RUN_ROOT}/cache"
+export HOME="${RUN_ROOT}/home"
+export XDG_CACHE_HOME="${RUN_ROOT}/cache"
+export CARGO_HOME="${BUNDLE_ROOT}/cargo"
+export CARGO_NET_OFFLINE=true
+export RUSTC="${BUNDLE_ROOT}/bin/rustc"
+export CC="${BUNDLE_ROOT}/bin/clang"
+export CXX="${BUNDLE_ROOT}/bin/clang"
+export AR="${BUNDLE_ROOT}/bin/ar"
+export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${BUNDLE_ROOT}/bin/jamscript-host-linker"
 run_gate() {
   local name="$1"
   shift
@@ -79,6 +89,32 @@ test -d "${BUNDLE_ROOT}/scriptc"
 test -d "${BUNDLE_ROOT}/runtime"
 test -d "${BUNDLE_ROOT}/runtime-scriptc"
 test -d "${BUNDLE_ROOT}/targets/jam/sdk"
+test -f "${BUNDLE_ROOT}/toolchains/polkavm-guest/Cargo.toml"
+test -f "${BUNDLE_ROOT}/toolchains/polkavm-guest/Cargo.lock"
+
+TARGET_JSON="${RUN_ROOT}/riscv64emac-unknown-none-polkavm.json"
+cp "${BUNDLE_ROOT}/cargo/vendor/polkavm-linker-0.30.0/targets/1_91/riscv64emac-unknown-none-polkavm.json" "${TARGET_JSON}"
+mkdir -p "${RUN_ROOT}/managed-guest/src"
+sed \
+  -e "s|path = \"../../crates/jamscript-runtime-core\"|path = \"${BUNDLE_ROOT}/runtime/crates/jamscript-runtime-core\"|" \
+  -e "s|path = \"../../crates/service-runtime-core\"|path = \"${BUNDLE_ROOT}/runtime/crates/service-runtime-core\"|" \
+  -e "s|path = \"../../crates/service-runtime-guest\"|path = \"${BUNDLE_ROOT}/runtime/crates/service-runtime-guest\"|" \
+  "${BUNDLE_ROOT}/toolchains/polkavm-guest/Cargo.toml" \
+  >"${RUN_ROOT}/managed-guest/Cargo.toml"
+cp "${BUNDLE_ROOT}/toolchains/polkavm-guest/Cargo.lock" "${RUN_ROOT}/managed-guest/Cargo.lock"
+printf '%s\n' \
+  '#![no_std]' \
+  '#[panic_handler]' \
+  'fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }' \
+  '#[no_mangle]' \
+  'pub extern "C" fn managed_guest_probe() {}' \
+  >"${RUN_ROOT}/managed-guest/src/lib.rs"
+run_gate MANAGED_GUEST_OFFLINE_BUILD \
+  env SDKROOT="${sdkroot}" \
+  "${BUNDLE_ROOT}/bin/cargo" -Z build-std=core,alloc -Z json-target-spec build --release --locked \
+  --target "${TARGET_JSON}" --target-dir "${RUN_ROOT}/managed-guest/target" \
+  --manifest-path "${RUN_ROOT}/managed-guest/Cargo.toml" --offline
+
 echo "COMPILER_BUILTINS_SOURCE=PASS"
 echo "MACOS_MANAGED_EXECUTABLES=PASS"
 echo "MACOS_MACHO_DEPENDENCIES=PASS"

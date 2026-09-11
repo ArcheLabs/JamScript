@@ -1,0 +1,15 @@
+[package]
+name = "jamscript_guest"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jamscript-runtime-core = { path = "../../crates/jamscript-runtime-core", default-features = false }
+service-runtime-core = { path = "../../crates/service-runtime-core", default-features = false }
+service-runtime-guest = { path = "../../crates/service-runtime-guest", default-features = false }
+
+[workspace]
+resolver = "2"

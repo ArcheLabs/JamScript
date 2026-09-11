@@ -422,7 +422,12 @@ impl ToolchainManager {
                 );
             }
         }
-        for required in [&root.join("Cargo.lock"), &installed.polkavm_lock] {
+        for required in [
+            &root.join("Cargo.lock"),
+            &installed.polkavm_lock,
+            &root.join("toolchains/polkavm-guest/Cargo.toml"),
+            &root.join("toolchains/polkavm-guest/Cargo.lock"),
+        ] {
             if !required.is_file() {
                 bail!("managed toolchain lock is missing: {}", required.display());
             }
@@ -607,6 +612,12 @@ fn validate_source_locks(manifest: &DistributionManifest, source_root: &Path) ->
         bail!("TOOLCHAIN_MANIFEST_DRIFT=FAIL: Rust toolchain differs from rust-toolchain.toml");
     }
     let polkavm = fs::read_to_string(source_root.join("toolchains/polkavm.lock"))?;
+    let canonical_guest = source_root.join("toolchains/polkavm-guest");
+    if !canonical_guest.join("Cargo.toml").is_file()
+        || !canonical_guest.join("Cargo.lock").is_file()
+    {
+        bail!("TOOLCHAIN_MANIFEST_DRIFT=FAIL: canonical PolkaVM guest manifest or lock is missing");
+    }
     if !polkavm.contains(&format!("polkavm_linker = \"{}\"", manifest.polkavm_linker)) {
         bail!("TOOLCHAIN_MANIFEST_DRIFT=FAIL: PolkaVM linker differs from toolchains/polkavm.lock");
     }

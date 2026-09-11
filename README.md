@@ -183,6 +183,15 @@ its lifecycle:
 
     ./scripts/minijam-consumer-e2e.sh
 
+To validate contributor guest dependency acquisition with a fresh Cargo home
+(this is an acceptance check, not a cache-warmup prerequisite):
+
+    ./scripts/test-contributor-cold-guest.sh
+
+The checked-in guest dependency graph is maintained explicitly with
+`tools/update-polkavm-guest-lock`; normal builds copy that lock and use
+`--locked`.
+
 If the default npm registry is unreachable, set `JAMSCRIPT_NPM_REGISTRY` for
 that run, for example `https://registry.npmmirror.com`.
 
