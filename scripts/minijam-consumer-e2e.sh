@@ -21,6 +21,7 @@ FORMAL_RPC="${JAMSCRIPT_FORMAL_RPC_URL:-http://127.0.0.1:8090}"
 BACKEND_BIND="${JAMSCRIPT_BACKEND_BIND:-127.0.0.1:8091}"
 BACKEND_URL="${JAMSCRIPT_BACKEND_URL:-http://127.0.0.1:8091}"
 DEPLOY_TIMEOUT="${JAMSCRIPT_E2E_DEPLOY_TIMEOUT:-240s}"
+NPM_REGISTRY="${JAMSCRIPT_NPM_REGISTRY:-}"
 backend_pid=""
 
 for command in cargo curl jq node npm sha256sum; do
@@ -71,6 +72,14 @@ rpc_call() {
     --data "$(jq -cn --arg method "${method}" --argjson params "${params}" \
       '{id: 1, jsonrpc: "2.0", method: $method, params: $params}')" \
     "${endpoint}"
+}
+
+run_npm() {
+  if [[ -n "${NPM_REGISTRY}" ]]; then
+    npm --prefix "${JAMSCRIPT_ROOT}/packages/client" --registry "${NPM_REGISTRY}" "$@"
+  else
+    npm --prefix "${JAMSCRIPT_ROOT}/packages/client" "$@"
+  fi
 }
 
 block_number() {
@@ -179,10 +188,10 @@ echo "JAMSCRIPT_TARGET_GENESIS=PASS"
 if [[ "${JAMSCRIPT_SKIP_NPM_INSTALL:-0}" == "1" ]]; then
   echo "JAMSCRIPT_NPM_INSTALL=SKIPPED"
 else
-  npm --prefix "${JAMSCRIPT_ROOT}/packages/client" ci --no-audit
+  run_npm ci --no-audit
   echo "JAMSCRIPT_NPM_INSTALL=PASS"
 fi
-npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run build
+run_npm run build
 
 start_backend() {
   JAMSCRIPT_BACKEND_BIND="${BACKEND_BIND}" \
@@ -309,7 +318,7 @@ JAMSCRIPT_E2E_CODE_HASH_B="${code_hash_b}" \
 JAMSCRIPT_E2E_GENESIS_HASH="${genesis_hash}" \
 JAMSCRIPT_E2E_BACKEND_URL="${BACKEND_URL}" \
 JAMSCRIPT_E2E_LOG_DIR="${LOG_DIR}" \
-  npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run test:network
+  run_npm run test:network
 
 kill -0 "${backend_pid}" 2>/dev/null || {
   echo "backend stopped during consumer E2E" >&2

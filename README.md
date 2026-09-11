@@ -183,6 +183,9 @@ its lifecycle:
 
     ./scripts/minijam-consumer-e2e.sh
 
+If the default npm registry is unreachable, set `JAMSCRIPT_NPM_REGISTRY` for
+that run, for example `https://registry.npmmirror.com`.
+
 For contributors building from this repository, use
 `JAMSCRIPT_DEV_TOOLCHAIN=1` with the repository's target SDK. Canonical user
 builds use the managed bundle and do not require host Node, LLVM, Rust, Docker,
