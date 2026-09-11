@@ -39,14 +39,15 @@ export interface StateProvider {
   get(request: StateProviderRequest): Promise<StateProviderResponse>;
 }
 
-/** The default MiniJAM-compatible provider. It returns untrusted bytes. */
+/** Legacy explicit-root proof provider retained for compatibility. */
 export class RpcStateProvider implements StateProvider {
   constructor(private readonly transport: RpcTransport) {}
 
   async get(request: StateProviderRequest): Promise<StateProviderResponse> {
     let response: {
       serviceId: number;
-      stateRoot: string;
+      stateRoot?: string;
+      managedStateRoot?: string;
       keyBase64: string;
       valueBase64: string | null;
       proofBase64: string[];
@@ -68,13 +69,96 @@ export class RpcStateProvider implements StateProvider {
     try {
       return {
         serviceId: response.serviceId,
-        stateRoot: response.stateRoot,
+        stateRoot: response.managedStateRoot ?? response.stateRoot ?? "",
         key: fromBase64(response.keyBase64),
         value: response.valueBase64 === null ? null : fromBase64(response.valueBase64),
         proof: response.proofBase64.map(fromBase64),
       };
     } catch (error) {
       throw new StateProviderError("MalformedResponse", "managed-state provider response is malformed", error);
+    }
+  }
+}
+
+/**
+ * The v0.1 default provider. The backend owns canonical-root discovery and
+ * returns only the trusted value; proof validation remains available through
+ * RpcStateProvider when an application explicitly opts into proof mode.
+ */
+export class TrustedStateProvider implements StateProvider {
+  constructor(private readonly transport: RpcTransport) {}
+
+  async get(request: StateProviderRequest): Promise<StateProviderResponse> {
+    let response: {
+      serviceId: number;
+      stateRoot?: string;
+      managedStateRoot?: string;
+      keyBase64: string;
+      valueBase64: string | null;
+    };
+    try {
+      response = await this.transport.call("jamscript_getStateV1", {
+        serviceId: request.serviceId,
+        keyBase64: toBase64(request.key),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? ": " + error.message : "";
+      throw new StateProviderError(
+        classifyRpcFailure(error),
+        "trusted managed-state request failed" + detail,
+        error,
+      );
+    }
+    try {
+      return {
+        serviceId: response.serviceId,
+        stateRoot: response.managedStateRoot ?? response.stateRoot ?? "",
+        key: fromBase64(response.keyBase64),
+        value: response.valueBase64 === null ? null : fromBase64(response.valueBase64),
+        proof: [],
+      };
+    } catch (error) {
+      throw new StateProviderError("MalformedResponse", "trusted managed-state response is malformed", error);
+    }
+  }
+}
+
+/** Requests the v1 proof endpoint and leaves verification to the client. */
+export class ProofStateProvider implements StateProvider {
+  constructor(private readonly transport: RpcTransport) {}
+
+  async get(request: StateProviderRequest): Promise<StateProviderResponse> {
+    let response: {
+      serviceId: number;
+      stateRoot?: string;
+      managedStateRoot?: string;
+      keyBase64: string;
+      valueBase64: string | null;
+      proofBase64: string[];
+    };
+    try {
+      response = await this.transport.call("jamscript_getStateProofV1", {
+        serviceId: request.serviceId,
+        keyBase64: toBase64(request.key),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? ": " + error.message : "";
+      throw new StateProviderError(
+        classifyRpcFailure(error),
+        "proof managed-state request failed" + detail,
+        error,
+      );
+    }
+    try {
+      return {
+        serviceId: response.serviceId,
+        stateRoot: response.managedStateRoot ?? response.stateRoot ?? "",
+        key: fromBase64(response.keyBase64),
+        value: response.valueBase64 === null ? null : fromBase64(response.valueBase64),
+        proof: response.proofBase64.map(fromBase64),
+      };
+    } catch (error) {
+      throw new StateProviderError("MalformedResponse", "proof managed-state response is malformed", error);
     }
   }
 }

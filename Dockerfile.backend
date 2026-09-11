@@ -1,5 +1,8 @@
 FROM rust:1.88-bookworm AS build
 WORKDIR /src
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends clang libclang-dev build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN cargo build --locked --release --bin jamscript-service-backend
 
@@ -13,6 +16,7 @@ RUN mkdir -p /var/lib/jamscript && chown -R jamscript:jamscript /var/lib/jamscri
 USER jamscript
 ENV JAMSCRIPT_BACKEND_BIND=0.0.0.0:8090 \
     JAMSCRIPT_BACKEND_DATA=/var/lib/jamscript
+VOLUME ["/var/lib/jamscript"]
 EXPOSE 8090
-HEALTHCHECK --interval=10s --timeout=3s --start-period=5s CMD curl --fail --silent http://127.0.0.1:8090/healthz
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s CMD curl --fail --silent http://127.0.0.1:8090/readinessz
 ENTRYPOINT ["/usr/local/bin/jamscript-service-backend"]

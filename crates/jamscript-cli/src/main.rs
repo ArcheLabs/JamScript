@@ -5,8 +5,8 @@ use jamscript_codegen_rust::{
 };
 use jamscript_deployment::{
     load_service_artifact, redact_url, register_backend_service, resolve_network,
-    validate_networks, CurlJsonRpcTransport, DeploymentConfig, DeploymentEngine, NetworkConfig,
-    NetworkOverrides,
+    validate_networks, CurlJsonRpcTransport, DeploymentConfig, DeploymentEngine, JsonRpcTransport,
+    NetworkConfig, NetworkOverrides,
 };
 use jamscript_ir::abi_for_language;
 use jamscript_parser::parse_service_v02;
@@ -99,6 +99,10 @@ enum CommandKind {
         #[command(subcommand)]
         command: NetworkCommand,
     },
+    Backend {
+        #[command(subcommand)]
+        command: BackendCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -126,6 +130,26 @@ enum NetworkCommand {
         path: PathBuf,
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackendCommand {
+    Start {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value = "local")]
+        network: String,
+        #[arg(long)]
+        bind: Option<String>,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long)]
+        node_rpc: Option<String>,
+        #[arg(long)]
+        formal_rpc: Option<String>,
+        #[arg(long = "cors-origin", action = clap::ArgAction::Append)]
+        cors_origins: Vec<String>,
     },
 }
 
@@ -270,7 +294,167 @@ fn main() -> Result<()> {
             json,
         }),
         CommandKind::Network { command } => network_command(command),
+        CommandKind::Backend { command } => match command {
+            BackendCommand::Start {
+                path,
+                network,
+                bind,
+                data_dir,
+                node_rpc,
+                formal_rpc,
+                cors_origins,
+            } => backend_start(BackendStartOptions {
+                path,
+                network,
+                bind,
+                data_dir,
+                node_rpc,
+                formal_rpc,
+                cors_origins,
+            }),
+        },
     }
+}
+
+struct BackendStartOptions {
+    path: PathBuf,
+    network: String,
+    bind: Option<String>,
+    data_dir: Option<PathBuf>,
+    node_rpc: Option<String>,
+    formal_rpc: Option<String>,
+    cors_origins: Vec<String>,
+}
+
+fn backend_start(options: BackendStartOptions) -> Result<()> {
+    let project_root = options
+        .path
+        .canonicalize()
+        .with_context(|| format!("locating JamScript project {}", options.path.display()))?;
+    let manifest = read_manifest(&project_root)?;
+    let config = manifest
+        .networks
+        .as_ref()
+        .and_then(|networks| networks.get(&options.network))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "NETWORK_NOT_FOUND: network '{}' is not configured",
+                options.network
+            )
+        })?;
+    if config.kind != "minijam" {
+        bail!(
+            "backend network '{}' must use kind = \"minijam\"",
+            options.network
+        );
+    }
+    let node_rpc = options
+        .node_rpc
+        .or_else(|| config.node_rpc.clone())
+        .or_else(|| std::env::var("JAMSCRIPT_NODE_RPC").ok())
+        .ok_or_else(|| anyhow::anyhow!("backend start requires node_rpc"))?;
+    let formal_rpc = options
+        .formal_rpc
+        .or_else(|| config.deployment_rpc.clone())
+        .or_else(|| std::env::var("JAMSCRIPT_FORMAL_RPC").ok())
+        .ok_or_else(|| anyhow::anyhow!("backend start requires deployment_rpc/formal_rpc"))?;
+    if let Some(expected) = config.genesis_hash.as_deref() {
+        let actual = CurlJsonRpcTransport
+            .call(
+                &node_rpc,
+                "chain_getBlockHash",
+                serde_json::json!([0]),
+                std::time::Duration::from_secs(10),
+                false,
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let actual = actual
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("node genesis RPC returned no hash"))?;
+        if parse_hash(expected)? != parse_hash(actual)? {
+            bail!("backend network genesis hash does not match jamscript.toml");
+        }
+    }
+    let binary = find_backend_binary()?;
+    let mut command = std::process::Command::new(&binary);
+    command
+        .arg("--network")
+        .arg("local")
+        .arg("--node-rpc")
+        .arg(node_rpc)
+        .arg("--formal-rpc")
+        .arg(formal_rpc);
+    if let Some(bind) = options
+        .bind
+        .or_else(|| std::env::var("JAMSCRIPT_BACKEND_BIND").ok())
+    {
+        command.arg("--bind").arg(bind);
+    }
+    if let Some(data_dir) = options.data_dir.or_else(|| {
+        std::env::var("JAMSCRIPT_BACKEND_DATA")
+            .ok()
+            .map(PathBuf::from)
+    }) {
+        command.arg("--data-dir").arg(data_dir);
+    }
+    for origin in options.cors_origins {
+        command.arg("--cors-origin").arg(origin);
+    }
+    println!(
+        "Starting JamScript backend in the foreground using network '{}'",
+        options.network
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        Err(anyhow::anyhow!(
+            "starting backend {}: {error}",
+            binary.display()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command
+            .status()
+            .with_context(|| format!("starting backend {}", binary.display()))?;
+        if !status.success() {
+            bail!("backend exited with {status}");
+        }
+        Ok(())
+    }
+}
+
+fn find_backend_binary() -> Result<PathBuf> {
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(candidate) = current
+            .parent()
+            .map(|path| path.join("jamscript-service-backend"))
+        {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("jamscript-service-backend");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("JAMSCRIPT_BACKEND_BIN") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        bail!(
+            "JAMSCRIPT_BACKEND_BIN does not point to a file: {}",
+            path.display()
+        );
+    }
+    bail!("JamScript backend binary is not installed. Install the backend package or use Docker.")
 }
 
 fn toolchain_command(command: ToolchainCommand) -> Result<()> {
@@ -472,25 +656,30 @@ fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Re
     let payload = empty_refine_input();
     let mut linker: Linker<(), MemoryAccessError> = Linker::new();
     linker
-        .define_typed(
-            "minijam_host_call",
-            move |caller: polkavm::Caller<'_, ()>,
-                  call: u32,
-                  args: u32|
-                  -> Result<u64, MemoryAccessError> {
-                let raw = caller.instance.read_memory(args, 48)?;
-                let mut values = [0u64; 6];
-                for (index, value) in values.iter_mut().enumerate() {
-                    let offset = index * 8;
-                    *value = u64::from_le_bytes(raw[offset..offset + 8].try_into().unwrap());
+        .define_untyped("minijam_fetch", move |caller| {
+            let output = caller.instance.reg(Reg::A0) as u32;
+            let offset = caller.instance.reg(Reg::A1) as usize;
+            let capacity = caller.instance.reg(Reg::A2) as usize;
+            let mode = caller.instance.reg(Reg::A3);
+            let index = caller.instance.reg(Reg::A4);
+            let value = if mode == 13 && index == 0 {
+                payload.as_slice()
+            } else {
+                &[]
+            };
+            if value.is_empty() && !(mode == 13 && index == 0) {
+                caller.instance.set_reg(Reg::A0, u64::MAX);
+            } else if offset > value.len() {
+                caller.instance.set_reg(Reg::A0, u64::MAX);
+            } else {
+                let remaining = &value[offset..];
+                if remaining.len() <= capacity {
+                    caller.instance.write_memory(output, remaining)?;
                 }
-                if call == 1 && values[3] == 13 {
-                    caller.instance.write_memory(values[0] as u32, &payload)?;
-                    return Ok(payload.len() as u64);
-                }
-                Ok(u64::MAX)
-            },
-        )
+                caller.instance.set_reg(Reg::A0, remaining.len() as u64);
+            }
+            Ok(())
+        })
         .context("registering deterministic JAM host shim")?;
     linker.define_fallback(|caller, _| {
         caller.instance.set_reg(Reg::A0, u64::MAX);

@@ -146,6 +146,7 @@ Then inspect and deploy a verified artifact:
 jams network list
 jams build ./hello --output ./hello/dist
 jams deploy ./hello --network local --artifact ./hello/dist
+jams backend start --network local
 ```
 
 `jams deploy` supports MiniJAM Stage-1 `minijam_createServiceV1` only. It
@@ -154,6 +155,49 @@ checks the configured genesis identity before mutation, and writes a local
 record under `.jamscript/deployments/`. JAM deployment is reserved for a
 future release. See [`docs/deployment.md`](docs/deployment.md) for custom
 RPCs, precedence rules, records, and the real-network E2E workflow.
+
+## Optional backend
+
+The JamScript Backend is optional: `jams check`, `jams build`, and `jams deploy`
+do not require a backend binary. If `backend_rpc` is configured, deployment
+registration is a separate retryable prewarm step; a backend outage never
+undoes a finalized chain deployment.
+
+For local development, configure `[networks.local]` with `node_rpc` and
+`deployment_rpc`, then run the backend in the foreground:
+
+```bash
+jams backend start --network local
+```
+
+The backend stores current materialized state in a genesis-bound RocksDB under
+`<data-dir>/db` and PVM artifacts under `<data-dir>/artifacts`. It compares its
+durable head with the canonical JAM/MiniJAM managed-state commitment before
+serving a state query. `/healthz` is liveness; `/readinessz` includes database,
+artifact-store, and network readiness. Stop the backend before backing up the
+entire data directory; do not copy a live RocksDB directory.
+
+The TypeScript client uses the neutral `jamscript_getStateV1` proofless API by
+default. For independent verification, pass
+`{ stateVerification: "proof" }`; refine and cross-Service runtime execution
+always retain proof verification regardless of frontend mode. A third-party
+provider uses the same `backend_rpc` field and protocol.
+
+For Docker, use a versioned image and a persistent volume:
+
+```bash
+docker run --rm \
+  -p 8090:8090 \
+  -e JAMSCRIPT_NODE_RPC=http://host.docker.internal:9944 \
+  -e JAMSCRIPT_FORMAL_RPC=http://host.docker.internal:8090 \
+  -e JAMSCRIPT_BACKEND_CORS_ORIGINS='*' \
+  -v jamscript-backend:/var/lib/jamscript \
+  ghcr.io/archelabs/jamscript-backend:v0.1.0
+```
+
+`docker-compose.backend.yml` provides the equivalent persistent-volume setup.
+The frontend trusts the selected backend for convenience data; consensus,
+refine witnesses, and accumulate root revalidation remain chain-authoritative.
 
 ## Toolchain model
 

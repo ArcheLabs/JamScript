@@ -22,7 +22,12 @@ BACKEND_BIND="${JAMSCRIPT_BACKEND_BIND:-127.0.0.1:8091}"
 BACKEND_URL="${JAMSCRIPT_BACKEND_URL:-http://127.0.0.1:8091}"
 DEPLOY_TIMEOUT="${JAMSCRIPT_E2E_DEPLOY_TIMEOUT:-240s}"
 NPM_REGISTRY="${JAMSCRIPT_NPM_REGISTRY:-}"
+BACKEND_DOCKER="${JAMSCRIPT_BACKEND_DOCKER:-0}"
+BACKEND_IMAGE="${JAMSCRIPT_BACKEND_IMAGE:-ghcr.io/archelabs/jamscript-backend:${JAMSCRIPT_BACKEND_VERSION:-v0.1.0}}"
+BACKEND_CONTAINER="${JAMSCRIPT_BACKEND_CONTAINER:-jamscript-backend-e2e-$$}"
+BACKEND_VOLUME="${JAMSCRIPT_BACKEND_VOLUME:-jamscript-backend-e2e-$$}"
 backend_pid=""
+backend_volume_owned=0
 
 # A source checkout uses its local rustup/Cargo toolchain by default. Release
 # validation can explicitly select the published managed distribution with 0.
@@ -145,6 +150,12 @@ cleanup() {
     kill "${backend_pid}" 2>/dev/null || true
     wait "${backend_pid}" 2>/dev/null || true
   fi
+  if [[ "${BACKEND_DOCKER}" == "1" ]]; then
+    docker rm -f "${BACKEND_CONTAINER}" >/dev/null 2>&1 || true
+    if (( backend_volume_owned == 1 )); then
+      docker volume rm "${BACKEND_VOLUME}" >/dev/null 2>&1 || true
+    fi
+  fi
   if [[ "${status}" -ne 0 ]]; then
     echo "JamScript MiniJAM consumer E2E: FAIL" >&2
     echo "consumer logs: ${LOG_DIR}" >&2
@@ -203,6 +214,27 @@ fi
 run_npm run build
 
 start_backend() {
+  if [[ "${BACKEND_DOCKER}" == "1" ]]; then
+    [[ "$(uname -s)" == "Linux" ]] || {
+      echo "JAMSCRIPT_BACKEND_DOCKER=1 requires Linux host networking" >&2
+      exit 1
+    }
+    command -v docker >/dev/null 2>&1 || {
+      echo "docker is required for JAMSCRIPT_BACKEND_DOCKER=1" >&2
+      exit 127
+    }
+    docker volume inspect "${BACKEND_VOLUME}" >/dev/null 2>&1 || {
+      docker volume create "${BACKEND_VOLUME}" >/dev/null
+      backend_volume_owned=1
+    }
+    docker run -d --name "${BACKEND_CONTAINER}" --network host \
+      -e JAMSCRIPT_BACKEND_DATA=/var/lib/jamscript \
+      -e JAMSCRIPT_NODE_RPC="${NODE_RPC}" \
+      -e JAMSCRIPT_FORMAL_RPC="${FORMAL_RPC}" \
+      -e JAMSCRIPT_BACKEND_CORS_ORIGINS='*' \
+      -v "${BACKEND_VOLUME}:/var/lib/jamscript" \
+      "${BACKEND_IMAGE}" --bind "${BACKEND_BIND}" >/dev/null
+  else
   JAMSCRIPT_BACKEND_BIND="${BACKEND_BIND}" \
   JAMSCRIPT_NODE_RPC="${NODE_RPC}" \
   JAMSCRIPT_FORMAL_RPC="${FORMAL_RPC}" \
@@ -210,20 +242,44 @@ start_backend() {
     "${JAMSCRIPT_ROOT}/target/debug/jamscript-service-backend" \
     >"${BACKEND_LOG}" 2>&1 &
   backend_pid=$!
+  fi
   for _ in $(seq 1 60); do
     if curl -fsS --max-time 3 "${BACKEND_URL}/healthz" >/dev/null 2>&1; then
       break
     fi
-    kill -0 "${backend_pid}" 2>/dev/null || break
+    if [[ "${BACKEND_DOCKER}" == "1" ]]; then
+      docker inspect -f '{{.State.Running}}' "${BACKEND_CONTAINER}" 2>/dev/null | grep -qx true || break
+    else
+      kill -0 "${backend_pid}" 2>/dev/null || break
+    fi
     sleep 1
   done
   curl -fsS --max-time 5 "${BACKEND_URL}/readinessz" >/dev/null
 }
 
+restart_backend() {
+  if [[ "${BACKEND_DOCKER}" == "1" ]]; then
+    docker rm -f "${BACKEND_CONTAINER}" >/dev/null
+  else
+    kill "${backend_pid}" 2>/dev/null || true
+    wait "${backend_pid}" 2>/dev/null || true
+    backend_pid=""
+  fi
+  start_backend
+}
+
 start_backend
-echo "JAMSCRIPT_BACKEND=PASS"
+if [[ "${BACKEND_DOCKER}" == "1" ]]; then
+  echo "JAMSCRIPT_BACKEND_CONTAINER=PASS"
+else
+  echo "JAMSCRIPT_BACKEND=PASS"
+fi
 backend_binary="${JAMSCRIPT_ROOT}/target/debug/jamscript-service-backend"
-backend_binary_hash="$(sha256sum "${backend_binary}" | awk '{print $1}')"
+if [[ "${BACKEND_DOCKER}" == "1" ]]; then
+  backend_binary_hash=""
+else
+  backend_binary_hash="$(sha256sum "${backend_binary}" | awk '{print $1}')"
+fi
 
 prepare_project() {
   local project="$1" package_name="$2" service_key="$3" instance_id="$4"
@@ -329,16 +385,53 @@ JAMSCRIPT_E2E_BACKEND_URL="${BACKEND_URL}" \
 JAMSCRIPT_E2E_LOG_DIR="${LOG_DIR}" \
   run_npm run test:network
 
-kill -0 "${backend_pid}" 2>/dev/null || {
-  echo "backend stopped during consumer E2E" >&2
-  exit 1
-}
-[[ "$(sha256sum "${backend_binary}" | awk '{print $1}')" == "${backend_binary_hash}" ]] || {
-  echo "backend binary changed during the multi-service deployment" >&2
-  exit 1
-}
-echo "NO_BACKEND_RECOMPILE=PASS"
-echo "NO_BACKEND_RESTART=PASS"
+echo "JAMSCRIPT_FRONTEND_PROOFLESS_QUERY=PASS"
+echo "JAMSCRIPT_RUNTIME_STATE_PROOF=PASS"
+echo "BACKEND_FRONTEND_STATE_QUERY=PASS"
+
+restart_backend
+echo "JAMSCRIPT_BACKEND_RESTART=PASS"
+JAMSCRIPT_E2E_BACKEND_URL="${BACKEND_URL}" \
+JAMSCRIPT_E2E_SERVICE_ID="${service_id}" \
+JAMSCRIPT_E2E_SERVICE_ID_B="${service_id_b}" \
+JAMSCRIPT_E2E_CLIENT_ROOT="${JAMSCRIPT_ROOT}" \
+  node --input-type=module -e '
+    const { FetchRpcTransport, stateKey } = await import(`file://${process.env.JAMSCRIPT_E2E_CLIENT_ROOT}/packages/client/dist/index.js`);
+    const backend = new FetchRpcTransport(process.env.JAMSCRIPT_E2E_BACKEND_URL);
+    const query = async (serviceId, keyByte) => {
+      const response = await backend.call("jamscript_getStateV1", {
+        serviceId: Number(serviceId),
+        keyBase64: Buffer.from(stateKey("test.values/v1", new Uint8Array(32).fill(keyByte))).toString("base64"),
+      });
+      if (response.valueBase64 === null) throw new Error(`Service ${serviceId} state missing after restart`);
+      if (Object.hasOwn(response, "proofBase64")) throw new Error("trusted state response exposed proof bytes");
+    };
+    await query(process.env.JAMSCRIPT_E2E_SERVICE_ID, 0x22);
+    if (process.env.JAMSCRIPT_E2E_SERVICE_ID_B !== process.env.JAMSCRIPT_E2E_SERVICE_ID) {
+      await query(process.env.JAMSCRIPT_E2E_SERVICE_ID_B, 0x55);
+    }
+  '
+echo "BACKEND_RESTART_STATE=PASS"
+echo "BACKEND_ROCKSDB_RESTART=PASS"
+echo "BACKEND_MULTI_SERVICE_PERSISTENCE=PASS"
+
+if [[ "${BACKEND_DOCKER}" == "1" ]]; then
+  docker inspect -f '{{.State.Running}}' "${BACKEND_CONTAINER}" | grep -qx true || {
+    echo "backend container stopped during consumer E2E" >&2
+    exit 1
+  }
+  echo "DOCKER_BACKEND_E2E=PASS"
+else
+  kill -0 "${backend_pid}" 2>/dev/null || {
+    echo "backend stopped during consumer E2E" >&2
+    exit 1
+  }
+  [[ "$(sha256sum "${backend_binary}" | awk '{print $1}')" == "${backend_binary_hash}" ]] || {
+    echo "backend binary changed during the multi-service deployment" >&2
+    exit 1
+  }
+  echo "NO_BACKEND_RECOMPILE=PASS"
+fi
 echo "JAMSCRIPT_EXTERNAL_NETWORK_E2E=PASS"
 echo "JAMSCRIPT_EXTERNAL_NETWORK_MULTI_SERVICE_E2E=PASS"
 echo "REAL_MINIJAM_E2E=PASS"

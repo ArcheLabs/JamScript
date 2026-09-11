@@ -6,23 +6,31 @@
 //! daemon can route many Services without being rebuilt.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use bounded_collections::{BoundedVec, ConstU32};
+use jam_codec::Decode as JamDecode;
 use jam_program_blob_common::ProgramBlob;
 use jamscript_deployment::JsonRpcTransport;
+use parity_scale_codec::Decode as ScaleDecode;
 use polkavm::{
     BackendKind, Config as PvmConfig, Engine, Linker, MemoryAccessError, Module, ModuleConfig, Reg,
+};
+use rocksdb::{
+    ColumnFamilyDescriptor, Direction, IteratorMode, Options, WriteBatch, WriteOptions, DB,
 };
 use serde_json::{json, Value};
 use service_runtime_core::{
     BackendMetadataV1, ExecutionContext, RuntimeRefineInputV1, RuntimeRefineOutputV1,
-    ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1, StateQueryResponseV1,
-    StateRoot, WireError, EMPTY_STATE_ROOT_V1, MAX_RECOVERY_BYTES, RECOVERY_FORMAT_VERSION,
+    ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1, StateDiffV1,
+    StateQueryResponseV1, StateRecoveryV1, StateRoot, WireError, EMPTY_STATE_ROOT_V1,
+    MAX_RECOVERY_BYTES, RECOVERY_FORMAT_VERSION,
 };
 use service_runtime_host::{
     FullStateProvider, MaterializedServiceStateProvider, ProviderError, ServiceStateProvider,
 };
+use service_runtime_state::FullState;
 use std::{
     collections::BTreeMap,
-    fmt,
+    env, fmt,
     fs::{self, OpenOptions},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -36,6 +44,14 @@ use std::{
 
 pub const BACKEND_PROTOCOL_VERSION_V1: u32 = 1;
 pub const MAX_PVM_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+pub const BACKEND_DB_SCHEMA_VERSION_V1: u32 = 1;
+pub const BACKEND_DB_CF_META: &str = "meta";
+pub const BACKEND_DB_CF_SERVICES: &str = "services";
+pub const BACKEND_DB_CF_HEADS: &str = "heads";
+pub const BACKEND_DB_CF_STATE: &str = "state";
+pub const BACKEND_DB_CF_TRANSITIONS: &str = "transitions";
+const MINIJAM_STATE_VALUE_MAX_BYTES: u32 = 1_048_576;
+type MiniJamStateValue = BoundedVec<u8, ConstU32<MINIJAM_STATE_VALUE_MAX_BYTES>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactFormat {
@@ -178,6 +194,7 @@ pub struct DiskBackendStore {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct PersistedServiceRecord {
+    version: u32,
     service_id: u32,
     service_key: String,
     code_hash: String,
@@ -246,6 +263,7 @@ impl DiskBackendStore {
         let records = registry
             .iter()
             .map(|record| PersistedServiceRecord {
+                version: BACKEND_DB_SCHEMA_VERSION_V1,
                 service_id: record.service_id,
                 service_key: hash_hex(record.service_key.as_bytes()),
                 code_hash: hash_hex(&record.code_hash),
@@ -266,6 +284,341 @@ impl DiskBackendStore {
             .and_then(|_| fs::rename(&temp, &self.registry_path))
             .map_err(|error| BackendError::ArtifactStore(error.to_string()))
     }
+}
+
+#[derive(Clone)]
+pub struct BackendDatabase {
+    root: PathBuf,
+    db: Arc<DB>,
+    transition_retention: u64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistedHead {
+    version: u32,
+    service_id: u32,
+    service_key: String,
+    sequence: u64,
+    managed_state_root: String,
+    finalized_block_hash: Option<String>,
+    finalized_block_number: Option<u32>,
+    finalized_slot: Option<u32>,
+}
+
+impl BackendDatabase {
+    /// Open the v1 durable backend database. The database owns the canonical
+    /// registry, per-Service KV, heads, and finalized transition journal.
+    /// RocksDB's process lock makes a second backend using this directory fail
+    /// before it can serve requests.
+    pub fn open(root: impl Into<PathBuf>, genesis_hash: StateRoot) -> Result<Self, BackendError> {
+        let root = root.into();
+        fs::create_dir_all(&root).map_err(|error| BackendError::Database(error.to_string()))?;
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let descriptors = [
+            BACKEND_DB_CF_META,
+            BACKEND_DB_CF_SERVICES,
+            BACKEND_DB_CF_HEADS,
+            BACKEND_DB_CF_STATE,
+            BACKEND_DB_CF_TRANSITIONS,
+        ]
+        .into_iter()
+        .map(|name| ColumnFamilyDescriptor::new(name, Options::default()));
+        let db = DB::open_cf_descriptors(&options, &root, descriptors).map_err(|error| {
+            let message = error.to_string();
+            if message.to_ascii_lowercase().contains("lock") {
+                BackendError::DatabaseInUse(message)
+            } else {
+                BackendError::Database(message)
+            }
+        })?;
+        let database = Self {
+            root,
+            db: Arc::new(db),
+            transition_retention: env::var("JAMSCRIPT_BACKEND_TRANSITION_RETENTION")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(4096),
+        };
+        database.initialize_meta(genesis_hash)?;
+        Ok(database)
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn cf(&self, name: &str) -> Result<&rocksdb::ColumnFamily, BackendError> {
+        self.db
+            .cf_handle(name)
+            .ok_or_else(|| BackendError::Database(format!("missing column family {name}")))
+    }
+
+    fn initialize_meta(&self, genesis_hash: StateRoot) -> Result<(), BackendError> {
+        let meta = self.cf(BACKEND_DB_CF_META)?;
+        let schema_key = b"schema_version";
+        match self
+            .db
+            .get_cf(meta, schema_key)
+            .map_err(|error| BackendError::Database(error.to_string()))?
+        {
+            Some(bytes) => {
+                let stored = u32::from_be_bytes(
+                    bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| BackendError::SchemaMismatch)?,
+                );
+                if stored != BACKEND_DB_SCHEMA_VERSION_V1 {
+                    return Err(BackendError::SchemaMismatch);
+                }
+                let stored_genesis = self
+                    .db
+                    .get_cf(meta, b"genesis_hash")
+                    .map_err(|error| BackendError::Database(error.to_string()))?
+                    .ok_or(BackendError::GenesisMismatch)?;
+                if stored_genesis.as_slice() != genesis_hash.as_slice() {
+                    return Err(BackendError::GenesisMismatch);
+                }
+            }
+            None => {
+                let mut batch = WriteBatch::default();
+                batch.put_cf(meta, schema_key, BACKEND_DB_SCHEMA_VERSION_V1.to_be_bytes());
+                batch.put_cf(meta, b"genesis_hash", genesis_hash);
+                batch.put_cf(
+                    meta,
+                    b"created_by_version",
+                    format!("jamscript-backend-v{BACKEND_PROTOCOL_VERSION_V1}").as_bytes(),
+                );
+                let mut options = WriteOptions::default();
+                options.set_sync(true);
+                self.db
+                    .write_opt(batch, &options)
+                    .map_err(|error| BackendError::Database(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn load_registry(
+        &self,
+    ) -> Result<(ServiceRegistry, std::collections::BTreeSet<u32>), BackendError> {
+        let cf = self.cf(BACKEND_DB_CF_SERVICES)?;
+        let mut registry = ServiceRegistry::default();
+        let mut corrupt = std::collections::BTreeSet::new();
+        for item in self.db.iterator_cf(cf, IteratorMode::Start) {
+            let (key, value) = item.map_err(|error| BackendError::Database(error.to_string()))?;
+            let service_id = key
+                .as_ref()
+                .try_into()
+                .map(u32::from_be_bytes)
+                .map_err(|_| BackendError::Database("malformed service record key".into()))?;
+            match decode_service_record(&value) {
+                Ok(record) => {
+                    if record.service_id != service_id || registry.register(record).is_err() {
+                        corrupt.insert(service_id);
+                    }
+                }
+                Err(BackendError::SchemaMismatch) => return Err(BackendError::SchemaMismatch),
+                Err(_) => {
+                    corrupt.insert(service_id);
+                }
+            }
+        }
+        Ok((registry, corrupt))
+    }
+
+    pub fn persist_service(&self, record: &ServiceRecord) -> Result<(), BackendError> {
+        let cf = self.cf(BACKEND_DB_CF_SERVICES)?;
+        let key = record.service_id.to_be_bytes();
+        let value = encode_service_record(record)?;
+        let mut options = WriteOptions::default();
+        options.set_sync(true);
+        self.db
+            .put_cf_opt(cf, key, value, &options)
+            .map_err(|error| BackendError::Database(error.to_string()))
+    }
+
+    pub fn load_service_snapshot(
+        &self,
+        service_id: u32,
+        service_key: ServiceKeyV1,
+    ) -> Result<(u64, StateRoot, FullState, Option<FinalizedContextV1>), BackendError> {
+        let head_cf = self.cf(BACKEND_DB_CF_HEADS)?;
+        let (sequence, root, context) = match self
+            .db
+            .get_cf(head_cf, service_id.to_be_bytes())
+            .map_err(|error| BackendError::Database(error.to_string()))?
+        {
+            Some(bytes) => {
+                let head: PersistedHead = serde_json::from_slice(&bytes)
+                    .map_err(|_| BackendError::ServiceStateCorrupt(service_id))?;
+                if head.version != BACKEND_DB_SCHEMA_VERSION_V1 {
+                    return Err(BackendError::SchemaMismatch);
+                }
+                let stored_service_key = parse_hash(&head.service_key)
+                    .map_err(|_| BackendError::ServiceStateCorrupt(service_id))?;
+                if head.service_id != service_id || stored_service_key != *service_key.as_bytes() {
+                    return Err(BackendError::ServiceStateCorrupt(service_id));
+                }
+                let context = match (
+                    head.finalized_block_hash,
+                    head.finalized_block_number,
+                    head.finalized_slot,
+                ) {
+                    (Some(block_hash), Some(block_number), Some(slot)) => {
+                        Some(FinalizedContextV1 {
+                            block_hash: parse_hash(&block_hash)
+                                .map_err(|_| BackendError::ServiceStateCorrupt(service_id))?,
+                            block_number,
+                            state_root: [0; 32],
+                            slot,
+                        })
+                    }
+                    (None, None, None) => None,
+                    _ => return Err(BackendError::ServiceStateCorrupt(service_id)),
+                };
+                (
+                    head.sequence,
+                    parse_hash(&head.managed_state_root)
+                        .map_err(|_| BackendError::ServiceStateCorrupt(service_id))?,
+                    context,
+                )
+            }
+            None => (0, EMPTY_STATE_ROOT_V1, None),
+        };
+        let state_cf = self.cf(BACKEND_DB_CF_STATE)?;
+        let prefix = service_id.to_be_bytes();
+        let mut pairs = Vec::new();
+        for item in self
+            .db
+            .iterator_cf(state_cf, IteratorMode::From(&prefix, Direction::Forward))
+        {
+            let (key, value) = item.map_err(|error| BackendError::Database(error.to_string()))?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            pairs.push((key[prefix.len()..].to_vec(), value.to_vec()));
+        }
+        let state = FullState::from_pairs(pairs)
+            .map_err(|_| BackendError::ServiceStateCorrupt(service_id))?;
+        if state.root() != root {
+            return Err(BackendError::ServiceStateCorrupt(service_id));
+        }
+        Ok((sequence, root, state, context))
+    }
+
+    /// Persist a complete finalized transition in one synced batch. The
+    /// state CF is the durable source; the transition record is an audit trail
+    /// and the head is the single durable read root.
+    pub fn commit_transition(
+        &self,
+        service_id: u32,
+        service_key: ServiceKeyV1,
+        sequence: u64,
+        output: &RuntimeRefineOutputV1,
+        diff: &StateDiffV1,
+        finalized_context: Option<&FinalizedContextV1>,
+    ) -> Result<(), BackendError> {
+        let head_cf = self.cf(BACKEND_DB_CF_HEADS)?;
+        let state_cf = self.cf(BACKEND_DB_CF_STATE)?;
+        let transitions_cf = self.cf(BACKEND_DB_CF_TRANSITIONS)?;
+        let head = PersistedHead {
+            version: BACKEND_DB_SCHEMA_VERSION_V1,
+            service_id,
+            service_key: hash_hex(service_key.as_bytes()),
+            sequence,
+            managed_state_root: hash_hex(&output.new_root),
+            finalized_block_hash: finalized_context.map(|context| hash_hex(&context.block_hash)),
+            finalized_block_number: finalized_context.map(|context| context.block_number),
+            finalized_slot: finalized_context.map(|context| context.slot),
+        };
+        let head_bytes =
+            serde_json::to_vec(&head).map_err(|error| BackendError::Database(error.to_string()))?;
+        let transition_key_bytes = transition_key(service_id, sequence);
+        let transition = RecoveryEnvelopeV1 {
+            service_id,
+            service_key,
+            output: output.clone(),
+        }
+        .encode()?;
+        let mut batch = WriteBatch::default();
+        for change in &diff.changes {
+            let mut key = Vec::with_capacity(4 + change.key.len());
+            key.extend_from_slice(&service_id.to_be_bytes());
+            key.extend_from_slice(&change.key);
+            match &change.value {
+                Some(value) => batch.put_cf(state_cf, key, value),
+                None => batch.delete_cf(state_cf, key),
+            }
+        }
+        batch.put_cf(head_cf, service_id.to_be_bytes(), head_bytes);
+        batch.put_cf(transitions_cf, transition_key_bytes, transition);
+        if sequence > self.transition_retention {
+            batch.delete_cf(
+                transitions_cf,
+                transition_key(service_id, sequence - self.transition_retention),
+            );
+        }
+        let mut options = WriteOptions::default();
+        options.set_sync(true);
+        self.db
+            .write_opt(batch, &options)
+            .map_err(|error| BackendError::Database(error.to_string()))
+    }
+}
+
+fn transition_key(service_id: u32, sequence: u64) -> [u8; 12] {
+    let mut key = [0u8; 12];
+    key[..4].copy_from_slice(&service_id.to_be_bytes());
+    key[4..].copy_from_slice(&sequence.to_be_bytes());
+    key
+}
+
+fn encode_service_record(record: &ServiceRecord) -> Result<Vec<u8>, BackendError> {
+    serde_json::to_vec(&PersistedServiceRecord {
+        version: BACKEND_DB_SCHEMA_VERSION_V1,
+        service_id: record.service_id,
+        service_key: hash_hex(record.service_key.as_bytes()),
+        code_hash: hash_hex(&record.code_hash),
+        abi_version: record.abi_version,
+        artifact_digest: hash_hex(&record.application_artifact.digest),
+        artifact_format: ArtifactFormat::WIRE_NAME.into(),
+        manifest_digest: record
+            .deployment
+            .manifest_digest
+            .map(|hash| hash_hex(&hash)),
+        registered_at: record.deployment.registered_at,
+    })
+    .map_err(|error| BackendError::Database(error.to_string()))
+}
+
+fn decode_service_record(bytes: &[u8]) -> Result<ServiceRecord, BackendError> {
+    let record: PersistedServiceRecord =
+        serde_json::from_slice(bytes).map_err(|error| BackendError::Database(error.to_string()))?;
+    if record.version != BACKEND_DB_SCHEMA_VERSION_V1 {
+        return Err(BackendError::SchemaMismatch);
+    }
+    Ok(ServiceRecord {
+        service_id: record.service_id,
+        service_key: ServiceKeyV1::new(parse_hash(&record.service_key)?),
+        code_hash: parse_hash(&record.code_hash)?,
+        abi_version: record.abi_version,
+        application_artifact: ApplicationArtifactRef {
+            digest: parse_hash(&record.artifact_digest)?,
+            format: ArtifactFormat::parse(&record.artifact_format)?,
+        },
+        deployment: DeploymentMetadata {
+            manifest_digest: record
+                .manifest_digest
+                .as_deref()
+                .map(parse_hash)
+                .transpose()?,
+            registered_at: record.registered_at,
+        },
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
@@ -575,27 +928,30 @@ impl PvmApplication {
         let payload = payload.to_vec();
         let mut linker: Linker<(), MemoryAccessError> = Linker::new();
         linker
-            .define_typed(
-                "minijam_host_call",
-                move |caller: polkavm::Caller<'_, ()>,
-                      call: u32,
-                      args: u32|
-                      -> Result<u64, MemoryAccessError> {
-                    let raw = caller.instance.read_memory(args, 48)?;
-                    let mut values = [0u64; 6];
-                    for (index, value) in values.iter_mut().enumerate() {
-                        let offset = index * 8;
-                        *value = u64::from_le_bytes(
-                            raw[offset..offset + 8].try_into().expect("fixed host args"),
-                        );
+            .define_untyped("minijam_fetch", move |caller| {
+                let output = caller.instance.reg(Reg::A0) as u32;
+                let offset = caller.instance.reg(Reg::A1) as usize;
+                let capacity = caller.instance.reg(Reg::A2) as usize;
+                let mode = caller.instance.reg(Reg::A3);
+                let index = caller.instance.reg(Reg::A4);
+                let value = if mode == 13 && index == 0 {
+                    payload.as_slice()
+                } else {
+                    &[]
+                };
+                if value.is_empty() && !(mode == 13 && index == 0) {
+                    caller.instance.set_reg(Reg::A0, u64::MAX);
+                } else if offset > value.len() {
+                    caller.instance.set_reg(Reg::A0, u64::MAX);
+                } else {
+                    let remaining = &value[offset..];
+                    if remaining.len() <= capacity {
+                        caller.instance.write_memory(output, remaining)?;
                     }
-                    if call == 1 && values[3] == 13 {
-                        caller.instance.write_memory(values[0] as u32, &payload)?;
-                        return Ok(payload.len() as u64);
-                    }
-                    Ok(u64::MAX)
-                },
-            )
+                    caller.instance.set_reg(Reg::A0, remaining.len() as u64);
+                }
+                Ok(())
+            })
             .map_err(|error| BackendError::Pvm(error.to_string()))?;
         linker.define_fallback(|caller, _| {
             caller.instance.set_reg(Reg::A0, u64::MAX);
@@ -753,11 +1109,19 @@ pub enum BackendError {
     ArtifactDigestMismatch,
     ArtifactCorrupt,
     ArtifactStore(String),
+    Database(String),
+    DatabaseInUse(String),
+    SchemaMismatch,
+    GenesisMismatch,
+    ServiceStateCorrupt(u32),
+    StateNotMaterialized,
+    ServiceCorrupt(u32),
     Pvm(String),
     CodeHashMismatch,
     InvalidMetadata,
     StaleContext,
     PredictionStale,
+    WorkNotFound,
     Rpc(String),
 }
 
@@ -882,6 +1246,9 @@ impl BackendEngine {
         let service_id = required_u32(&params, "serviceId")?;
         let code_hash = parse_hash(required_str(&params, "serviceCodeHash")?)?;
         let record = state.registry.get(service_id)?.clone();
+        if state.is_corrupt(service_id) {
+            return Err(BackendError::ServiceCorrupt(service_id));
+        }
         if record.code_hash != code_hash {
             return Err(BackendError::CodeHashMismatch);
         }
@@ -936,6 +1303,9 @@ impl BackendEngine {
             }
             None => EMPTY_STATE_ROOT_V1,
         };
+        if state.current_root(service_id)? != parent_root {
+            return Err(BackendError::StateNotMaterialized);
+        }
         let actions = vec![action.clone()];
         let mut external_keys = BTreeMap::<u32, Vec<Vec<u8>>>::new();
         for _ in 0..64 {
@@ -1060,6 +1430,7 @@ impl BackendEngine {
                         return Err(BackendError::PredictionStale);
                     }
                 }
+                state.finalized_contexts.insert(service_id, context.clone());
                 state.materialize_if_canonical(key, root)?;
             }
         }
@@ -1091,6 +1462,9 @@ fn build_external_witnesses(
             let root = service_runtime_core::ManagedStateCommitmentV1::decode(&commitment)
                 .map_err(BackendError::Wire)?
                 .root;
+            if state.current_root(*service_id)? != root {
+                return Err(BackendError::StateNotMaterialized);
+            }
             let access_plan = StateAccessPlanV1::from_keys(keys).map_err(BackendError::Wire)?;
             let managed_state = state
                 .provider
@@ -1194,12 +1568,29 @@ impl<T: JsonRpcTransport + Send + Sync> BackendNetwork for MiniJamNetworkGateway
         let Some(encoded) = value.as_str() else {
             return Ok(None);
         };
-        let bytes = decode_hex(encoded)?;
-        if bytes.len() < 33 {
-            return Err(BackendError::Rpc("invalid SCALE ServiceInfo".into()));
+        let service_info = decode_minijam_state_value(&decode_hex(encoded)?)?;
+        let mut service_info_input = service_info.as_slice();
+        let (
+            _version,
+            code_hash,
+            _balance,
+            _min_item_gas,
+            _min_memo_gas,
+            _bytes,
+            _deposit_offset,
+            _items,
+            _creation_slot,
+            _last_accumulation_slot,
+            _parent_service,
+        ) = <(u8, [u8; 32], u64, u64, u64, u64, u64, u32, u32, u32, u32) as JamDecode>::decode(
+            &mut service_info_input,
+        )
+        .map_err(|error| BackendError::Rpc(format!("invalid JAM ServiceInfo: {error}")))?;
+        if !service_info_input.is_empty() {
+            return Err(BackendError::Rpc(
+                "trailing bytes after JAM ServiceInfo".into(),
+            ));
         }
-        let mut code_hash = [0u8; 32];
-        code_hash.copy_from_slice(&bytes[1..33]);
         Ok(Some(ChainServiceInfoV1 {
             service_id,
             code_hash,
@@ -1222,7 +1613,12 @@ impl<T: JsonRpcTransport + Send + Sync> BackendNetwork for MiniJamNetworkGateway
                 false,
             )
             .map_err(|error| BackendError::Rpc(error.message))?;
-        value.as_str().map(decode_hex).transpose()
+        value
+            .as_str()
+            .map(decode_hex)
+            .transpose()?
+            .map(|bytes| decode_minijam_state_value(&bytes))
+            .transpose()
     }
 
     fn service_code(
@@ -1245,7 +1641,12 @@ impl<T: JsonRpcTransport + Send + Sync> BackendNetwork for MiniJamNetworkGateway
                 false,
             )
             .map_err(|error| BackendError::Rpc(error.message))?;
-        value.as_str().map(decode_hex).transpose()
+        value
+            .as_str()
+            .map(decode_hex)
+            .transpose()?
+            .map(|bytes| decode_minijam_state_value(&bytes))
+            .transpose()
     }
 
     fn submit_work(&self, params: Value) -> Result<Value, BackendError> {
@@ -1257,19 +1658,35 @@ impl<T: JsonRpcTransport + Send + Sync> BackendNetwork for MiniJamNetworkGateway
                 self.timeout,
                 true,
             )
-            .map_err(|error| BackendError::Rpc(error.message))
+            .map_err(|error| {
+                if error.message == "stale finalized context" {
+                    BackendError::StaleContext
+                } else {
+                    BackendError::Rpc(error.message)
+                }
+            })
     }
 
     fn work_status(&self, params: Value) -> Result<Value, BackendError> {
+        let mut formal_params = params;
+        if let Value::Object(object) = &mut formal_params {
+            object.remove("serviceId");
+        }
         self.transport
             .call(
                 &self.formal_rpc,
                 "minijam_getWorkStatusV1",
-                params,
+                formal_params,
                 self.timeout,
                 false,
             )
-            .map_err(|error| BackendError::Rpc(error.message))
+            .map_err(|error| {
+                if error.message == "work not found" {
+                    BackendError::WorkNotFound
+                } else {
+                    BackendError::Rpc(error.message)
+                }
+            })
     }
 }
 
@@ -1307,6 +1724,7 @@ pub struct BackendRpcHandler {
     pvm_loader: Option<Arc<PvmArtifactLoader>>,
     artifact_store: Option<Arc<dyn ArtifactStore>>,
     persistence: Option<Arc<DiskBackendStore>>,
+    database: Option<Arc<BackendDatabase>>,
     network: Option<Arc<dyn BackendNetwork>>,
     dynamic_pvm_services: bool,
     admin_token: Option<String>,
@@ -1322,6 +1740,7 @@ impl BackendRpcHandler {
             pvm_loader: None,
             artifact_store: None,
             persistence: None,
+            database: None,
             network: None,
             dynamic_pvm_services: false,
             admin_token: None,
@@ -1358,6 +1777,11 @@ impl BackendRpcHandler {
         self
     }
 
+    pub fn with_database(mut self, database: Arc<BackendDatabase>) -> Self {
+        self.database = Some(database);
+        self
+    }
+
     pub fn with_network(mut self, network: Arc<dyn BackendNetwork>) -> Self {
         self.network = Some(network);
         self
@@ -1386,6 +1810,9 @@ impl BackendRpcHandler {
             "minijam_submitWorkV1" => self.submit_work(params),
             "minijam_getWorkStatusV1" => self.work_status(params),
             "minijam_getManagedStateV1" => self.get_managed_state(params),
+            "jamscript_getStateV1" => self.get_state(params, false),
+            "jamscript_getStateProofV1" => self.get_state(params, true),
+            "jamscript_getServiceStateStatusV1" => self.get_state_status(params),
             "jamscript_getPredictionV1" => self.get_prediction(params),
             _ => Err(BackendError::Rpc(format!("method not found: {method}"))),
         }
@@ -1571,6 +1998,7 @@ impl BackendRpcHandler {
         if let Some(store) = &self.persistence {
             store.persist_registry(&state.registry)?;
         }
+        state.persist_service(&record)?;
         service_json(&record)
     }
 
@@ -1584,6 +2012,16 @@ impl BackendRpcHandler {
         let chain = network
             .service_info(&context, service_id)?
             .ok_or(BackendError::UnknownService)?;
+        if let Some(expected_code_hash) = params
+            .get("expectedCodeHash")
+            .and_then(Value::as_str)
+            .map(parse_hash)
+            .transpose()?
+        {
+            if expected_code_hash != chain.code_hash {
+                return Err(BackendError::CodeHashMismatch);
+            }
+        }
         let expected_digest = params
             .get("artifactDigest")
             .or_else(|| params.get("plannerArtifactDigest"))
@@ -1666,6 +2104,7 @@ impl BackendRpcHandler {
         if let Some(store) = &self.persistence {
             store.persist_registry(&state.registry)?;
         }
+        state.persist_service(&record)?;
         service_json(&record)
     }
 
@@ -1736,6 +2175,122 @@ impl BackendRpcHandler {
             .get(record.service_key, root, &key)
             .map_err(BackendError::Provider)?;
         query_json(service_id, &response)
+    }
+
+    fn canonical_state_root(
+        &self,
+        service_id: u32,
+    ) -> Result<(Option<FinalizedContextV1>, StateRoot), BackendError> {
+        let Some(network) = &self.network else {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
+            return Ok((None, state.current_root(service_id)?));
+        };
+        let context = network.finalized_context()?;
+        let root = network
+            .service_storage_at(
+                &context,
+                service_id,
+                service_runtime_core::MANAGED_STATE_COMMITMENT_KEY_V1,
+            )?
+            .map(|bytes| {
+                service_runtime_core::ManagedStateCommitmentV1::decode(&bytes)
+                    .map(|commitment| commitment.root)
+                    .map_err(BackendError::Wire)
+            })
+            .transpose()?
+            .unwrap_or(EMPTY_STATE_ROOT_V1);
+        Ok((Some(context), root))
+    }
+
+    fn get_state(&self, params: Value, with_proof: bool) -> Result<Value, BackendError> {
+        let service_id = required_u32(&params, "serviceId")?;
+        let key = BASE64
+            .decode(required_str(&params, "keyBase64")?)
+            .map_err(|error| BackendError::Rpc(format!("invalid keyBase64: {error}")))?;
+        let (service_key, materialized_root) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
+            let record = state.registry.get(service_id)?;
+            (record.service_key, state.current_root(service_id)?)
+        };
+        let (context, canonical_root) = self.canonical_state_root(service_id)?;
+        if materialized_root != canonical_root {
+            return Err(BackendError::StateNotMaterialized);
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
+        if state.current_root(service_id)? != canonical_root {
+            return Err(BackendError::StateNotMaterialized);
+        }
+        let response = state
+            .provider
+            .get(service_key, canonical_root, &key)
+            .map_err(BackendError::Provider)?;
+        let mut output = query_json(service_id, &response)?;
+        if !with_proof {
+            output
+                .as_object_mut()
+                .expect("query_json always returns an object")
+                .remove("proofBase64");
+        }
+        if let Some(context) = context {
+            output["context"] = json!({
+                "blockHash": hash_hex(&context.block_hash),
+                "blockNumber": context.block_number,
+                "stateRoot": hash_hex(&context.state_root),
+                "slot": context.slot,
+            });
+            output["finalizedContext"] = output["context"].clone();
+        }
+        output["serviceKey"] = Value::String(hash_hex(service_key.as_bytes()));
+        output["managedStateRoot"] = Value::String(hash_hex(&canonical_root));
+        Ok(output)
+    }
+
+    fn get_state_status(&self, params: Value) -> Result<Value, BackendError> {
+        let service_id = required_u32(&params, "serviceId")?;
+        let (context, canonical_root) = self.canonical_state_root(service_id)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
+        state.registry.get(service_id)?;
+        let corrupt = state.is_corrupt(service_id);
+        let state_root = if corrupt {
+            None
+        } else {
+            Some(state.current_root(service_id)?)
+        };
+        let materialized = state_root == Some(canonical_root);
+        let mut output = json!({
+            "serviceId": service_id,
+            "serviceKey": hash_hex(state.registry.resolve_key(service_id)?.as_bytes()),
+            "stateRoot": state_root.map(|root| hash_hex(&root)),
+            "materializedRoot": state_root.map(|root| hash_hex(&root)),
+            "canonicalRoot": hash_hex(&canonical_root),
+            "sequence": state.state_sequence(service_id)?,
+            "materialized": materialized,
+            "synced": materialized,
+            "status": if corrupt { "corrupt" } else if materialized { "ready" } else { "not_materialized" },
+        });
+        if let Some(context) = context {
+            output["finalizedBlockHash"] = Value::String(hash_hex(&context.block_hash));
+            output["context"] = json!({
+                "blockHash": hash_hex(&context.block_hash),
+                "blockNumber": context.block_number,
+                "stateRoot": hash_hex(&context.state_root),
+                "slot": context.slot,
+            });
+            output["finalizedContext"] = output["context"].clone();
+        }
+        Ok(output)
     }
 
     fn submit_work(&self, params: Value) -> Result<Value, BackendError> {
@@ -1822,17 +2377,19 @@ impl BackendRpcHandler {
                 .status(&mut state, params)?;
             if let Some((key, output)) = prediction {
                 if !was_finalized && state.is_finalized(key) {
-                    if let Some(store) = &self.persistence {
-                        let service_key = state.registry.resolve_key(key.service_id)?;
-                        store.persist_registry(&state.registry)?;
-                        state.append_recovery(
-                            store.recovery_path(),
-                            &RecoveryEnvelopeV1 {
-                                service_id: key.service_id,
-                                service_key,
-                                output,
-                            },
-                        )?;
+                    if self.database.is_none() {
+                        if let Some(store) = &self.persistence {
+                            let service_key = state.registry.resolve_key(key.service_id)?;
+                            store.persist_registry(&state.registry)?;
+                            state.append_recovery(
+                                store.recovery_path(),
+                                &RecoveryEnvelopeV1 {
+                                    service_id: key.service_id,
+                                    service_key,
+                                    output,
+                                },
+                            )?;
+                        }
                     }
                 }
             }
@@ -1915,6 +2472,7 @@ pub struct BackendDaemon {
     bind: String,
     handler: Arc<BackendRpcHandler>,
     active_connections: Arc<AtomicUsize>,
+    cors_origins: Option<Vec<String>>,
 }
 
 impl BackendDaemon {
@@ -1923,7 +2481,18 @@ impl BackendDaemon {
             bind: bind.into(),
             handler,
             active_connections: Arc::new(AtomicUsize::new(0)),
+            cors_origins: None,
         }
+    }
+
+    pub fn with_cors_origins(mut self, origins: Vec<String>) -> Result<Self, BackendError> {
+        if origins.is_empty() || origins.iter().any(|origin| origin.trim().is_empty()) {
+            return Err(BackendError::Rpc(
+                "CORS origins must contain at least one non-empty origin".into(),
+            ));
+        }
+        self.cors_origins = Some(origins);
+        Ok(self)
     }
 
     pub fn bind(&self) -> &str {
@@ -1933,6 +2502,20 @@ impl BackendDaemon {
     pub fn serve(&self) -> Result<(), BackendError> {
         let listener =
             TcpListener::bind(&self.bind).map_err(|error| BackendError::Rpc(error.to_string()))?;
+        let cors = match &self.cors_origins {
+            Some(origins) => origins.clone(),
+            None if listener
+                .local_addr()
+                .map_err(|error| BackendError::Rpc(error.to_string()))?
+                .ip()
+                .is_loopback() => vec!["*".into()],
+            None => {
+                return Err(BackendError::Rpc(
+                    "non-loopback backend bind requires --cors-origin or JAMSCRIPT_BACKEND_CORS_ORIGINS"
+                        .into(),
+                ))
+            }
+        };
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
@@ -1947,8 +2530,9 @@ impl BackendDaemon {
                     }
                     let handler = Arc::clone(&self.handler);
                     let active_connections = Arc::clone(&self.active_connections);
+                    let cors = cors.clone();
                     std::thread::spawn(move || {
-                        if let Err(error) = serve_connection(stream, &handler) {
+                        if let Err(error) = serve_connection(stream, &handler, &cors) {
                             eprintln!("backend HTTP connection error: {error}");
                         }
                         active_connections.fetch_sub(1, Ordering::AcqRel);
@@ -1964,6 +2548,7 @@ impl BackendDaemon {
 fn serve_connection(
     mut stream: TcpStream,
     handler: &BackendRpcHandler,
+    cors: &[String],
 ) -> Result<(), BackendError> {
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -1971,8 +2556,22 @@ fn serve_connection(
     stream
         .set_write_timeout(Some(Duration::from_secs(30)))
         .map_err(|error| BackendError::Rpc(error.to_string()))?;
-    let (method, path, body) = read_http_request(&mut stream)?;
-    let (status, response) = if method == "GET" && (path == "/healthz" || path == "/health/ready") {
+    let (method, path, body, request_origin) = read_http_request(&mut stream)?;
+    let allowed_origin = request_origin
+        .as_deref()
+        .filter(|origin| {
+            cors.iter()
+                .any(|allowed| allowed == "*" || allowed == *origin)
+        })
+        .or_else(|| {
+            cors.iter()
+                .find(|allowed| allowed.as_str() == "*")
+                .map(String::as_str)
+        })
+        .unwrap_or("");
+    let (status, response) = if method == "OPTIONS" {
+        ("204 No Content", Vec::new())
+    } else if method == "GET" && (path == "/healthz" || path == "/health/ready") {
         ("200 OK", br#"{"status":"ready"}"#.to_vec())
     } else if method == "GET" && path == "/readinessz" {
         match handler.readiness() {
@@ -1991,7 +2590,7 @@ fn serve_connection(
     };
     write!(
         stream,
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\naccess-control-allow-origin: {allowed_origin}\r\naccess-control-allow-methods: GET, POST, OPTIONS\r\naccess-control-allow-headers: content-type, authorization\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         response.len()
     )
     .and_then(|_| stream.write_all(&response))
@@ -2003,7 +2602,9 @@ fn serve_connection(
 const MAX_HTTP_BYTES: usize = 32 * 1024 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 
-fn read_http_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>), BackendError> {
+fn read_http_request(
+    stream: &mut TcpStream,
+) -> Result<(String, String, Vec<u8>, Option<String>), BackendError> {
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8192];
     let header_end;
@@ -2042,6 +2643,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>)
         .ok_or_else(|| BackendError::Rpc("missing HTTP path".into()))?
         .to_owned();
     let mut content_length = None;
+    let mut origin = None;
     for line in lines {
         if line.is_empty() {
             continue;
@@ -2056,6 +2658,11 @@ fn read_http_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>)
                 .map_err(|_| BackendError::Rpc("invalid Content-Length".into()))?;
             if content_length.replace(parsed).is_some() {
                 return Err(BackendError::Rpc("duplicate Content-Length".into()));
+            }
+        }
+        if name.eq_ignore_ascii_case("origin") {
+            if origin.replace(value.trim().to_owned()).is_some() {
+                return Err(BackendError::Rpc("duplicate Origin".into()));
             }
         }
     }
@@ -2076,6 +2683,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>)
         method,
         path,
         bytes[header_end..header_end + length].to_vec(),
+        origin,
     ))
 }
 
@@ -2180,6 +2788,18 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, BackendError> {
         .collect()
 }
 
+fn decode_minijam_state_value(bytes: &[u8]) -> Result<Vec<u8>, BackendError> {
+    let mut input = bytes;
+    let value = <MiniJamStateValue as ScaleDecode>::decode(&mut input)
+        .map_err(|error| BackendError::Rpc(format!("invalid MiniJAM StateValue: {error}")))?;
+    if !input.is_empty() {
+        return Err(BackendError::Rpc(
+            "trailing bytes after MiniJAM StateValue".into(),
+        ));
+    }
+    Ok(value.into_inner())
+}
+
 fn nibble(value: u8) -> Result<u8, BackendError> {
     match value {
         b'0'..=b'9' => Ok(value - b'0'),
@@ -2212,11 +2832,23 @@ fn rpc_error(error: &BackendError) -> Value {
         BackendError::Rpc(message) => (-32000, message.clone()),
         BackendError::Registry(_) => (-32011, "unknown or invalid Service".into()),
         BackendError::Provider(_) => (-32030, "managed-state root is unavailable".into()),
-        BackendError::StaleContext => (-32041, "finalized context is stale".into()),
+        BackendError::StateNotMaterialized => (
+            -32031,
+            "STATE_NOT_MATERIALIZED: finalized managed-state root is not materialized".into(),
+        ),
+        BackendError::ServiceCorrupt(service_id) => (
+            -32032,
+            format!("SERVICE_STATE_CORRUPT: Service {service_id} is isolated"),
+        ),
+        BackendError::DatabaseInUse(_) => {
+            (-32033, "backend data directory is already in use".into())
+        }
+        BackendError::StaleContext => (-32010, "stale finalized context".into()),
         BackendError::PredictionStale => (
             -32042,
             "canonical managed-state root disagrees with the predicted transition".into(),
         ),
+        BackendError::WorkNotFound => (-32013, "work not found".into()),
         _ => (-32030, format!("backend request failed: {error:?}")),
     };
     json!({"code": code, "message": message})
@@ -2230,6 +2862,10 @@ pub struct BackendState {
     pending: BTreeMap<WorkKey, RuntimeRefineOutputV1>,
     predictions: BTreeMap<WorkKey, RuntimeRefineOutputV1>,
     finalized: std::collections::BTreeSet<WorkKey>,
+    head_sequences: BTreeMap<u32, u64>,
+    finalized_contexts: BTreeMap<u32, FinalizedContextV1>,
+    corrupt_services: std::collections::BTreeSet<u32>,
+    database: Option<Arc<BackendDatabase>>,
 }
 
 impl BackendState {
@@ -2238,6 +2874,59 @@ impl BackendState {
             registry,
             ..Self::default()
         }
+    }
+
+    pub fn from_database(database: Arc<BackendDatabase>) -> Result<Self, BackendError> {
+        let (registry, mut corrupt_services) = database.load_registry()?;
+        let mut state = Self {
+            registry,
+            database: Some(database.clone()),
+            corrupt_services: std::mem::take(&mut corrupt_services),
+            ..Self::default()
+        };
+        let records = state.registry.iter().cloned().collect::<Vec<_>>();
+        for record in records {
+            match database.load_service_snapshot(record.service_id, record.service_key) {
+                Ok((sequence, _root, snapshot, context)) => {
+                    state.provider.insert(record.service_key, snapshot);
+                    state.head_sequences.insert(record.service_id, sequence);
+                    if let Some(context) = context {
+                        state.finalized_contexts.insert(record.service_id, context);
+                    }
+                }
+                Err(BackendError::ServiceStateCorrupt(service_id)) => {
+                    state.corrupt_services.insert(service_id);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(state)
+    }
+
+    pub fn is_corrupt(&self, service_id: u32) -> bool {
+        self.corrupt_services.contains(&service_id)
+    }
+
+    pub fn current_root(&self, service_id: u32) -> Result<StateRoot, BackendError> {
+        if self.is_corrupt(service_id) {
+            return Err(BackendError::ServiceCorrupt(service_id));
+        }
+        let service = self.registry.get(service_id)?;
+        self.provider
+            .materialized_root(service.service_key)
+            .map_err(BackendError::Provider)
+    }
+
+    pub fn state_sequence(&self, service_id: u32) -> Result<u64, BackendError> {
+        self.registry.get(service_id)?;
+        Ok(self.head_sequences.get(&service_id).copied().unwrap_or(0))
+    }
+
+    pub fn persist_service(&self, record: &ServiceRecord) -> Result<(), BackendError> {
+        if let Some(database) = &self.database {
+            database.persist_service(record)?;
+        }
+        Ok(())
     }
 
     pub fn register(&mut self, record: ServiceRecord) -> Result<(), BackendError> {
@@ -2326,9 +3015,7 @@ impl BackendState {
             return Ok(false);
         }
         let record = self.registry.get(key.service_id)?;
-        self.provider
-            .apply_recovery(record.service_key, &output)
-            .map_err(BackendError::Provider)?;
+        self.commit_recovery(record.service_id, record.service_key, &output)?;
         self.pending.remove(&key);
         self.finalized.insert(key);
         Ok(true)
@@ -2342,9 +3029,64 @@ impl BackendState {
         if record.service_key != envelope.service_key {
             return Err(BackendError::ServiceKeyMismatch);
         }
-        self.provider
-            .apply_recovery(record.service_key, &envelope.output)
-            .map_err(BackendError::Provider)
+        self.commit_recovery(record.service_id, record.service_key, &envelope.output)
+    }
+
+    fn commit_recovery(
+        &mut self,
+        service_id: u32,
+        service_key: ServiceKeyV1,
+        output: &RuntimeRefineOutputV1,
+    ) -> Result<(), BackendError> {
+        if self.is_corrupt(service_id) {
+            return Err(BackendError::ServiceCorrupt(service_id));
+        }
+        let current_root = self
+            .provider
+            .materialized_root(service_key)
+            .map_err(BackendError::Provider)?;
+        if current_root != output.parent_root {
+            return Err(BackendError::RecoveryNotCanonical);
+        }
+        let recovery = StateRecoveryV1::decode(&output.recovery_payload)
+            .map_err(|_| BackendError::InvalidEnvelope)?;
+        if recovery
+            .commitment()
+            .map_err(|_| BackendError::InvalidEnvelope)?
+            != output.recovery_commitment
+        {
+            return Err(BackendError::InvalidEnvelope);
+        }
+        let current = self
+            .provider
+            .open(service_key, current_root)
+            .map_err(BackendError::Provider)?;
+        let next = current
+            .apply_diff(&recovery.diff)
+            .map_err(|_| BackendError::Provider(ProviderError::MalformedResponse))?;
+        if next.root() != output.new_root {
+            return Err(BackendError::InvalidEnvelope);
+        }
+        let sequence = self
+            .head_sequences
+            .get(&service_id)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(BackendError::EntryTooLarge)?;
+        if let Some(database) = &self.database {
+            database.commit_transition(
+                service_id,
+                service_key,
+                sequence,
+                output,
+                &recovery.diff,
+                self.finalized_contexts.get(&service_id),
+            )?;
+        }
+        self.provider.insert(service_key, next);
+        self.head_sequences.insert(service_id, sequence);
+        Ok(())
     }
 
     pub fn append_recovery(
@@ -2452,10 +3194,29 @@ impl<'a> EnvelopeReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jam_codec::Encode as JamEncode;
+    use jamscript_deployment::DeploymentError;
+    use parity_scale_codec::Encode as ScaleEncode;
     use service_runtime_core::{ActionReceiptV1, ActionStatusV1, StateChangeV1, StateDiffV1};
     use service_runtime_host::MaterializedServiceStateProvider;
     use service_runtime_state::FullState;
     use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct SingleResponse(Value);
+
+    impl JsonRpcTransport for SingleResponse {
+        fn call(
+            &self,
+            _endpoint: &str,
+            _method: &str,
+            _params: Value,
+            _timeout: Duration,
+            _mutating: bool,
+        ) -> Result<Value, DeploymentError> {
+            Ok(self.0.clone())
+        }
+    }
 
     fn record(id: u32, key: u8) -> ServiceRecord {
         ServiceRecord {
@@ -2483,6 +3244,44 @@ mod tests {
             StateDiffV1::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn network_gateway_uses_official_state_and_jambda_codecs() {
+        let service_info = JamEncode::encode(&(
+            1u8,
+            [0x11u8; 32],
+            0u64,
+            10u64,
+            20u64,
+            0u64,
+            0u64,
+            0u32,
+            0u32,
+            0u32,
+            u32::MAX,
+        ));
+        let state_value: MiniJamStateValue = service_info.try_into().unwrap();
+        let encoded = ScaleEncode::encode(&state_value);
+        let gateway = MiniJamNetworkGateway::new(
+            SingleResponse(Value::String(hash_hex(&encoded))),
+            "http://node.test",
+            "http://formal.test",
+        );
+        let context = FinalizedContextV1 {
+            block_hash: [0; 32],
+            block_number: 1,
+            state_root: [1; 32],
+            slot: 1,
+        };
+
+        assert_eq!(
+            gateway.service_info(&context, 7).unwrap(),
+            Some(ChainServiceInfoV1 {
+                service_id: 7,
+                code_hash: [0x11; 32],
+            })
+        );
     }
 
     struct TestPlanner(StateRoot, Vec<u8>);
@@ -2799,5 +3598,164 @@ mod tests {
                 .unwrap(),
             root_b
         );
+    }
+
+    #[test]
+    fn rocksdb_restarts_with_independent_service_heads_and_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_root = directory.path().join("db");
+        let genesis = [0xabu8; 32];
+        let database = Arc::new(BackendDatabase::open(&db_root, genesis).unwrap());
+        let service_a = record(10, 1);
+        let service_b = record(11, 2);
+        let mut state = BackendState::from_database(database.clone()).unwrap();
+        state.register(service_a.clone()).unwrap();
+        state.register(service_b.clone()).unwrap();
+        state.persist_service(&service_a).unwrap();
+        state.persist_service(&service_b).unwrap();
+
+        let diff_a = StateDiffV1 {
+            changes: vec![StateChangeV1 {
+                key: b"a".to_vec(),
+                value: Some(b"A".to_vec()),
+            }],
+        };
+        let diff_b = StateDiffV1 {
+            changes: vec![StateChangeV1 {
+                key: b"b".to_vec(),
+                value: Some(b"B".to_vec()),
+            }],
+        };
+        let root_a = FullState::empty().apply_diff(&diff_a).unwrap().root();
+        let root_b = FullState::empty().apply_diff(&diff_b).unwrap().root();
+        let output_a =
+            RuntimeRefineOutputV1::from_diff(EMPTY_STATE_ROOT_V1, root_a, Vec::new(), diff_a)
+                .unwrap();
+        let output_b =
+            RuntimeRefineOutputV1::from_diff(EMPTY_STATE_ROOT_V1, root_b, Vec::new(), diff_b)
+                .unwrap();
+        state
+            .apply_recovery(RecoveryEnvelopeV1 {
+                service_id: service_a.service_id,
+                service_key: service_a.service_key,
+                output: output_a,
+            })
+            .unwrap();
+        state
+            .apply_recovery(RecoveryEnvelopeV1 {
+                service_id: service_b.service_id,
+                service_key: service_b.service_key,
+                output: output_b,
+            })
+            .unwrap();
+        assert_eq!(state.current_root(10).unwrap(), root_a);
+        assert_eq!(state.current_root(11).unwrap(), root_b);
+        drop(state);
+        drop(database);
+
+        let database = Arc::new(BackendDatabase::open(&db_root, genesis).unwrap());
+        let restarted = BackendState::from_database(database).unwrap();
+        assert_eq!(restarted.current_root(10).unwrap(), root_a);
+        assert_eq!(restarted.current_root(11).unwrap(), root_b);
+        assert_eq!(restarted.state_sequence(10).unwrap(), 1);
+        assert_eq!(restarted.state_sequence(11).unwrap(), 1);
+        assert_eq!(
+            restarted
+                .provider
+                .value_at(service_a.service_key, root_a, b"a")
+                .unwrap(),
+            Some(b"A".to_vec())
+        );
+        assert_eq!(
+            restarted
+                .provider
+                .value_at(service_b.service_key, root_b, b"a")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn rocksdb_schema_and_genesis_are_startup_bindings() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_root = directory.path().join("db");
+        let database = BackendDatabase::open(&db_root, [1; 32]).unwrap();
+        drop(database);
+        assert!(matches!(
+            BackendDatabase::open(&db_root, [2; 32]),
+            Err(BackendError::GenesisMismatch)
+        ));
+    }
+
+    #[test]
+    fn proofless_state_rpc_returns_no_proof_and_reports_status() {
+        let service = record(10, 1);
+        let mut state = BackendState::default();
+        state.register(service.clone()).unwrap();
+        let snapshot = FullState::from_pairs([(b"key".as_slice(), b"value".as_slice())]).unwrap();
+        let root = state.provider.insert(service.service_key, snapshot);
+        let handler = BackendRpcHandler::new(state, Arc::new(UnconfiguredWorkGateway));
+        let response = handler
+            .handle(
+                "jamscript_getStateV1",
+                json!({
+                    "serviceId": 10,
+                    "keyBase64": BASE64.encode(b"key"),
+                }),
+            )
+            .unwrap();
+        assert_eq!(response["stateRoot"], hash_hex(&root));
+        assert_eq!(response["valueBase64"], BASE64.encode(b"value"));
+        assert!(response.get("proofBase64").is_none());
+        let status = handler
+            .handle(
+                "jamscript_getServiceStateStatusV1",
+                json!({"serviceId": 10}),
+            )
+            .unwrap();
+        assert_eq!(status["status"], "ready");
+        assert_eq!(status["materialized"], true);
+    }
+
+    #[test]
+    fn http_daemon_supports_cors_preflight_and_json_rpc_origin() {
+        fn request(handler: Arc<BackendRpcHandler>, request: String) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let thread = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                serve_connection(stream, &handler, &["https://app.example".into()]).unwrap();
+            });
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            thread.join().unwrap();
+            String::from_utf8(response).unwrap()
+        }
+
+        let handler = Arc::new(BackendRpcHandler::new(
+            BackendState::default(),
+            Arc::new(UnconfiguredWorkGateway),
+        ));
+        let preflight = request(
+            Arc::clone(&handler),
+            "OPTIONS / HTTP/1.1\r\nOrigin: https://app.example\r\n\r\n".into(),
+        );
+        assert!(preflight.starts_with("HTTP/1.1 204 No Content"));
+        assert!(preflight.contains("access-control-allow-origin: https://app.example"));
+        assert!(preflight.contains("access-control-allow-methods: GET, POST, OPTIONS"));
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"jamscript_getCapabilitiesV1","params":{}}"#;
+        let rpc = request(
+            handler,
+            format!(
+                "POST / HTTP/1.1\r\nOrigin: https://app.example\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(rpc.starts_with("HTTP/1.1 200 OK"));
+        assert!(rpc.contains("access-control-allow-origin: https://app.example"));
+        assert!(rpc.contains("\"managedStateVersion\":1"));
     }
 }

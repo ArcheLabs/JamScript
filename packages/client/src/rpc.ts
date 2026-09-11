@@ -46,10 +46,13 @@ export type ActionReceipt = {
 
 export type ManagedStateResult = {
   serviceId: number;
-  stateRoot: string;
+  stateRoot?: string;
+  managedStateRoot?: string;
+  serviceKey?: string;
   keyBase64: string;
   valueBase64: string | null;
-  proofBase64: string[];
+  proofBase64?: string[];
+  finalizedContext?: FinalizedContext;
 };
 
 export type BackendCapabilitiesV1 = {
@@ -79,7 +82,11 @@ const FORMAL_WORK_METHODS = new Set([
   "minijam_getWorkStatusV1",
 ]);
 
-const STATE_PROVIDER_METHODS = new Set(["minijam_getManagedStateV1"]);
+const STATE_PROVIDER_METHODS = new Set([
+  "jamscript_getStateV1",
+  "jamscript_getStateProofV1",
+  "minijam_getManagedStateV1",
+]);
 
 export class SplitRpcTransport implements RpcTransport {
   constructor(
@@ -130,7 +137,7 @@ export type WorkRpc = RpcTransport & {
     keyBase64: string,
   ): Promise<ManagedStateResult>;
   submitWork(request: SubmitWorkRequest): Promise<SubmitWorkResult>;
-  workStatus(packageHash: string): Promise<WorkStatusResult>;
+  workStatus(packageHash: string, serviceId?: number): Promise<WorkStatusResult>;
 };
 
 export function asWorkRpc(transport: RpcTransport): WorkRpc {
@@ -143,7 +150,10 @@ export function asWorkRpc(transport: RpcTransport): WorkRpc {
     managedStateAt: (serviceId, stateRoot, keyBase64) =>
       transport.call("minijam_getManagedStateV1", { serviceId, stateRoot, keyBase64 }),
     submitWork: (request) => transport.call("minijam_submitWorkV1", request),
-    workStatus: (packageHash) =>
-      transport.call("minijam_getWorkStatusV1", { packageHash }),
+    workStatus: (packageHash, serviceId) =>
+      transport.call(
+        "minijam_getWorkStatusV1",
+        serviceId === undefined ? { packageHash } : { packageHash, serviceId },
+      ),
   };
 }

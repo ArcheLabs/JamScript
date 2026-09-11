@@ -26,7 +26,7 @@ protocol.
 ## Running
 
 ```bash
-JAMSCRIPT_BACKEND_BIND=0.0.0.0:8090 \
+JAMSCRIPT_BACKEND_BIND=127.0.0.1:8091 \
 JAMSCRIPT_NODE_RPC=http://node:9944 \
 JAMSCRIPT_FORMAL_RPC=http://formal:8090 \
 JAMSCRIPT_BACKEND_DATA=/var/lib/jamscript \
@@ -39,7 +39,9 @@ if the node exposes only the canonical preimage, it uploads the linked PVM as
 the content-addressed fallback and retries registration. An admin token is
 not required for the normal deployment path.
 
-Registry records, artifacts, and the length-delimited recovery log survive a
-restart. Startup replays recovery entries and leaves a Service unbound when a
-persisted artifact is missing or corrupt, so repair is explicit rather than a
-silent fallback to a local source path.
+Registry records, artifacts, and finalized managed state survive a restart.
+The production binary stores them under `<data-dir>/db` and
+`<data-dir>/artifacts`; it does not read or write `recovery.log`. Startup
+rebuilds each Service's in-memory proof cache from RocksDB, validates its
+durable root, and isolates a corrupt Service so repair is explicit rather than
+a silent fallback to a local source path.

@@ -16,7 +16,8 @@ import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
 import {
-  RpcStateProvider,
+  ProofStateProvider,
+  TrustedStateProvider,
   type StateProvider,
 } from "./state-provider.js";
 
@@ -30,6 +31,7 @@ export type QueryResult = {
 
 export type JamScriptClientOptions = {
   stateProvider?: StateProvider;
+  stateVerification?: "trusted-backend" | "proof";
 };
 
 export class JamScriptClient {
@@ -44,10 +46,15 @@ export class JamScriptClient {
       throw new Error("unsupported JamScript ABI version");
     }
     this.rpc = asWorkRpc(transport);
-    this.stateProvider = options.stateProvider ?? new RpcStateProvider(transport);
+    this.stateProvider = options.stateProvider
+      ?? (options.stateVerification === "proof"
+        ? new ProofStateProvider(transport)
+        : new TrustedStateProvider(transport));
+    this.verifyProofs = options.stateProvider !== undefined || options.stateVerification === "proof";
   }
 
   private readonly stateProvider: StateProvider;
+  private readonly verifyProofs: boolean;
 
   async validateDeployment(): Promise<void> {
     const genesis = await this.rpc.genesisHash();
@@ -187,11 +194,12 @@ export class JamScriptClient {
     ) {
       throw new Error("managed-state provider response does not match the requested query");
     }
-    return verifyManagedStateProof(root, key, response.value, response.proof);
+    if (this.verifyProofs) return verifyManagedStateProof(root, key, response.value, response.proof);
+    return response.value;
   }
 
   workStatus(packageHash: string): Promise<WorkStatusResult> {
-    return this.rpc.workStatus(packageHash);
+    return this.rpc.workStatus(packageHash, this.deployment.serviceId);
   }
 
   async waitForWork(
@@ -205,7 +213,10 @@ export class JamScriptClient {
         const status = await this.workStatus(packageHash);
         if (status.status === "imported" || status.status === "failed") return status;
       } catch (error) {
-        if (!(error instanceof RpcError) || error.code !== -32013) throw error;
+        if (
+          !(error instanceof RpcError)
+          || (error.code !== -32013 && error.message !== "work not found")
+        ) throw error;
       }
       if (Date.now() >= deadline) throw new Error("timed out waiting for finalized Work");
       await new Promise((resolve) => setTimeout(resolve, intervalMs));

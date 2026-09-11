@@ -263,7 +263,9 @@ impl TypeIr {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Abi {
+    #[serde(rename = "abiVersion")]
     pub abi_version: u32,
+    #[serde(rename = "languageVersion")]
     pub language_version: String,
     pub package: AbiPackage,
     pub actions: Vec<AbiAction>,

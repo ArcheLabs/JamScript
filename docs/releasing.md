@@ -32,11 +32,13 @@ construction by Service identity; deploying another Service does not require
 rebuilding the daemon. The production artifact is the content-addressed PVM;
 the older generated Builder adapter is a legacy MiniJAM compatibility wrapper.
 
-Backend persistence is enabled with `JAMSCRIPT_BACKEND_DATA`. The registry,
-content-addressed PVM artifacts, and append-only recovery log are replayed and
-cryptographically revalidated on startup. Finalized JAM/MiniJAM storage
-remains the only source of canonical roots; the Provider supplies data and
-proofs for explicit roots.
+Backend persistence is enabled with `JAMSCRIPT_BACKEND_DATA`. RocksDB `0.25.0`
+stores the registry, per-Service KV, durable heads, and finalized transitions
+under `db/`; content-addressed PVM artifacts remain under `artifacts/`. Startup
+binds the database to schema v1 and the finalized network genesis, rebuilds
+proof caches from durable KV, and validates every Service root. Finalized
+JAM/MiniJAM storage remains the only source of canonical roots. The old
+append-only recovery log is not part of the production persistence path.
 
 ## Operator workflow
 

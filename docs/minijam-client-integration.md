@@ -31,7 +31,9 @@ provider:
 SplitRpcTransport routes chain_getBlockHash,
 minijam_getFinalizedContext, and minijam_getServiceStorageAt to the node,
 and routes only minijam_submitWorkV1 and minijam_getWorkStatusV1 to the
-formal RPC. It routes minijam_getManagedStateV1 to the state provider.
+formal RPC. It routes jamscript_getStateV1,
+jamscript_getStateProofV1, and minijam_getManagedStateV1 to the state
+provider.
 
 ## Formal Work RPC
 
@@ -56,10 +58,13 @@ store is initialized and the configured node is reachable. It applies bounded
 headers and request bodies and a bounded connection admission limit.
 
 `queryLatest` first reads the managed-state commitment from finalized Service
-storage, then requests that explicit root from the provider. It checks the
-response identity and verifies the Polkadot LayoutV1 storage proof locally
-before decoding the ABI value. Provider availability never selects the root,
-and implicit fallback to legacy Service KV is disabled by default.
+storage and asks the backend for the value through `jamscript_getStateV1` by
+default. The backend rejects a stale or unavailable materialization with
+`STATE_NOT_MATERIALIZED`; no proof object is exposed to application code in
+trusted mode. Set `stateVerification: "proof"` to request
+`jamscript_getStateProofV1` semantics and verify the LayoutV1 storage proof
+locally. Provider availability never selects the root, and implicit fallback to
+legacy Service KV is disabled by default.
 
 ## Deployment and Network E2E
 

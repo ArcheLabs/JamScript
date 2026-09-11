@@ -105,8 +105,8 @@ pending work
 predictions
   (serviceId, packageHash) -> predicted transition
 
-recovery log
-  serviceId + serviceKey + RuntimeRefineOutputV1
+RocksDB
+  serviceId-scoped KV, durable heads, and finalized transitions
 ```
 
 A package hash alone is not a backend-global key.
@@ -146,9 +146,11 @@ network topology and internally talks to:
 - Formal RPC for work submission/status;
 - its materialized managed-state provider for value/proof availability.
 
-Frontend state queries still receive `value + StorageProof` and verify the
-proof locally. A single endpoint does not imply blindly trusting backend query
-values.
+Frontend state queries use the backend's proofless trusted mode by default.
+Clients that need independent verification can explicitly request
+`value + StorageProof` and verify it locally. A single endpoint does not imply
+that work submission or state mutation is accepted without the backend's
+canonicality checks.
 
 ## 8. Deferred multi-root model
 
@@ -164,7 +166,76 @@ service could continue using one tree. V1 intentionally keeps `treeId`
 implicit and fixed to the single Service tree so that backend productization is
 not blocked by a storage-layout feature.
 
-## 9. Required release gates
+## 9. Durable backend state
+
+The release backend stores canonical materialized state in RocksDB `0.25.0`
+under `<data-dir>/db`. Compression features are disabled. The database is
+opened with these fixed column families:
+
+```text
+meta         schema version, genesis binding, backend metadata
+services     serviceId -> immutable identity and artifact metadata
+heads        serviceId -> current root and finalized transition sequence
+state        [serviceId BE u32] || application key -> raw value
+transitions  [serviceId BE u32] || [sequence BE u64] -> finalized envelope
+```
+
+`heads` is the durable root index and `state` is the durable source of truth.
+The in-memory trie is rebuilt from `state` on startup and is retained only as
+a proof/execution cache. A finalized transition writes its state changes,
+head, and transition record in one `sync=true` WriteBatch. The backend process
+lock rejects a second process using the same database directory.
+
+The schema version and genesis hash are startup bindings. A schema or genesis
+mismatch fails the whole backend. A malformed snapshot for one registered
+Service isolates that Service and reports `SERVICE_STATE_CORRUPT` through the
+state status endpoint; healthy Services remain available.
+
+The previous `recovery.log` format remains an in-memory/reference compatibility
+API for older tests, but it is not read or written by the production binary.
+
+## 10. State RPCs
+
+The public endpoint exposes:
+
+* `jamscript_getStateV1({serviceId, keyBase64})` — trusted, proofless state
+  query. The backend reads the finalized JAM commitment, requires the local
+  durable head to match it, and returns the value, root, and finalized context.
+* `jamscript_getStateProofV1({serviceId, keyBase64})` — the same query with a
+  storage proof for clients that explicitly choose proof verification.
+* `jamscript_getServiceStateStatusV1({serviceId})` — materialization status,
+  durable root, canonical root, sequence, and context.
+* `minijam_getManagedStateV1` — retained for compatibility with the original
+  explicit-root proof contract.
+
+If the finalized root is not materialized, state queries fail with
+`STATE_NOT_MATERIALIZED` (`-32031`) instead of returning a stale value.
+
+The TypeScript client defaults to `trusted-backend` mode and does not expose
+proof objects to application code. Set `stateVerification: "proof"` to use
+the proof endpoint and local verification. Work submission and network
+topology remain behind the same backend URL.
+
+## 11. Operations
+
+The backend binary accepts `--bind`, `--data-dir`, `--node-rpc`,
+`--formal-rpc`, `--network local`, and repeatable `--cors-origin` flags; each
+has an environment fallback. It runs in the foreground. Loopback binds allow
+the default wildcard CORS policy; non-loopback binds require an explicit
+origin allowlist. Liveness is `/healthz`; readiness is `/readinessz`.
+
+The CLI launcher is:
+
+```text
+jams backend start --network local
+```
+
+It resolves the selected `[networks.local]` entry, discovers the backend
+binary, and replaces itself with the foreground process. Persistent deployment
+data must be mounted at the configured data directory; the production image
+uses `/var/lib/jamscript`.
+
+## 12. Required release gates
 
 The backend is not release-ready until automated tests cover at least:
 
