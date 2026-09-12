@@ -532,7 +532,10 @@ pub enum WorkBuilderError<SourceError, ProviderError> {
 pub struct FullStateProvider {
     states: BTreeMap<ServiceKeyV1, BTreeMap<StateRoot, FullState>>,
     materialized: BTreeMap<ServiceKeyV1, StateRoot>,
+    history: BTreeMap<ServiceKeyV1, Vec<StateRoot>>,
 }
+
+const MAX_MATERIALIZED_ROOTS_PER_SERVICE: usize = 8;
 
 impl FullStateProvider {
     pub fn open(&self, service: ServiceKeyV1, root: StateRoot) -> Result<FullState, ProviderError> {
@@ -544,6 +547,18 @@ impl FullStateProvider {
     pub fn insert(&mut self, service: ServiceKeyV1, state: FullState) -> StateRoot {
         let root = state.root();
         self.states.entry(service).or_default().insert(root, state);
+        let history = self.history.entry(service).or_default();
+        if !history.contains(&root) {
+            history.push(root);
+        }
+        while history.len() > MAX_MATERIALIZED_ROOTS_PER_SERVICE {
+            let evicted = history.remove(0);
+            if evicted != root {
+                if let Some(states) = self.states.get_mut(&service) {
+                    states.remove(&evicted);
+                }
+            }
+        }
         self.materialized.insert(service, root);
         root
     }

@@ -16,43 +16,55 @@ SignedActionV1 signing digest. The digest contains the
 JAMSCRIPT_ACTION_V1 domain, while sr25519 verification uses the standard
 Substrate context.
 
-For production, the browser uses one application-facing backend endpoint:
+For production, compose the endpoints explicitly. Finalized chain reads stay
+on the MiniJAM node, Work submission and status tracking use the standalone
+formal RPC, and managed-state snapshots may be served by an independent state
+provider:
 
-    const client = new JamScriptClient({
-      endpoint: "https://backend.testnet.example",
-      deployment,
-      signer,
-    });
+    const transport = new SplitRpcTransport(
+      new FetchRpcTransport("https://node.example"),
+      new FetchRpcTransport("https://formal.example"),
+      new FetchRpcTransport("https://state.example"),
+    );
+    const client = new JamScriptClient(deployment, transport);
 
-The backend may route finalized context and Service storage reads to a MiniJAM
-node, Work submission/status to Formal RPC, and managed-state proofs to its
-materialized provider. Those internal connections are not part of frontend
-configuration. `SplitRpcTransport` remains available as a compatibility
-adapter for local deployments and older infrastructure.
+SplitRpcTransport routes chain_getBlockHash,
+minijam_getFinalizedContext, and minijam_getServiceStorageAt to the node,
+and routes only minijam_submitWorkV1 and minijam_getWorkStatusV1 to the
+formal RPC. It routes jamscript_getStateV1,
+jamscript_getStateProofV1, and minijam_getManagedStateV1 to the state
+provider.
 
 ## Formal Work RPC
 
-The backend runs next to a MiniJAM node and Formal RPC. Its public endpoint
-owns application work, Service registration, state proofs, and recovery; the
-Formal service remains a network/control-plane dependency. Deployments wire
-`BackendDaemon` with a network-specific `BackendWorkGateway` and bind it to a
-single public listener; Node and Formal URLs remain backend-only settings.
+Run the standalone service next to a MiniJAM node and configure the worker
+bundle gateway to use the same HTTP endpoint:
 
-The backend exposes the generic `minijam_submitWorkV1` and
-`minijam_getWorkStatusV1` methods together with
-`minijam_getManagedStateV1`, `jamscript_getCapabilitiesV1`, and the restricted
-`jamscript_registerServiceV1` control-plane method. It routes every request by
-`serviceId`; state proofs and recovery are always Service-scoped.
+    MINIJAM_RPC_URL=ws://127.0.0.1:9944 \
+    MINIJAM_RELAYER_URI='//Alice' \
+    MINIJAM_FORMAL_RPC_BIND=127.0.0.1:8090 \
+    MINIJAM_BUNDLE_DIR=./bundles \
+    cargo run -p minijam-formal-rpc
 
-The endpoint also exposes GET /health/ready after the chain client connects
-and the bundle directory is initialized. It applies an 8 MiB request-body
-limit and a bounded 32-request admission semaphore.
+The service exposes only the generic minijam_submitWorkV1 and
+minijam_getWorkStatusV1 JSON-RPC methods plus the verified bundle route.
+The submit method checks the supplied finalized context and finalized service
+code hash, builds one WorkItem, stores its bundle, then submits the opaque
+package through the configured ingress relayer. It does not decode JamScript
+payloads or provide application query execution.
+
+The endpoint also exposes GET `/healthz` and `/readinessz` after the artifact
+store is initialized and the configured node is reachable. It applies bounded
+headers and request bodies and a bounded connection admission limit.
 
 `queryLatest` first reads the managed-state commitment from finalized Service
-storage, then requests that explicit root from the provider. It checks the
-response identity and verifies the Polkadot LayoutV1 storage proof locally
-before decoding the ABI value. Provider availability never selects the root,
-and implicit fallback to legacy Service KV is disabled by default.
+storage and asks the backend for the value through `jamscript_getStateV1` by
+default. The backend rejects a stale or unavailable materialization with
+`STATE_NOT_MATERIALIZED`; no proof object is exposed to application code in
+trusted mode. Set `stateVerification: "proof"` to request
+`jamscript_getStateProofV1` semantics and verify the LayoutV1 storage proof
+locally. Provider availability never selects the root, and implicit fallback to
+legacy Service KV is disabled by default.
 
 ## Deployment and Network E2E
 
@@ -69,5 +81,4 @@ production client path, waits for finalized Work, and verifies finalized
 Service state.
 
 The canonical E2E does not use the Playground lifecycle API or its legacy
-`/api/v1/*` endpoints. Work, State, and deployment remain separate logical
-operations behind the one backend endpoint.
+`/api/v1/*` endpoints. Work, State, and deployment endpoints remain separate.

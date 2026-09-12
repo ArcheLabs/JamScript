@@ -5,8 +5,8 @@ JamScript v0 is released as a testnet developer preview. Its supported product p
 ```text
 JamScript source
   -> canonical PolkaVM Service artifact
-  -> portable planner/application artifact
-  -> one multi-Service JamScript backend
+  -> generated, statically linked Builder application
+  -> Formal Work RPC
   -> finalized managed-state commitment
   -> proof-verified client query
 ```
@@ -29,13 +29,16 @@ The public backend is one multi-Service process. Each deployment is registered
 by `serviceId`, `serviceKey`, `codeHash`, ABI version, and a digest-addressed
 planner/application artifact. The backend registry routes work and proof
 construction by Service identity; deploying another Service does not require
-rebuilding the daemon. The older generated Builder adapter remains a
-MiniJAM compatibility wrapper while the portable artifact loader is supplied
-by the backend deployment.
+rebuilding the daemon. The production artifact is the content-addressed PVM;
+the older generated Builder adapter is a legacy MiniJAM compatibility wrapper.
 
-Provider persistence is enabled with `JAMSCRIPT_PROVIDER_STORE`. The append-only recovery log is
-replayed and cryptographically revalidated on startup. Finalized JAM/MiniJAM storage remains the
-only source of canonical roots; the Provider supplies data and proofs for explicit roots.
+Backend persistence is enabled with `JAMSCRIPT_BACKEND_DATA`. RocksDB `0.25.0`
+stores the registry, per-Service KV, durable heads, and finalized transitions
+under `db/`; content-addressed PVM artifacts remain under `artifacts/`. Startup
+binds the database to schema v1 and the finalized network genesis, rebuilds
+proof caches from durable KV, and validates every Service root. Finalized
+JAM/MiniJAM storage remains the only source of canonical roots. The old
+append-only recovery log is not part of the production persistence path.
 
 ## Operator workflow
 
@@ -78,7 +81,7 @@ rewritten as a successful run.
 2. Verify the deployment bundle with `jams inspect <bundle>`.
 3. Select a named MiniJAM network and deploy with `jams deploy --network <name>`.
 4. Run one `jamscript-service-backend` process and configure its internal Node and Formal RPCs.
-5. Register each deployed Service through the restricted backend control plane.
+5. Let the backend discover each deployed Service and prewarm its PVM artifact.
 6. Configure the browser client with the single public backend endpoint.
 7. When a downstream network is available, run the manual MiniJAM network E2E
    as a compatibility check before publishing the release artifacts.
@@ -87,10 +90,8 @@ The deployment command is intentionally a separate control-plane operation, not 
 RPC. In v0.1 it targets the formal MiniJAM Stage-1
 `minijam_createServiceV1` method, verifies the artifact and optional node genesis identity before
 mutation, waits for the finalized result returned by the deployment RPC, and stores a local
-deployment record. Backend registration is a separate retryable operation and
-does not recreate an already finalized Service. Wallet calls remain in the
-TypeScript/browser client so the wallet receives one standard `signRaw` request
-and private keys never enter the CLI. JAM deployment is recognized in
+deployment record. Wallet calls remain in the TypeScript/browser client so the wallet receives one
+standard `signRaw` request and private keys never enter the CLI. JAM deployment is recognized in
 configuration but remains unsupported in v0.1.
 
 ## Release gates
@@ -159,6 +160,8 @@ rerun rules, and failure classification.
 
 ## Explicit exclusions
 
-The preview does not claim mainnet readiness. User gas payment, sponsorship, DoS economics,
-distributed Provider replication, garbage collection, generic PVM-only witness discovery, and
-cross-Service managed state remain outside the v0 scope.
+The preview does not claim mainnet readiness. User gas payment, sponsorship,
+DoS economics, distributed Provider replication, and garbage collection remain
+outside the v0 scope. Cross-Service managed state follows the frozen
+proof/dependency protocol; application DSL surface coverage remains narrow in
+this preview.

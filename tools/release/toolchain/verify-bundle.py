@@ -157,6 +157,8 @@ required_files = [
     "bin/cargo",
     "Cargo.lock",
     "toolchains/polkavm.lock",
+    "toolchains/polkavm-guest/Cargo.toml",
+    "toolchains/polkavm-guest/Cargo.lock",
 ]
 required_directories = [
     "scriptc",

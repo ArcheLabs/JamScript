@@ -114,6 +114,26 @@ echo "MANAGED_CARGO_PROC_MACRO=PASS"
 
 TARGET_JSON="$RUN_ROOT/riscv64emac-unknown-none-polkavm.json"
 cp "$BUNDLE_ROOT/cargo/vendor/polkavm-linker-0.30.0/targets/1_91/riscv64emac-unknown-none-polkavm.json" "$TARGET_JSON"
+mkdir -p "$RUN_ROOT/managed-guest/src"
+sed \
+  -e "s|path = \"../../crates/jamscript-runtime-core\"|path = \"$BUNDLE_ROOT/runtime/crates/jamscript-runtime-core\"|" \
+  -e "s|path = \"../../crates/service-runtime-core\"|path = \"$BUNDLE_ROOT/runtime/crates/service-runtime-core\"|" \
+  -e "s|path = \"../../crates/service-runtime-guest\"|path = \"$BUNDLE_ROOT/runtime/crates/service-runtime-guest\"|" \
+  "$BUNDLE_ROOT/toolchains/polkavm-guest/Cargo.toml" \
+  >"$RUN_ROOT/managed-guest/Cargo.toml"
+cp "$BUNDLE_ROOT/toolchains/polkavm-guest/Cargo.lock" "$RUN_ROOT/managed-guest/Cargo.lock"
+printf '%s\n' \
+  '#![no_std]' \
+  '#[panic_handler]' \
+  'fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }' \
+  '#[no_mangle]' \
+  'pub extern "C" fn managed_guest_probe() {}' \
+  >"$RUN_ROOT/managed-guest/src/lib.rs"
+run_gate MANAGED_GUEST_OFFLINE_BUILD \
+  "$BUNDLE_ROOT/bin/cargo" -Z build-std=core,alloc -Z json-target-spec build --release --locked \
+  --target "$TARGET_JSON" --target-dir "$RUN_ROOT/managed-guest/target" \
+  --manifest-path "$RUN_ROOT/managed-guest/Cargo.toml" --offline
+
 mkdir -p "$RUN_ROOT/cross-probe/guest/src" "$RUN_ROOT/cross-probe/macro/src"
 printf '%s\n' \
   '[workspace]' \

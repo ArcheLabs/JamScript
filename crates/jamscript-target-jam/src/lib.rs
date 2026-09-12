@@ -10,7 +10,8 @@ use jamscript_ir::{abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
 use jamscript_toolchain::InstalledToolchain;
 use serde::{Deserialize, Serialize};
 use service_build_polkavm::{
-    GuestBuildArtifacts, NativeArchive, PolkaVmBuildConfig, PolkaVmBuildRequest, PolkaVmBuilder,
+    CargoNetworkPolicy, GuestBuildArtifacts, NativeArchive, PolkaVmBuildConfig,
+    PolkaVmBuildRequest, PolkaVmBuilder,
 };
 use service_runtime_core::{
     MANAGED_STATE_LAYOUT_VERSION, MANAGED_STATE_PROTOCOL_VERSION, RECOVERY_FORMAT_VERSION,
@@ -299,15 +300,40 @@ impl JamTarget {
         let runtime_core = runtime_crate("jamscript-runtime-core")?;
         let service_runtime_core = runtime_crate("service-runtime-core")?;
         let service_runtime_guest = runtime_crate("service-runtime-guest")?;
-        let diagnostic_feature = if context.diagnostic {
-            ", features = [\"diagnostic\"]"
-        } else {
-            ""
-        };
-        fs::write(guest_project.path().join("Cargo.toml"), format!(
-            "[package]\nname = \"jamscript_guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\njamscript-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-core = {{ path = \"{}\", default-features = false }}\nservice-runtime-guest = {{ path = \"{}\", default-features = false{} }}\n[workspace]\nresolver = \"2\"\n",
-            runtime_core.display(), service_runtime_core.display(), service_runtime_guest.display(), diagnostic_feature
-        ))?;
+        let canonical_guest_manifest = self
+            .toolchain
+            .as_ref()
+            .map(|toolchain| toolchain.root.join("toolchains/polkavm-guest/Cargo.toml"))
+            .unwrap_or_else(|| workspace_root().join("toolchains/polkavm-guest/Cargo.toml"));
+        let mut guest_manifest =
+            fs::read_to_string(&canonical_guest_manifest).with_context(|| {
+                format!(
+                    "reading canonical PolkaVM guest manifest {}",
+                    canonical_guest_manifest.display()
+                )
+            })?;
+        for (name, path) in [
+            ("jamscript-runtime-core", &runtime_core),
+            ("service-runtime-core", &service_runtime_core),
+            ("service-runtime-guest", &service_runtime_guest),
+        ] {
+            guest_manifest = guest_manifest.replace(
+                &format!("path = \"../../crates/{name}\""),
+                &format!("path = \"{}\"", path.display()),
+            );
+        }
+        if context.diagnostic {
+            let default_dependency = format!(
+                "service-runtime-guest = {{ path = \"{}\", default-features = false }}",
+                service_runtime_guest.display()
+            );
+            let diagnostic_dependency = format!(
+                "service-runtime-guest = {{ path = \"{}\", default-features = false, features = [\"diagnostic\"] }}",
+                service_runtime_guest.display()
+            );
+            guest_manifest = guest_manifest.replace(&default_dependency, &diagnostic_dependency);
+        }
+        fs::write(guest_project.path().join("Cargo.toml"), guest_manifest)?;
         fs::copy(&generated, guest_project.path().join("src/lib.rs"))?;
         fs::write(guest_project.path().join("build.rs"), build_script())?;
 
@@ -382,6 +408,19 @@ impl JamTarget {
                 .toolchain
                 .as_ref()
                 .map(|toolchain| toolchain.cargo_home.clone()),
+            cargo_network_policy: if self.toolchain.is_some() {
+                CargoNetworkPolicy::OfflineRequired
+            } else {
+                CargoNetworkPolicy::OnlineAllowed
+            },
+            canonical_guest_lock: Some(
+                self.toolchain
+                    .as_ref()
+                    .map(|toolchain| toolchain.root.join("toolchains/polkavm-guest/Cargo.lock"))
+                    .unwrap_or_else(|| {
+                        workspace_root().join("toolchains/polkavm-guest/Cargo.lock")
+                    }),
+            ),
             lock_path: self
                 .toolchain
                 .as_ref()
@@ -393,7 +432,12 @@ impl JamTarget {
             manifest_path: guest_project.path().join("Cargo.toml"),
             output_dir: backend_output,
             native_archives: archives,
-            required_exports: vec!["minijam_refine".into(), "minijam_accumulate".into()],
+            required_exports: vec![
+                "minijam_refine".into(),
+                "minijam_accumulate".into(),
+                "jamscript_plan_v1".into(),
+                "jamscript_backend_metadata_v1".into(),
+            ],
             require_relocations: true,
         })?;
         fs::copy(&artifacts.elf, output_dir.join("service.elf"))?;
@@ -471,6 +515,8 @@ pub fn elf_to_jam_blob(elf: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     config.set_dispatch_table(vec![
         b"minijam_refine".to_vec(),
         b"minijam_accumulate".to_vec(),
+        b"jamscript_plan_v1".to_vec(),
+        b"jamscript_backend_metadata_v1".to_vec(),
     ]);
     let linked =
         polkavm_linker::program_from_elf(config, polkavm_linker::TargetInstructionSet::JamV1, elf)
@@ -960,7 +1006,8 @@ mod tests {
         let source = include_str!("lib.rs");
         let implementation = source.split("#[cfg(test)]").next().unwrap();
         assert!(!implementation.contains("Wl,--gc-sections"));
-        assert!(source.contains("crate-type = [\\\"cdylib\\\"]"));
+        assert!(include_str!("../../../toolchains/polkavm-guest/Cargo.toml")
+            .contains("crate-type = [\"cdylib\"]"));
         assert!(source.contains("final_elf_linker"));
     }
 }

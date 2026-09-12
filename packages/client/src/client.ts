@@ -11,12 +11,13 @@ import {
   toHex,
   type SignedActionV1,
 } from "./crypto.js";
-import { asWorkRpc, FetchRpcTransport, RpcError, type ActionReceipt, type BackendCapabilitiesV1, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
 import {
-  RpcStateProvider,
+  ProofStateProvider,
+  TrustedStateProvider,
   type StateProvider,
 } from "./state-provider.js";
 
@@ -30,50 +31,36 @@ export type QueryResult = {
 
 export type JamScriptClientOptions = {
   stateProvider?: StateProvider;
-  endpoint?: string;
-  deployment?: DeploymentDescriptor;
-  signer?: JamSigner;
+  stateVerification?: "trusted-backend" | "proof";
 };
 
 export class JamScriptClient {
   private readonly rpc: WorkRpc;
-  private readonly defaultSigner?: JamSigner;
-  private readonly deployment: DeploymentDescriptor;
 
   constructor(
-    deploymentOrOptions: DeploymentDescriptor | (JamScriptClientOptions & { endpoint: string; deployment: DeploymentDescriptor }),
-    transport?: RpcTransport,
+    private readonly deployment: DeploymentDescriptor,
+    transport: RpcTransport,
     private readonly options: JamScriptClientOptions = {},
   ) {
-    const optionsObject = "endpoint" in deploymentOrOptions;
-    this.deployment = optionsObject
-      ? deploymentOrOptions.deployment
-      : deploymentOrOptions;
-    const resolvedOptions = optionsObject ? deploymentOrOptions : options;
-    const resolvedTransport = transport
-      ?? (resolvedOptions.endpoint ? new FetchRpcTransport(resolvedOptions.endpoint) : undefined);
-    if (!resolvedTransport) {
-      throw new Error("a single backend endpoint or RPC transport is required");
-    }
-    if (this.deployment.abiVersion !== 1 || this.deployment.abi.abiVersion !== 1) {
+    if (deployment.abiVersion !== 1 || deployment.abi.abiVersion !== 1) {
       throw new Error("unsupported JamScript ABI version");
     }
-    this.defaultSigner = resolvedOptions.signer;
-    this.rpc = asWorkRpc(resolvedTransport);
-    this.stateProvider = resolvedOptions.stateProvider ?? new RpcStateProvider(resolvedTransport);
+    this.rpc = asWorkRpc(transport);
+    this.stateProvider = options.stateProvider
+      ?? (options.stateVerification === "proof"
+        ? new ProofStateProvider(transport)
+        : new TrustedStateProvider(transport));
+    this.verifyProofs = options.stateProvider !== undefined || options.stateVerification === "proof";
   }
 
   private readonly stateProvider: StateProvider;
+  private readonly verifyProofs: boolean;
 
   async validateDeployment(): Promise<void> {
     const genesis = await this.rpc.genesisHash();
     if (!sameHex(genesis, this.deployment.genesisHash)) {
       throw new Error("deployment genesis hash does not match the chain");
     }
-  }
-
-  getCapabilities(): Promise<BackendCapabilitiesV1> {
-    return this.rpc.capabilities();
   }
 
   async readNonce(publicKey: Uint8Array, context?: FinalizedContext): Promise<bigint> {
@@ -91,22 +78,20 @@ export class JamScriptClient {
   async submitAction(
     actionName: string,
     input: Record<string, CodecValue>,
-    signer?: JamSigner,
+    signer: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number } = {},
   ): Promise<SubmitWorkResult> {
     await this.validateDeployment();
-    const activeSigner = signer ?? this.defaultSigner;
-    if (!activeSigner) throw new Error("submitAction requires a signer");
     const action = actionByName(this.deployment.abi, actionName);
     if (action.auth !== "wallet") throw new Error("submitAction requires a wallet-authenticated action");
-    if (activeSigner.publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
+    if (signer.publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
     const payload = encodeActionPayload(this.deployment.abi, actionName, input);
     const selector = actionSelector(actionName);
     if (!sameHex(toHex(selector), action.selector)) {
       throw new Error("deployment ABI selector does not match the canonical selector");
     }
     const initialContext = await this.rpc.finalizedContext();
-    const nonce = await this.readNonce(activeSigner.publicKey, initialContext);
+    const nonce = await this.readNonce(signer.publicKey, initialContext);
     const ttl = options.ttl ?? 64n;
     const validUntil = BigInt(initialContext.slot) + ttl;
     const unsigned: Omit<SignedActionV1, "signature"> = {
@@ -115,13 +100,13 @@ export class JamScriptClient {
       serviceKey: parseHex(this.deployment.serviceKey, 32),
       actionSelector: selector,
       signerScheme: 0,
-      publicKey: activeSigner.publicKey,
+      publicKey: signer.publicKey,
       nonce,
       validUntil,
       payloadHash: blake2(payload),
       payload,
     };
-    const signature = await activeSigner.signRaw(signingDigestV1(unsigned));
+    const signature = await signer.signRaw(signingDigestV1(unsigned));
     if (signature.length !== 64) throw new Error("sr25519 signRaw must return a 64-byte signature");
     const signed = encodeSignedActionV1({ ...unsigned, signature });
     const actionHash = toHex(blake2(signed));
@@ -209,7 +194,8 @@ export class JamScriptClient {
     ) {
       throw new Error("managed-state provider response does not match the requested query");
     }
-    return verifyManagedStateProof(root, key, response.value, response.proof);
+    if (this.verifyProofs) return verifyManagedStateProof(root, key, response.value, response.proof);
+    return response.value;
   }
 
   workStatus(packageHash: string): Promise<WorkStatusResult> {
@@ -227,7 +213,10 @@ export class JamScriptClient {
         const status = await this.workStatus(packageHash);
         if (status.status === "imported" || status.status === "failed") return status;
       } catch (error) {
-        if (!(error instanceof RpcError) || error.code !== -32013) throw error;
+        if (
+          !(error instanceof RpcError)
+          || (error.code !== -32013 && error.message !== "work not found")
+        ) throw error;
       }
       if (Date.now() >= deadline) throw new Error("timed out waiting for finalized Work");
       await new Promise((resolve) => setTimeout(resolve, intervalMs));

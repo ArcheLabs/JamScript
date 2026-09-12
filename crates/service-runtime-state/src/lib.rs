@@ -4,8 +4,8 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use service_runtime_core::{
-    is_reserved_service_storage_key, ManagedStateAccess, ReadOnlyManagedState, StateAccessError,
-    StateChangeV1, StateDiffV1, StateRoot,
+    is_reserved_service_storage_key, ManagedStateAccess, StateAccessError, StateChangeV1,
+    StateDiffV1, StateRoot,
 };
 
 #[cfg(feature = "std")]
@@ -461,12 +461,6 @@ impl ManagedStateAccess for ProofState {
 
     fn rollback_transaction(&mut self) -> Result<(), StateAccessError> {
         Self::rollback_transaction(self).map_err(|_| StateAccessError::Backend)
-    }
-}
-
-impl ReadOnlyManagedState for ProofState {
-    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError> {
-        ManagedState::get(self, key).map_err(state_access_error)
     }
 }
 

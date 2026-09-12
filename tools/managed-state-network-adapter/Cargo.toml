@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 base64 = "0.22"
-jamscript-service-backend = { path = "../../crates/jamscript-service-backend" }
 jamscript-runtime-core = { path = "../../crates/jamscript-runtime-core" }
 serde.workspace = true
 serde_json.workspace = true

@@ -2,7 +2,9 @@ use anyhow::{bail, Context, Result};
 use polkavm::{Engine, Linker, Module, ModuleConfig};
 use polkavm_linker::{program_from_elf, Config as LinkConfig, TargetInstructionSet};
 use serde::Serialize;
-use service_build_polkavm::{PolkaVmBuildConfig, PolkaVmBuildRequest, PolkaVmBuilder};
+use service_build_polkavm::{
+    CargoNetworkPolicy, PolkaVmBuildConfig, PolkaVmBuildRequest, PolkaVmBuilder,
+};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -59,6 +61,7 @@ fn main() -> Result<()> {
     let artifacts = PolkaVmBuilder::new(PolkaVmBuildConfig {
         diagnostic: true,
         rustflags: Some("-C link-arg=-nostdlib -C link-arg=--gc-sections".into()),
+        cargo_network_policy: CargoNetworkPolicy::OfflineRequired,
         ..Default::default()
     })
     .build(&PolkaVmBuildRequest {

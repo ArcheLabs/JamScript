@@ -100,6 +100,9 @@ test("submitAction reads finalized nonce and signs exactly once across stale ret
         return contextReads === 1 ? initialContext : refreshedContext;
       }
       if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "jamscript_getStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
       if (method === "minijam_getManagedStateV1") {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null, proofBase64: ["AA=="] };
       }
@@ -121,12 +124,8 @@ test("submitAction reads finalized nonce and signs exactly once across stale ret
     },
   };
 
-  const client = new JamScriptClient({
-    endpoint: "https://backend.example",
-    deployment,
-    signer,
-  }, transport);
-  const result = await client.submitAction("submit", { score: 9n });
+  const client = new JamScriptClient(deployment, transport);
+  const result = await client.submitAction("submit", { score: 9n }, signer);
 
   assert.equal(result.context.blockHash, refreshedContext.blockHash);
   assert.equal(signatures, 1);
@@ -142,6 +141,9 @@ test("query reads and decodes state at the finalized block", async () => {
       if (method === "minijam_getServiceStorageAt") {
         assert.equal(params[0], initialContext.blockHash);
         return managedCommitment(queryManagedStateRoot);
+      }
+      if (method === "jamscript_getStateV1") {
+        return { serviceId: 1000, stateRoot: queryManagedStateRoot, keyBase64: params.keyBase64, valueBase64: rawU64(42) };
       }
       if (method === "minijam_getManagedStateV1") {
         return { serviceId: 1000, stateRoot: queryManagedStateRoot, keyBase64: params.keyBase64, valueBase64: rawU64(42), proofBase64: [queryProofBase64] };
@@ -165,7 +167,7 @@ test("managed-state provider unavailability does not fall back to Service KV by 
         storageReads += 1;
         return storageReads === 1 ? null : stateU64(99);
       }
-      if (method === "minijam_getManagedStateV1") throw new RpcError("unavailable root", -32030);
+      if (method === "jamscript_getStateV1") throw new RpcError("unavailable root", -32031);
       throw new Error("unexpected RPC method: " + method);
     },
   };

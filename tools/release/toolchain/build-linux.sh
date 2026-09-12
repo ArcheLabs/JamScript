@@ -60,6 +60,7 @@ copy_file "${RUSTC_BIN}" bin/rustc
 copy_file "${CARGO_BIN}" bin/cargo
 copy_file "${ROOT}/Cargo.lock" Cargo.lock
 copy_file "${ROOT}/toolchains/polkavm.lock" toolchains/polkavm.lock
+copy_tree "${ROOT}/toolchains/polkavm-guest" toolchains/polkavm-guest
 copy_tree "${ROOT}/toolchains/scriptc" scriptc
 copy_tree "${ROOT}/crates/jamscript-runtime-scriptc" runtime-scriptc
 copy_tree "${ROOT}/crates/jamscript-target-jam/sdk" targets/jam/sdk
