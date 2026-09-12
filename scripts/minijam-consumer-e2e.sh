@@ -411,12 +411,12 @@ JAMSCRIPT_E2E_SERVICE_ID="${service_id}" \
 JAMSCRIPT_E2E_SERVICE_ID_B="${service_id_b}" \
 JAMSCRIPT_E2E_CLIENT_ROOT="${JAMSCRIPT_ROOT}" \
   node --input-type=module -e '
-    const { FetchRpcTransport, stateKey } = await import(`file://${process.env.JAMSCRIPT_E2E_CLIENT_ROOT}/packages/client/dist/index.js`);
+    const { FetchRpcTransport, encodeValue, stateKey } = await import(`file://${process.env.JAMSCRIPT_E2E_CLIENT_ROOT}/packages/client/dist/index.js`);
     const backend = new FetchRpcTransport(process.env.JAMSCRIPT_E2E_BACKEND_URL);
     const query = async (serviceId, keyByte) => {
       const response = await backend.call("jamscript_getStateV1", {
         serviceId: Number(serviceId),
-        keyBase64: Buffer.from(stateKey("test.values/v1", new Uint8Array(32).fill(keyByte))).toString("base64"),
+        keyBase64: Buffer.from(stateKey("test.values/v1", encodeValue({ kind: "bytes", max: 32 }, new Uint8Array(32).fill(keyByte)))).toString("base64"),
       });
       if (response.valueBase64 === null) throw new Error(`Service ${serviceId} state missing after restart`);
       if (Object.hasOwn(response, "proofBase64")) throw new Error("trusted state response exposed proof bytes");

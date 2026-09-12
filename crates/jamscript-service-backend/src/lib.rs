@@ -11,6 +11,7 @@ use jam_codec::Decode as JamDecode;
 use jam_program_blob_common::ProgramBlob;
 use jamscript_deployment::JsonRpcTransport;
 use parity_scale_codec::Decode as ScaleDecode;
+use parity_scale_codec::Encode as ScaleEncode;
 use polkavm::{
     BackendKind, Config as PvmConfig, Engine, Linker, MemoryAccessError, Module, ModuleConfig, Reg,
 };
@@ -1927,8 +1928,12 @@ impl BackendRpcHandler {
                 "historical block is not finalized".into(),
             ));
         }
-        Ok(network
-            .service_storage_at(&context, service_id, &key)?
+        let value = network.service_storage_at(&context, service_id, &key)?;
+        let encoded = value
+            .as_deref()
+            .map(encode_minijam_state_value)
+            .transpose()?;
+        Ok(encoded
             .map(|bytes| Value::String(hash_hex(&bytes)))
             .unwrap_or(Value::Null))
     }
@@ -2841,6 +2846,14 @@ fn decode_minijam_state_value(bytes: &[u8]) -> Result<Vec<u8>, BackendError> {
     Ok(value.into_inner())
 }
 
+fn encode_minijam_state_value(bytes: &[u8]) -> Result<Vec<u8>, BackendError> {
+    let value: MiniJamStateValue = bytes
+        .to_vec()
+        .try_into()
+        .map_err(|_| BackendError::Rpc("MiniJAM StateValue exceeds its bound".into()))?;
+    Ok(ScaleEncode::encode(&value))
+}
+
 fn nibble(value: u8) -> Result<u8, BackendError> {
     match value {
         b'0'..=b'9' => Ok(value - b'0'),
@@ -3543,6 +3556,16 @@ mod tests {
                 code_hash: [0x11; 32],
             })
         );
+    }
+
+    #[test]
+    fn public_service_storage_value_preserves_minijam_state_value_wire_format() {
+        let raw = vec![1, 1, 0xaa, 0xbb];
+        let encoded = encode_minijam_state_value(&raw).unwrap();
+        let mut input = encoded.as_slice();
+        let decoded = <MiniJamStateValue as ScaleDecode>::decode(&mut input).unwrap();
+        assert!(input.is_empty());
+        assert_eq!(decoded.into_inner(), raw);
     }
 
     struct TestPlanner(StateRoot, Vec<u8>);

@@ -102,8 +102,15 @@ pub mod guest_support {
     #[cfg(feature = "diagnostic")]
     #[inline(never)]
     pub fn diagnostic_stage(message: &'static [u8]) {
+        diagnostic_log(message);
+        diagnostic_metrics(message);
+    }
+
+    #[cfg(feature = "diagnostic")]
+    #[inline(never)]
+    fn diagnostic_log(message: &[u8]) {
         let args = [
-            1u64,
+            1,
             0,
             0,
             message.as_ptr() as usize as u64,
@@ -113,7 +120,60 @@ pub mod guest_support {
         unsafe {
             minijam_host_call(100, args.as_ptr());
         }
+    }
 
+    #[cfg(feature = "diagnostic")]
+    #[inline(never)]
+    pub fn diagnostic_u64(prefix: &'static [u8], value: u64) {
+        let mut message = [0u8; 192];
+        let mut offset = 0usize;
+        append_bytes(&mut message, &mut offset, prefix);
+        append_decimal(&mut message, &mut offset, value as usize);
+        let message = &message[..offset];
+        diagnostic_log(message);
+        diagnostic_metrics(message);
+    }
+
+    #[cfg(feature = "diagnostic")]
+    #[inline(never)]
+    pub fn diagnostic_bool(prefix: &'static [u8], value: bool) {
+        let mut message = [0u8; 192];
+        let mut offset = 0usize;
+        append_bytes(&mut message, &mut offset, prefix);
+        append_bytes(
+            &mut message,
+            &mut offset,
+            if value { b"YES" } else { b"NO" },
+        );
+        let message = &message[..offset];
+        diagnostic_log(message);
+        diagnostic_metrics(message);
+    }
+
+    #[cfg(feature = "diagnostic")]
+    #[inline(never)]
+    pub fn diagnostic_index_status(prefix: &'static [u8], index: usize, ok: bool) {
+        let mut message = [0u8; 192];
+        let mut offset = 0usize;
+        append_bytes(&mut message, &mut offset, prefix);
+        append_decimal(&mut message, &mut offset, index);
+        append_bytes(&mut message, &mut offset, b"=");
+        append_bytes(&mut message, &mut offset, if ok { b"OK" } else { b"FAIL" });
+        let message = &message[..offset];
+        diagnostic_log(message);
+        diagnostic_metrics(message);
+    }
+
+    #[cfg(feature = "diagnostic")]
+    #[inline(never)]
+    pub fn diagnostic_hash(prefix: &'static [u8], value: &[u8; 32]) {
+        let mut message = [0u8; 192];
+        let mut offset = 0usize;
+        append_bytes(&mut message, &mut offset, prefix);
+        append_bytes(&mut message, &mut offset, b"0x");
+        append_hex(&mut message, &mut offset, value);
+        let message = &message[..offset];
+        diagnostic_log(message);
         diagnostic_metrics(message);
     }
 
@@ -172,8 +232,32 @@ pub mod guest_support {
         }
     }
 
+    #[cfg(feature = "diagnostic")]
+    fn append_hex(buffer: &mut [u8], offset: &mut usize, value: &[u8; 32]) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in value {
+            append_bytes(
+                buffer,
+                offset,
+                &[HEX[(byte >> 4) as usize], HEX[(byte & 0x0f) as usize]],
+            );
+        }
+    }
+
     #[cfg(not(feature = "diagnostic"))]
     pub fn diagnostic_stage(_message: &'static [u8]) {}
+
+    #[cfg(not(feature = "diagnostic"))]
+    pub fn diagnostic_u64(_prefix: &'static [u8], _value: u64) {}
+
+    #[cfg(not(feature = "diagnostic"))]
+    pub fn diagnostic_bool(_prefix: &'static [u8], _value: bool) {}
+
+    #[cfg(not(feature = "diagnostic"))]
+    pub fn diagnostic_index_status(_prefix: &'static [u8], _index: usize, _ok: bool) {}
+
+    #[cfg(not(feature = "diagnostic"))]
+    pub fn diagnostic_hash(_prefix: &'static [u8], _value: &[u8; 32]) {}
 
     #[no_mangle]
     #[inline(never)]
@@ -432,6 +516,10 @@ pub mod guest_support {
 pub mod guest_support {
     pub struct DiagnosticObserver;
     pub fn diagnostic_stage(_message: &'static [u8]) {}
+    pub fn diagnostic_u64(_prefix: &'static [u8], _value: u64) {}
+    pub fn diagnostic_bool(_prefix: &'static [u8], _value: bool) {}
+    pub fn diagnostic_index_status(_prefix: &'static [u8], _index: usize, _ok: bool) {}
+    pub fn diagnostic_hash(_prefix: &'static [u8], _value: &[u8; 32]) {}
     pub fn reset_runtime() {}
 }
 
