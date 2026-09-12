@@ -26,8 +26,17 @@ BACKEND_DOCKER="${JAMSCRIPT_BACKEND_DOCKER:-0}"
 BACKEND_IMAGE="${JAMSCRIPT_BACKEND_IMAGE:-ghcr.io/archelabs/jamscript-backend:${JAMSCRIPT_BACKEND_VERSION:-v0.1.0}}"
 BACKEND_CONTAINER="${JAMSCRIPT_BACKEND_CONTAINER:-jamscript-backend-e2e-$$}"
 BACKEND_VOLUME="${JAMSCRIPT_BACKEND_VOLUME:-jamscript-backend-e2e-$$}"
+E2E_MODE="${JAMSCRIPT_E2E_MODE:-full}"
 backend_pid=""
 backend_volume_owned=0
+
+case "${E2E_MODE}" in
+  baseline|full) ;;
+  *)
+    echo "invalid JAMSCRIPT_E2E_MODE: ${E2E_MODE}" >&2
+    exit 2
+    ;;
+esac
 
 # A source checkout uses its local rustup/Cargo toolchain by default. Release
 # validation can explicitly select the published managed distribution with 0.
@@ -384,6 +393,12 @@ JAMSCRIPT_E2E_GENESIS_HASH="${genesis_hash}" \
 JAMSCRIPT_E2E_BACKEND_URL="${BACKEND_URL}" \
 JAMSCRIPT_E2E_LOG_DIR="${LOG_DIR}" \
   run_npm run test:network
+
+if [[ "${E2E_MODE}" == "baseline" ]]; then
+  echo "JAMSCRIPT_BASELINE_WORK_IMPORTED_FINALIZED=PASS"
+  echo "JAMSCRIPT_BASELINE_E2E=PASS"
+  exit 0
+fi
 
 echo "JAMSCRIPT_FRONTEND_PROOFLESS_QUERY=PASS"
 echo "JAMSCRIPT_RUNTIME_STATE_PROOF=PASS"

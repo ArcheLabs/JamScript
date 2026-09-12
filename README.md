@@ -227,6 +227,18 @@ its lifecycle:
 
     ./scripts/minijam-consumer-e2e.sh
 
+To run the minimal known-good baseline, prepare the external provider and
+export only the RPC endpoints from its `connection.env`:
+
+    JAMSCRIPT_E2E_MODE=baseline \
+    JAMSCRIPT_NODE_RPC="$MINIJAM_NODE_RPC" \
+    JAMSCRIPT_FORMAL_RPC_URL="$MINIJAM_FORMAL_RPC_URL" \
+    ./scripts/minijam-consumer-e2e.sh
+
+Baseline mode reuses the complete two-service deployment and network Work
+E2E, then stops before the full-mode backend restart and persistence checks.
+The default `full` mode continues through those checks.
+
 To validate contributor guest dependency acquisition with a fresh Cargo home
 (this is an acceptance check, not a cache-warmup prerequisite):
 
