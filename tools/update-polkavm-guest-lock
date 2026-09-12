@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+JAMSCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "${JAMSCRIPT_ROOT}"
+
+# This is an explicit release-engineering operation. Normal guest builds copy
+# the checked-in lock and never resolve a new graph at runtime.
+exec cargo generate-lockfile --manifest-path toolchains/polkavm-guest/Cargo.toml

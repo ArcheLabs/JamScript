@@ -97,12 +97,11 @@ builder entrypoint.
 
 ## Generated Builder application
 
-`jams build` emits both `generated_service.rs` for the PolkaVM guest and
-`generated_builder_application.rs` for producer-side witness discovery. Both
-embed the same generated `ServiceApplication` semantics: selector, application
-ABI decoder, wallet authentication, nonce transitions, state keys, business
-transactions, and native ABI calls. `builder.json` lists the generated host
-application and the native source/include inputs required to compile it.
+`jams build` emits `generated_service.rs` for the PolkaVM guest and retains
+`generated_builder_application.rs` as a legacy reference/test artifact. The
+production backend performs witness discovery and refine preflight in the
+content-addressed PVM runtime; it does not compile or load generated Rust.
+`builder.json` documents only the compatibility path.
 
 The Builder must consume these artifacts rather than maintain a handwritten
 companion implementation for each Service. Native modules are compiled from

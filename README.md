@@ -88,9 +88,9 @@ canonical JAM target. JamScript manages its compiler toolchain automatically: th
 first canonical build installs the exact platform bundle and verifies its
 checksum. `build` emits `service.blob`,
 `service.polkavm`, `service.pvm`, and a portable Builder host artifact. The
-PVM guest and Builder artifact embed the same compiler-generated
-`ServiceApplication`; native imports use the same declared C sources compiled
-once for PolkaVM and once for the host.
+production backend consumes the linked `service.pvm` through its persistent
+PVM loader; the generated Builder artifact remains a legacy compatibility
+artifact and is not a backend deployment dependency.
 
 The v0 release boundary uses `SignedActionV1`: canonical bounded encoding,
 payload commitments, ServiceKey identity, domain-separated sr25519
@@ -146,6 +146,7 @@ Then inspect and deploy a verified artifact:
 jams network list
 jams build ./hello --output ./hello/dist
 jams deploy ./hello --network local --artifact ./hello/dist
+jams backend start --network local
 ```
 
 `jams deploy` supports MiniJAM Stage-1 `minijam_createServiceV1` only. It
@@ -154,6 +155,49 @@ checks the configured genesis identity before mutation, and writes a local
 record under `.jamscript/deployments/`. JAM deployment is reserved for a
 future release. See [`docs/deployment.md`](docs/deployment.md) for custom
 RPCs, precedence rules, records, and the real-network E2E workflow.
+
+## Optional backend
+
+The JamScript Backend is optional: `jams check`, `jams build`, and `jams deploy`
+do not require a backend binary. If `backend_rpc` is configured, deployment
+registration is a separate retryable prewarm step; a backend outage never
+undoes a finalized chain deployment.
+
+For local development, configure `[networks.local]` with `node_rpc` and
+`deployment_rpc`, then run the backend in the foreground:
+
+```bash
+jams backend start --network local
+```
+
+The backend stores current materialized state in a genesis-bound RocksDB under
+`<data-dir>/db` and PVM artifacts under `<data-dir>/artifacts`. It compares its
+durable head with the canonical JAM/MiniJAM managed-state commitment before
+serving a state query. `/healthz` is liveness; `/readinessz` includes database,
+artifact-store, and network readiness. Stop the backend before backing up the
+entire data directory; do not copy a live RocksDB directory.
+
+The TypeScript client uses the neutral `jamscript_getStateV1` proofless API by
+default. For independent verification, pass
+`{ stateVerification: "proof" }`; refine and cross-Service runtime execution
+always retain proof verification regardless of frontend mode. A third-party
+provider uses the same `backend_rpc` field and protocol.
+
+For Docker, use a versioned image and a persistent volume:
+
+```bash
+docker run --rm \
+  -p 8090:8090 \
+  -e JAMSCRIPT_NODE_RPC=http://host.docker.internal:9944 \
+  -e JAMSCRIPT_FORMAL_RPC=http://host.docker.internal:8090 \
+  -e JAMSCRIPT_BACKEND_CORS_ORIGINS='*' \
+  -v jamscript-backend:/var/lib/jamscript \
+  ghcr.io/archelabs/jamscript-backend:v0.1.0
+```
+
+`docker-compose.backend.yml` provides the equivalent persistent-volume setup.
+The frontend trusts the selected backend for convenience data; consensus,
+refine witnesses, and accumulate root revalidation remain chain-authoritative.
 
 ## Toolchain model
 
@@ -177,6 +221,35 @@ To run the optional cross-process MiniJAM compatibility path (it requires a
 separate MiniJAM checkout):
 
     ./scripts/minijam-network-e2e.sh
+
+To consume an already-running local MiniJAM Stage-1 provider without managing
+its lifecycle:
+
+    ./scripts/minijam-consumer-e2e.sh
+
+To run the minimal known-good baseline, prepare the external provider and
+export only the RPC endpoints from its `connection.env`:
+
+    JAMSCRIPT_E2E_MODE=baseline \
+    JAMSCRIPT_NODE_RPC="$MINIJAM_NODE_RPC" \
+    JAMSCRIPT_FORMAL_RPC_URL="$MINIJAM_FORMAL_RPC_URL" \
+    ./scripts/minijam-consumer-e2e.sh
+
+Baseline mode reuses the complete two-service deployment and network Work
+E2E, then stops before the full-mode backend restart and persistence checks.
+The default `full` mode continues through those checks.
+
+To validate contributor guest dependency acquisition with a fresh Cargo home
+(this is an acceptance check, not a cache-warmup prerequisite):
+
+    ./scripts/test-contributor-cold-guest.sh
+
+The checked-in guest dependency graph is maintained explicitly with
+`tools/update-polkavm-guest-lock`; normal builds copy that lock and use
+`--locked`.
+
+If the default npm registry is unreachable, set `JAMSCRIPT_NPM_REGISTRY` for
+that run, for example `https://registry.npmmirror.com`.
 
 For contributors building from this repository, use
 `JAMSCRIPT_DEV_TOOLCHAIN=1` with the repository's target SDK. Canonical user

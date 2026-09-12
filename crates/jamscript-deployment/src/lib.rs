@@ -319,7 +319,9 @@ fn validate_network_name(value: &str) -> Result<(), DeploymentError> {
 pub struct ServiceArtifact {
     pub directory: PathBuf,
     pub blob_path: PathBuf,
+    pub pvm_path: Option<PathBuf>,
     pub blob: Vec<u8>,
+    pub pvm: Option<Vec<u8>>,
     pub code_hash: [u8; 32],
     pub build_id: String,
     pub service_key: Option<[u8; 32]>,
@@ -338,6 +340,7 @@ pub fn load_service_artifact(directory: &Path) -> Result<ServiceArtifact, Deploy
         )
     })?;
     let blob_path = directory.join("service.blob");
+    let pvm_path = directory.join("service.pvm");
     let build_path = directory.join("build.json");
     let checksums_path = directory.join("checksums.json");
     let blob = fs::read(&blob_path).map_err(|error| {
@@ -346,6 +349,7 @@ pub fn load_service_artifact(directory: &Path) -> Result<ServiceArtifact, Deploy
             format!("missing service.blob: {error}"),
         )
     })?;
+    let pvm = fs::read(&pvm_path).ok();
     let build_bytes = fs::read(&build_path).map_err(|error| {
         DeploymentError::new(
             ErrorCode::ArtifactNotFound,
@@ -390,7 +394,9 @@ pub fn load_service_artifact(directory: &Path) -> Result<ServiceArtifact, Deploy
     Ok(ServiceArtifact {
         directory,
         blob_path,
+        pvm_path: pvm.as_ref().map(|_| pvm_path),
         blob,
+        pvm,
         code_hash,
         build_id,
         service_key,
@@ -513,55 +519,77 @@ pub trait JsonRpcTransport {
 pub fn register_backend_service<T: JsonRpcTransport>(
     transport: &T,
     endpoint: &str,
-    admin_token: &str,
     service_id: u32,
     artifact: &ServiceArtifact,
     timeout: Duration,
 ) -> Result<serde_json::Value, DeploymentError> {
-    let service_key = artifact.service_key.ok_or_else(|| {
-        DeploymentError::new(
-            ErrorCode::ArtifactInvalid,
-            "backend registration requires serviceKey in build.json",
-        )
-    })?;
-    let planner_path = artifact.directory.join("generated_builder_application.rs");
-    let planner_bytes = fs::read(&planner_path).map_err(|error| {
-        DeploymentError::new(
-            ErrorCode::BackendRegistrationFailed,
-            format!(
-                "cannot read backend planner artifact {}: {error}",
-                planner_path.display()
-            ),
-        )
-    })?;
-    let planner_digest = blake2_hash(&planner_bytes);
-    let result = transport
-        .call(
-            endpoint,
-            "jamscript_registerServiceV1",
-            serde_json::json!({
-                "adminToken": admin_token,
-                "serviceId": service_id,
-                "serviceKey": hash_hex(&service_key),
-                "codeHash": hash_hex(&artifact.code_hash),
-                "abiVersion": 1,
-                "plannerArtifact": {
-                    "digest": hash_hex(&planner_digest),
-                    "locator": planner_path.to_string_lossy(),
-                },
-            }),
-            timeout,
-            true,
-        )
-        .map_err(|error| {
-            DeploymentError::new(
-                ErrorCode::BackendRegistrationFailed,
-                format!(
-                    "on-chain Service {service_id} is deployed, but backend registration failed: {}",
-                    error.message
-                ),
-            )
-        })?;
+    let registration = serde_json::json!({
+        "serviceId": service_id,
+        "expectedCodeHash": hash_hex(&artifact.code_hash),
+    });
+    let result = match transport.call(
+        endpoint,
+        "jamscript_registerServiceV1",
+        registration,
+        timeout,
+        true,
+    ) {
+        Ok(result) => result,
+        Err(first_error) => {
+            let Some(pvm) = artifact.pvm.as_ref() else {
+                return Err(DeploymentError::new(
+                    ErrorCode::BackendRegistrationFailed,
+                    format!(
+                        "on-chain Service {service_id} is deployed, but backend registration failed: {}",
+                        first_error.message
+                    ),
+                ));
+            };
+            let digest = blake2_hash(pvm);
+            transport
+                .call(
+                    endpoint,
+                    "jamscript_putArtifactV1",
+                    serde_json::json!({
+                        "format": "jamscript-pvm-v1",
+                        "digest": hash_hex(&digest),
+                        "bytesBase64": BASE64.encode(pvm),
+                    }),
+                    timeout,
+                    true,
+                )
+                .map_err(|error| {
+                    DeploymentError::new(
+                        ErrorCode::BackendRegistrationFailed,
+                        format!(
+                            "backend artifact upload failed after registration fallback: {}",
+                            error.message
+                        ),
+                    )
+                })?;
+            transport
+                .call(
+                    endpoint,
+                    "jamscript_registerServiceV1",
+                    serde_json::json!({
+                        "serviceId": service_id,
+                        "expectedCodeHash": hash_hex(&artifact.code_hash),
+                        "artifactDigest": hash_hex(&digest),
+                    }),
+                    timeout,
+                    true,
+                )
+                .map_err(|error| {
+                    DeploymentError::new(
+                        ErrorCode::BackendRegistrationFailed,
+                        format!(
+                            "backend registration failed after artifact upload: {}",
+                            error.message
+                        ),
+                    )
+                })?
+        }
+    };
     let returned_id = result
         .get("serviceId")
         .and_then(serde_json::Value::as_u64)
@@ -1289,8 +1317,10 @@ mod tests {
         ServiceArtifact {
             directory: PathBuf::from("dist"),
             blob_path: PathBuf::from("dist/service.blob"),
+            pvm_path: None,
             code_hash: blake2_hash(&blob),
             blob,
+            pvm: None,
             build_id: "build-id".into(),
             service_key: None,
             min_item_gas: 1,
@@ -1434,10 +1464,8 @@ mod tests {
     }
 
     #[test]
-    fn backend_registration_is_separate_and_contains_planner_identity() {
+    fn backend_registration_is_separate_and_does_not_send_a_local_locator() {
         let directory = tempfile::tempdir().unwrap();
-        let planner_path = directory.path().join("generated_builder_application.rs");
-        fs::write(&planner_path, b"portable planner").unwrap();
         let mut artifact = artifact();
         artifact.directory = directory.path().to_path_buf();
         artifact.service_key = Some([7; 32]);
@@ -1447,7 +1475,6 @@ mod tests {
         let result = register_backend_service(
             &transport,
             "http://backend.test",
-            "admin",
             7,
             &artifact,
             Duration::from_secs(2),
@@ -1460,8 +1487,12 @@ mod tests {
             calls[0].0,
             "http://backend.test:jamscript_registerServiceV1"
         );
-        assert_eq!(calls[0].1["serviceKey"], hash_hex(&[7; 32]));
-        assert!(calls[0].1["plannerArtifact"]["digest"].as_str().is_some());
+        assert_eq!(
+            calls[0].1["expectedCodeHash"],
+            hash_hex(&artifact.code_hash)
+        );
+        assert!(calls[0].1.get("adminToken").is_none());
+        assert!(calls[0].1.get("plannerArtifact").is_none());
     }
 
     #[test]

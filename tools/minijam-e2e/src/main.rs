@@ -328,7 +328,6 @@ fn runtime_input_batch(
     RuntimeRefineInputV1 {
         version: 1,
         managed_state: witness,
-        external_state: Vec::new(),
         actions: actions.to_vec(),
     }
     .encode()

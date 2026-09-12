@@ -25,6 +25,8 @@ for workflow in ci.yml build-toolchain-bundle.yml release.yml release-candidate.
 done
 
 test -f toolchains/release-targets.toml
+test -f toolchains/polkavm-guest/Cargo.toml
+test -f toolchains/polkavm-guest/Cargo.lock
 grep -q 'triple = "linux-x86_64"' toolchains/release-targets.toml
 grep -q 'triple = "macos-arm64"' toolchains/release-targets.toml
 grep -q 'triple = "windows-x86_64"' toolchains/release-targets.toml

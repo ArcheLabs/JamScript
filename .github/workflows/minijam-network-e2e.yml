@@ -16,13 +16,6 @@ jobs:
         with:
           path: JamScript
 
-      - uses: actions/checkout@v4
-        with:
-          repository: ArcheLabs/minijam-client
-          path: minijam-client
-          fetch-depth: 0
-          submodules: recursive
-
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-05-02
@@ -35,16 +28,8 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y clang-20 lld-20
 
-      - name: Checkout pinned MiniJAM revision
-        working-directory: JamScript
-        run: |
-          revision="$(sed -n 's/^revision = "\([^"]*\)"/\1/p' toolchains/minijam.lock)"
-          git -C ../minijam-client checkout --detach "${revision}"
-          git -C ../minijam-client submodule update --init --recursive
-
-      - name: Run real network E2E
+      - name: Run real network E2E against published MiniJAM containers
         working-directory: JamScript
         env:
           CI: "true"
-          JAMSCRIPT_MINIJAM_SDK: ../minijam-client
         run: ./scripts/minijam-network-e2e.sh

@@ -7,6 +7,12 @@ use std::{
     process::{Command, Stdio},
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CargoNetworkPolicy {
+    OnlineAllowed,
+    OfflineRequired,
+}
+
 #[derive(Clone, Debug)]
 pub struct PolkaVmBuildConfig {
     pub rust_toolchain: String,
@@ -24,6 +30,8 @@ pub struct PolkaVmBuildConfig {
     pub readelf_path: Option<PathBuf>,
     pub host_linker_path: Option<PathBuf>,
     pub cargo_home: Option<PathBuf>,
+    pub cargo_network_policy: CargoNetworkPolicy,
+    pub canonical_guest_lock: Option<PathBuf>,
 }
 
 impl Default for PolkaVmBuildConfig {
@@ -42,6 +50,8 @@ impl Default for PolkaVmBuildConfig {
             readelf_path: None,
             host_linker_path: None,
             cargo_home: None,
+            cargo_network_policy: CargoNetworkPolicy::OnlineAllowed,
+            canonical_guest_lock: None,
         }
     }
 }
@@ -119,6 +129,15 @@ impl PolkaVmBuilder {
                 request.manifest_path.display()
             );
         }
+        let resolved_guest_lock = guest_lock_path(&request.manifest_path)?;
+        if let Some(canonical_guest_lock) = &self.config.canonical_guest_lock {
+            materialize_guest_lock(&request.manifest_path, canonical_guest_lock, &lock)?;
+        } else {
+            validate_lock_package_versions(
+                &resolved_guest_lock,
+                &[("polkavm-derive", &lock.polkavm_derive)],
+            )?;
+        }
         if !self.config.is_64_bit {
             bail!(
                 "PolkaVM service backend currently supports only the pinned riscv64/lp64e domain"
@@ -175,35 +194,11 @@ impl PolkaVmBuilder {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("target-polkavm");
-        let mut cargo = Command::new(
-            self.config
-                .cargo_path
-                .as_deref()
-                .unwrap_or_else(|| Path::new("cargo")),
+        let mut cargo = self.guest_cargo_command(request, &target_json, &target_dir);
+        cargo.env(
+            "SERVICE_BUILD_POLKAVM_NATIVE_ARCHIVES",
+            encode_archives(&request.native_archives),
         );
-        if self.config.cargo_path.is_none() {
-            cargo.arg(format!("+{}", self.config.rust_toolchain));
-        }
-        cargo
-            .args([
-                "-Z",
-                "build-std=core,alloc",
-                "-Z",
-                "json-target-spec",
-                "build",
-                "--release",
-                "--target",
-                target_json.to_str().unwrap(),
-                "--target-dir",
-                target_dir.to_str().unwrap(),
-                "--manifest-path",
-                request.manifest_path.to_str().unwrap(),
-                "--offline",
-            ])
-            .env(
-                "SERVICE_BUILD_POLKAVM_NATIVE_ARCHIVES",
-                encode_archives(&request.native_archives),
-            );
         if let Some(rustc) = &self.config.rustc_path {
             cargo.env("RUSTC", rustc);
         }
@@ -228,7 +223,19 @@ impl PolkaVmBuilder {
         if self.config.diagnostic {
             cargo.env("JAMSCRIPT_DIAGNOSTIC_GUEST", "1");
         }
-        run(&mut cargo, "building the PolkaVM cdylib guest")?;
+        if let Err(error) = run(&mut cargo, "building the PolkaVM cdylib guest") {
+            let message = error.to_string();
+            if self.config.cargo_network_policy == CargoNetworkPolicy::OfflineRequired
+                && (message.contains("failed to download")
+                    || message.contains("--offline was specified")
+                    || message.contains("offline mode"))
+            {
+                bail!(
+                    "MANAGED_TOOLCHAIN_OFFLINE_DEPENDENCY_MISSING: managed PolkaVM guest build is offline-only; {message}"
+                );
+            }
+            return Err(error);
+        }
 
         let release_dir = target_dir.join(&target_name).join("release");
         let elf = find_single_elf(&release_dir)?;
@@ -254,7 +261,9 @@ impl PolkaVmBuilder {
             Some(version) => version,
             None => rustc_version(&self.config.rust_toolchain)?,
         };
-        validate_resolved_guest_versions(&request.manifest_path, &lock)?;
+        if let Some(canonical_guest_lock) = &self.config.canonical_guest_lock {
+            validate_resolved_guest_lock(&resolved_guest_lock, canonical_guest_lock, &lock)?;
+        }
         Ok(GuestBuildArtifacts {
             elf: output_elf,
             target_json,
@@ -276,6 +285,42 @@ impl PolkaVmBuilder {
                 minimum_stack_bytes: 2 * 1024 * 1024,
             },
         })
+    }
+
+    fn guest_cargo_command(
+        &self,
+        request: &PolkaVmBuildRequest,
+        target_json: &Path,
+        target_dir: &Path,
+    ) -> Command {
+        let mut cargo = Command::new(
+            self.config
+                .cargo_path
+                .as_deref()
+                .unwrap_or_else(|| Path::new("cargo")),
+        );
+        if self.config.cargo_path.is_none() {
+            cargo.arg(format!("+{}", self.config.rust_toolchain));
+        }
+        cargo.args([
+            "-Z",
+            "build-std=core,alloc",
+            "-Z",
+            "json-target-spec",
+            "build",
+            "--release",
+            "--locked",
+            "--target",
+            target_json.to_str().unwrap(),
+            "--target-dir",
+            target_dir.to_str().unwrap(),
+            "--manifest-path",
+            request.manifest_path.to_str().unwrap(),
+        ]);
+        if self.config.cargo_network_policy == CargoNetworkPolicy::OfflineRequired {
+            cargo.arg("--offline");
+        }
+        cargo
     }
 }
 
@@ -595,19 +640,105 @@ impl ToolchainLock {
                 ("polkavm-derive", &lock.polkavm_derive),
             ],
         )?;
+        let canonical_guest_lock = canonical_guest_lock_path(path)?;
+        validate_guest_lock(&canonical_guest_lock, &lock.polkavm_derive)?;
         Ok(lock)
     }
 }
 
-fn validate_resolved_guest_versions(manifest: &Path, lock: &ToolchainLock) -> Result<()> {
-    let cargo_lock = manifest
+fn canonical_guest_lock_path(lock_path: &Path) -> Result<PathBuf> {
+    lock_path
         .parent()
-        .map(|dir| dir.join("Cargo.lock"))
-        .ok_or_else(|| anyhow::anyhow!("guest manifest has no parent directory"))?;
-    if cargo_lock.is_file() {
-        validate_lock_package_versions(&cargo_lock, &[("polkavm-derive", &lock.polkavm_derive)])?;
+        .map(|directory| directory.join("polkavm-guest/Cargo.lock"))
+        .ok_or_else(|| anyhow::anyhow!("PolkaVM toolchain lock has no parent directory"))
+}
+
+fn guest_lock_path(manifest: &Path) -> Result<PathBuf> {
+    manifest
+        .parent()
+        .map(|directory| directory.join("Cargo.lock"))
+        .ok_or_else(|| anyhow::anyhow!("guest manifest has no parent directory"))
+}
+
+fn materialize_guest_lock(
+    manifest: &Path,
+    canonical_lock: &Path,
+    lock: &ToolchainLock,
+) -> Result<PathBuf> {
+    let guest_lock = guest_lock_path(manifest)?;
+    if guest_lock.is_file() {
+        let existing = fs::read(&guest_lock)
+            .with_context(|| format!("reading resolved Cargo lock {}", guest_lock.display()))?;
+        let canonical = fs::read(canonical_lock).with_context(|| {
+            format!("reading canonical Cargo lock {}", canonical_lock.display())
+        })?;
+        if existing != canonical {
+            bail!(
+                "temporary PolkaVM guest Cargo.lock differs from canonical lock {}",
+                canonical_lock.display()
+            );
+        }
+    } else {
+        fs::copy(canonical_lock, &guest_lock).with_context(|| {
+            format!(
+                "materializing canonical PolkaVM guest lock from {}",
+                canonical_lock.display()
+            )
+        })?;
     }
+    validate_guest_lock(&guest_lock, &lock.polkavm_derive)?;
+    Ok(guest_lock)
+}
+
+fn validate_guest_lock(path: &Path, polkavm_derive_version: &str) -> Result<()> {
+    if !path.is_file() {
+        bail!(
+            "canonical PolkaVM guest lock is missing: {}",
+            path.display()
+        );
+    }
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("reading canonical Cargo lock {}", path.display()))?;
+    let value: toml::Value = toml::from_str(&contents)
+        .with_context(|| format!("parsing canonical Cargo lock {}", path.display()))?;
+    let packages = value
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "canonical Cargo lock {} has no package table",
+                path.display()
+            )
+        })?;
+    if !packages.iter().any(|package| {
+        package.get("name").and_then(toml::Value::as_str) == Some("jamscript_guest")
+            && package.get("version").and_then(toml::Value::as_str) == Some("0.1.0")
+    }) {
+        bail!(
+            "canonical Cargo lock {} has no jamscript_guest root package",
+            path.display()
+        );
+    }
+    validate_lock_package_versions(path, &[("polkavm-derive", polkavm_derive_version)])?;
     Ok(())
+}
+
+fn validate_resolved_guest_lock(
+    resolved_lock: &Path,
+    canonical_lock: &Path,
+    lock: &ToolchainLock,
+) -> Result<()> {
+    let resolved = fs::read(resolved_lock)
+        .with_context(|| format!("reading resolved Cargo lock {}", resolved_lock.display()))?;
+    let canonical = fs::read(canonical_lock)
+        .with_context(|| format!("reading canonical Cargo lock {}", canonical_lock.display()))?;
+    if resolved != canonical {
+        bail!(
+            "temporary PolkaVM guest Cargo.lock differs from canonical lock {}",
+            canonical_lock.display()
+        );
+    }
+    validate_guest_lock(resolved_lock, &lock.polkavm_derive)
 }
 
 fn validate_lock_package_versions(path: &Path, expected: &[(&str, &str)]) -> Result<()> {
@@ -688,8 +819,46 @@ mod tests {
         PolkaVmBuildConfig {
             rustc_path: managed.then(|| PathBuf::from("/managed/bin/rustc")),
             cargo_path: managed.then(|| PathBuf::from("/managed/bin/cargo")),
+            cargo_network_policy: if managed {
+                CargoNetworkPolicy::OfflineRequired
+            } else {
+                CargoNetworkPolicy::OnlineAllowed
+            },
             ..Default::default()
         }
+    }
+
+    fn cargo_args(config: PolkaVmBuildConfig) -> Vec<String> {
+        let request = PolkaVmBuildRequest {
+            manifest_path: PathBuf::from("/tmp/guest/Cargo.toml"),
+            output_dir: PathBuf::from("/tmp/output"),
+            native_archives: Vec::new(),
+            required_exports: Vec::new(),
+            require_relocations: false,
+        };
+        PolkaVmBuilder::new(config)
+            .guest_cargo_command(
+                &request,
+                Path::new("/tmp/target.json"),
+                Path::new("/tmp/target"),
+            )
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn contributor_guest_command_is_locked_but_online() {
+        let args = cargo_args(test_config(false));
+        assert!(args.iter().any(|arg| arg == "--locked"));
+        assert!(!args.iter().any(|arg| arg == "--offline"));
+    }
+
+    #[test]
+    fn managed_guest_command_is_locked_and_offline() {
+        let args = cargo_args(test_config(true));
+        assert!(args.iter().any(|arg| arg == "--locked"));
+        assert!(args.iter().any(|arg| arg == "--offline"));
     }
 
     fn test_lock(target_selection: &str) -> ToolchainLock {
