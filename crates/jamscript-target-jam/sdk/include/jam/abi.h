@@ -51,8 +51,6 @@ minijam_status minijam_service_storage_read(uint32_t service_id,
                                             size_t *output_size);
 minijam_status minijam_storage_write(const void *key, size_t key_size,
                                      const void *value, size_t value_size);
-uint64_t minijam_storage_write_raw(const void *key, size_t key_size,
-                                    const void *value, size_t value_size);
 minijam_status minijam_storage_delete(const void *key, size_t key_size);
 void minijam_log(const char *message, size_t message_size);
 void minijam_yield(const void *value, size_t value_size);

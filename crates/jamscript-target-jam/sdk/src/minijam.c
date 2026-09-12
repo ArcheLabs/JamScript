@@ -171,15 +171,11 @@ minijam_status minijam_service_storage_read(uint32_t service_id,
                            capacity, output_size);
 }
 
-uint64_t minijam_storage_write_raw(const void *key, size_t key_size,
-                                   const void *value, size_t value_size) {
-  return minijam_host_call6(MINIJAM_HOST_WRITE, (uintptr_t)key, key_size,
-                            (uintptr_t)value, value_size, 0, 0);
-}
-
 minijam_status minijam_storage_write(const void *key, size_t key_size,
                                      const void *value, size_t value_size) {
-  uint64_t result = minijam_storage_write_raw(key, key_size, value, value_size);
+  uint64_t result = minijam_host_call6(MINIJAM_HOST_WRITE, (uintptr_t)key,
+                                       key_size, (uintptr_t)value, value_size,
+                                       0, 0);
   return result == 1 ? MINIJAM_HOST_ERROR : MINIJAM_OK;
 }
 

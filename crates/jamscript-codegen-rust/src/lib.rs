@@ -120,7 +120,6 @@ extern "C" {{
     fn minijam_storage_read(key: *const u8, key_size: usize, output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
     fn minijam_service_storage_read(service_id: u32, key: *const u8, key_size: usize, output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
     fn minijam_storage_write(key: *const u8, key_size: usize, value: *const u8, value_size: usize) -> u32;
-    fn minijam_storage_write_raw(key: *const u8, key_size: usize, value: *const u8, value_size: usize) -> u64;
 }}
 
 static mut INPUT: [u8; 1048576] = [0; 1048576];
@@ -265,78 +264,34 @@ pub extern "C" fn minijam_accumulate() {{
             options(nomem, nostack, preserves_flags),
         );
     }}
-    service_runtime_guest::guest_support::diagnostic_stage(b"ACC_ENTRY");
     let init_input = unsafe {{ core::slice::from_raw_parts(init_pointer as *const u8, init_size) }};
-    let (authoritative_tick, _sid, _items_count) = match decode_accumulate_init_input(init_input) {{
-        Ok(value) => {{
-            service_runtime_guest::guest_support::diagnostic_stage(b"ACC_INIT_DECODE_OK");
-            value
-        }}
-        Err(_) => {{
-            service_runtime_guest::guest_support::diagnostic_stage(b"ACC_INIT_DECODE_FAIL");
-            return;
-        }}
-    }};
+    let (authoritative_tick, _sid, _items_count) =
+        match decode_accumulate_init_input(init_input) {{ Ok(value) => value, Err(_) => return }};
     let mut current = read_current_commitment().unwrap_or(service_runtime_core::EMPTY_STATE_ROOT_V1);
-    service_runtime_guest::guest_support::diagnostic_hash(b"ACC_CURRENT=", &current);
     let mut advanced = false;
     let count = unsafe {{ minijam_result_count() }};
-    service_runtime_guest::guest_support::diagnostic_u64(b"ACC_RESULT_COUNT=", count as u64);
     for index in 0..count {{
         let mut size = 0usize;
-        let fetch_status = unsafe {{ minijam_result(index, RESULT.as_mut_ptr(), 2097152, &mut size) }};
-        service_runtime_guest::guest_support::diagnostic_index_status(
-            b"ACC_RESULT_FETCH_", index, fetch_status == 0,
-        );
-        if fetch_status != 0 {{ continue; }}
+        if unsafe {{ minijam_result(index, RESULT.as_mut_ptr(), 2097152, &mut size) }} != 0 {{ continue; }}
         let refined = unsafe {{ core::slice::from_raw_parts(RESULT.as_ptr(), size) }};
-        let header = match RuntimeRefineOutputV1::decode_transition_header(refined) {{
-            Ok(value) => {{
-                service_runtime_guest::guest_support::diagnostic_index_status(
-                    b"ACC_HEADER_DECODE_", index, true,
-                );
-                value
-            }}
-            Err(_) => {{
-                service_runtime_guest::guest_support::diagnostic_index_status(
-                    b"ACC_HEADER_DECODE_", index, false,
-                );
-                continue;
-            }}
-        }};
-        service_runtime_guest::guest_support::diagnostic_hash(b"ACC_PARENT=", &header.parent_root);
-        let parent_matches = header.parent_root == current;
-        service_runtime_guest::guest_support::diagnostic_bool(b"ACC_PARENT_MATCH=", parent_matches);
-        if !parent_matches {{ continue; }}
-        let expired = header
-            .transition_valid_until
-            .is_some_and(|valid_until| authoritative_tick > valid_until);
-        service_runtime_guest::guest_support::diagnostic_bool(b"ACC_EXPIRED=", expired);
-        if expired {{ continue; }}
+        let Ok(header) = RuntimeRefineOutputV1::decode_transition_header(refined) else {{ continue; }};
+        if header.parent_root != current {{ continue; }}
+        if header.transition_valid_until.is_some_and(|valid_until| authoritative_tick > valid_until) {{ continue; }}
         let mut dependencies_valid = true;
         for dependency in &header.external_dependencies {{
             let Ok(canonical) = read_service_commitment(dependency.service_id) else {{ dependencies_valid = false; break; }};
             if canonical != dependency.state_root {{ dependencies_valid = false; break; }}
         }}
-        service_runtime_guest::guest_support::diagnostic_stage(
-            if dependencies_valid {{ b"ACC_EXTERNAL_DEPS=OK" }} else {{ b"ACC_EXTERNAL_DEPS=FAIL" }},
-        );
         if !dependencies_valid {{ continue; }}
         current = header.new_root;
-        service_runtime_guest::guest_support::diagnostic_hash(b"ACC_CURRENT=", &current);
         advanced = true;
     }}
-    service_runtime_guest::guest_support::diagnostic_stage(if advanced {{ b"ACC_ADVANCED=YES" }} else {{ b"ACC_ADVANCED=NO" }});
-    service_runtime_guest::guest_support::diagnostic_stage(if advanced {{ b"ACC_WRITE_ATTEMPTED=YES" }} else {{ b"ACC_WRITE_ATTEMPTED=NO" }});
     if advanced {{
         let commitment = ManagedStateCommitmentV1::new(current).encode();
         let key = MANAGED_STATE_COMMITMENT_KEY_V1;
-        let write_status = unsafe {{
-            minijam_storage_write_raw(key.as_ptr(), key.len(), commitment.as_ptr(), commitment.len())
+        let _ = unsafe {{
+            minijam_storage_write(key.as_ptr(), key.len(), commitment.as_ptr(), commitment.len())
         }};
-        service_runtime_guest::guest_support::diagnostic_u64(b"ACC_WRITE_STATUS=", write_status);
-    }} else {{
-        service_runtime_guest::guest_support::diagnostic_stage(b"ACC_WRITE_STATUS=NOT_ATTEMPTED");
     }}
 }}
 
@@ -1183,7 +1138,7 @@ mod tests {
         assert!(!accumulate.contains("StateMax"));
         assert!(!accumulate.contains("StateSet"));
         assert!(accumulate.contains("authoritative_tick > valid_until"));
-        assert!(accumulate.contains("let parent_matches = header.parent_root == current"));
+        assert!(accumulate.contains("header.parent_root != current"));
         assert!(accumulate.contains("MANAGED_STATE_COMMITMENT_KEY_V1"));
     }
 
@@ -1287,10 +1242,6 @@ mod tests {
         )
         .unwrap();
         assert!(source.contains("guest_support::diagnostic_stage"));
-        assert!(source.contains("b\"ACC_ENTRY\""));
-        assert!(source.contains("b\"ACC_INIT_DECODE_OK\""));
-        assert!(source.contains("b\"ACC_RESULT_COUNT=\""));
-        assert!(source.contains("b\"ACC_WRITE_STATUS=\""));
         assert!(source.contains("jamscript:entry"));
         assert!(source.contains("guest_support::DiagnosticObserver"));
         assert!(source.contains("jamscript:application-auth-verifying"));

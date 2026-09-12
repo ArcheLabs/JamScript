@@ -29,8 +29,6 @@ const artifactsB = process.env.JAMSCRIPT_E2E_ARTIFACTS_B;
 const serviceIdB = Number(process.env.JAMSCRIPT_E2E_SERVICE_ID_B);
 const serviceKeyB = process.env.JAMSCRIPT_E2E_SERVICE_KEY_B;
 const codeHashB = process.env.JAMSCRIPT_E2E_CODE_HASH_B;
-const diagnosticsEnabled = process.env.JAMSCRIPT_E2E_DIAGNOSTICS === "1";
-const actionTtl = BigInt(process.env.JAMSCRIPT_E2E_ACTION_TTL ?? "64");
 
 if (!artifactsA || !Number.isInteger(serviceIdA) || !serviceKeyA || !codeHashA || !genesisHash) {
   throw new Error(
@@ -80,34 +78,6 @@ async function managedStateValue(backend, deployment, key) {
   );
 }
 
-function recordDiagnostic(label, value) {
-  if (diagnosticsEnabled) {
-    console.log(`JAMSCRIPT_DIAGNOSTIC_${label}=${JSON.stringify(value)}`);
-  }
-}
-
-async function waitForActionDiagnostic(client, action, label) {
-  recordDiagnostic(`${label}_SUBMIT`, action);
-  try {
-    const result = await client.waitForAction(
-      action.packageHash,
-      action.actionHash,
-      { intervalMs: 500, timeoutMs: 120_000 },
-    );
-    recordDiagnostic(`${label}_RESULT`, result);
-    return result;
-  } catch (error) {
-    let status = null;
-    try {
-      status = await client.workStatus(action.packageHash);
-    } catch (statusError) {
-      status = { error: String(statusError) };
-    }
-    recordDiagnostic(`${label}_AFTER_FAILURE`, status);
-    throw error;
-  }
-}
-
 function deployment(artifacts, serviceId, serviceKey, codeHash, abi) {
   return {
     artifacts,
@@ -135,9 +105,12 @@ async function exerciseService(backend, service, seedValue, firstKey, secondKey,
     "seed",
     { key: firstKey, next: secondKey, value: seedValue },
     signer,
-    { ttl: actionTtl },
   );
-  const seededResult = await waitForActionDiagnostic(client, seededAction, "SEED");
+  const seededResult = await client.waitForAction(
+    seededAction.packageHash,
+    seededAction.actionHash,
+    { intervalMs: 500, timeoutMs: 120_000 },
+  );
   assert.equal(seededResult.status, "imported");
   assert.equal(
     seededResult.actionReceipt.actionHash.toLowerCase(),
@@ -156,10 +129,12 @@ async function exerciseService(backend, service, seedValue, firstKey, secondKey,
   assert.deepEqual(Array.from(seeded.slice(0, 32)), Array.from(pair.publicKey));
   assert.equal(new DataView(seeded.buffer, seeded.byteOffset + 32, 4).getUint32(0, true), seedValue);
 
-  const advanceAction = await client.submitAction("advance", { key: firstKey }, signer, {
-    ttl: actionTtl,
-  });
-  const advanceResult = await waitForActionDiagnostic(client, advanceAction, "ADVANCE");
+  const advanceAction = await client.submitAction("advance", { key: firstKey }, signer);
+  const advanceResult = await client.waitForAction(
+    advanceAction.packageHash,
+    advanceAction.actionHash,
+    { intervalMs: 500, timeoutMs: 120_000 },
+  );
   assert.equal(advanceResult.status, "imported");
   assert.equal(
     advanceResult.actionReceipt.actionHash.toLowerCase(),
