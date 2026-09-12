@@ -139,6 +139,10 @@ async function exerciseService(backend, service, seedValue, firstKey, secondKey,
   );
   const seededResult = await waitForActionDiagnostic(client, seededAction, "SEED");
   assert.equal(seededResult.status, "imported");
+  assert.equal(
+    seededResult.actionReceipt.actionHash.toLowerCase(),
+    seededAction.actionHash.toLowerCase(),
+  );
   assert.equal(await client.readNonce(pair.publicKey), 1n);
   // stateKey receives the already-canonical user-key bytes.  ScriptC's
   // bytes(32) key is JAM bounded bytes, so preserve its canonical length
@@ -157,6 +161,10 @@ async function exerciseService(backend, service, seedValue, firstKey, secondKey,
   });
   const advanceResult = await waitForActionDiagnostic(client, advanceAction, "ADVANCE");
   assert.equal(advanceResult.status, "imported");
+  assert.equal(
+    advanceResult.actionReceipt.actionHash.toLowerCase(),
+    advanceAction.actionHash.toLowerCase(),
+  );
   assert.equal(await client.readNonce(pair.publicKey), 2n);
   const advanced = await managedStateValue(backend, service.deployment, valueKey);
   assert.ok(advanced);
