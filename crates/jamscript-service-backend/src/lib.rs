@@ -1389,7 +1389,13 @@ impl BackendEngine {
     }
 
     pub fn status(&self, state: &mut BackendState, params: Value) -> Result<Value, BackendError> {
-        let result = self.network.work_status(params.clone())?;
+        let mut result = self.network.work_status(params.clone())?;
+        if let Some(object) = result.as_object_mut() {
+            // MiniJAM only reports Work-level status and executionReceipt.  Do
+            // not let an untrusted provider response, or a pre-import result,
+            // expose an application receipt as canonical.
+            object.remove("actionReceipts");
+        }
         let Some(package) = params.get("packageHash").and_then(Value::as_str) else {
             return Ok(result);
         };
@@ -1405,37 +1411,72 @@ impl BackendEngine {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if status == "imported" {
-            let context = self.network.finalized_context()?;
-            let canonical = self
-                .network
-                .service_storage_at(
-                    &context,
-                    service_id,
-                    service_runtime_core::MANAGED_STATE_COMMITMENT_KEY_V1,
-                )?
-                .and_then(|bytes| {
-                    service_runtime_core::ManagedStateCommitmentV1::decode(&bytes).ok()
-                })
-                .map(|commitment| commitment.root);
-            if let Some(root) = canonical {
-                let key = WorkKey {
-                    service_id,
-                    package_hash,
-                };
-                let expected = state.prediction(service_id, package_hash).cloned();
-                if let Some(output) = expected {
-                    if root != output.parent_root && root != output.new_root {
-                        state.pending.remove(&key);
-                        return Err(BackendError::PredictionStale);
+        if status != "imported" {
+            return Ok(result);
+        }
+
+        let context = self.network.finalized_context()?;
+        let canonical = self
+            .network
+            .service_storage_at(
+                &context,
+                service_id,
+                service_runtime_core::MANAGED_STATE_COMMITMENT_KEY_V1,
+            )?
+            .and_then(|bytes| service_runtime_core::ManagedStateCommitmentV1::decode(&bytes).ok())
+            .map(|commitment| commitment.root);
+        if let Some(root) = canonical {
+            let key = WorkKey {
+                service_id,
+                package_hash,
+            };
+            let expected = state.prediction(service_id, package_hash).cloned();
+            if let Some(output) = expected.as_ref() {
+                if root != output.parent_root && root != output.new_root {
+                    state.pending.remove(&key);
+                    return Err(BackendError::PredictionStale);
+                }
+            }
+            state.finalized_contexts.insert(service_id, context.clone());
+            state.materialize_if_canonical(key, root)?;
+
+            // Only the predicted transition's new root confirms that these
+            // application receipts are canonical.  The parent-root case is
+            // retained for the existing materialization race handling, but it
+            // must not publish receipts for a transition that is not canonical.
+            if let Some(output) = expected {
+                if root == output.new_root {
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert(
+                            "actionReceipts".into(),
+                            canonical_action_receipts(&output.receipts),
+                        );
                     }
                 }
-                state.finalized_contexts.insert(service_id, context.clone());
-                state.materialize_if_canonical(key, root)?;
             }
         }
         Ok(result)
     }
+}
+
+fn canonical_action_receipts(receipts: &[service_runtime_core::ActionReceiptV1]) -> Value {
+    Value::Array(
+        receipts
+            .iter()
+            .map(|receipt| {
+                let status = match receipt.status {
+                    service_runtime_core::ActionStatusV1::Applied => "applied",
+                    service_runtime_core::ActionStatusV1::Failed => "failed",
+                    service_runtime_core::ActionStatusV1::Rejected => "rejected",
+                };
+                json!({
+                    "actionHash": hash_hex(&receipt.action_hash),
+                    "status": status,
+                    "errorCode": receipt.error_code,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn build_external_witnesses(
@@ -3244,6 +3285,226 @@ mod tests {
             StateDiffV1::default(),
         )
         .unwrap()
+    }
+
+    #[derive(Clone)]
+    struct WorkStatusNetwork {
+        result: Value,
+        canonical_root: Option<StateRoot>,
+    }
+
+    impl BackendNetwork for WorkStatusNetwork {
+        fn genesis_hash(&self) -> Result<StateRoot, BackendError> {
+            Err(BackendError::Rpc("unused test method".into()))
+        }
+
+        fn finalized_context(&self) -> Result<FinalizedContextV1, BackendError> {
+            Ok(FinalizedContextV1 {
+                block_hash: [0x44; 32],
+                block_number: 10,
+                state_root: [0x55; 32],
+                slot: 11,
+            })
+        }
+
+        fn service_info(
+            &self,
+            _context: &FinalizedContextV1,
+            _service_id: u32,
+        ) -> Result<Option<ChainServiceInfoV1>, BackendError> {
+            Err(BackendError::Rpc("unused test method".into()))
+        }
+
+        fn service_storage_at(
+            &self,
+            _context: &FinalizedContextV1,
+            _service_id: u32,
+            _key: &[u8],
+        ) -> Result<Option<Vec<u8>>, BackendError> {
+            Ok(self.canonical_root.map(|root| {
+                service_runtime_core::ManagedStateCommitmentV1::new(root)
+                    .encode()
+                    .to_vec()
+            }))
+        }
+
+        fn service_code(
+            &self,
+            _context: &FinalizedContextV1,
+            _service_id: u32,
+            _code_hash: StateRoot,
+        ) -> Result<Option<Vec<u8>>, BackendError> {
+            Err(BackendError::Rpc("unused test method".into()))
+        }
+
+        fn submit_work(&self, _params: Value) -> Result<Value, BackendError> {
+            Err(BackendError::Rpc("unused test method".into()))
+        }
+
+        fn work_status(&self, _params: Value) -> Result<Value, BackendError> {
+            Ok(self.result.clone())
+        }
+    }
+
+    fn work_status_result(status: &str) -> Value {
+        json!({
+            "status": status,
+            "actionReceipts": [{
+                "actionHash": "0xprovider-value-must-not-escape",
+                "status": "applied",
+                "errorCode": 999
+            }]
+        })
+    }
+
+    fn status_params(package_hash: StateRoot) -> Value {
+        json!({
+            "serviceId": 10,
+            "packageHash": hash_hex(&package_hash)
+        })
+    }
+
+    fn output_with_receipts(receipts: Vec<ActionReceiptV1>) -> (RuntimeRefineOutputV1, StateRoot) {
+        let diff = StateDiffV1 {
+            changes: vec![StateChangeV1 {
+                key: b"receipt-test".to_vec(),
+                value: Some(b"canonical".to_vec()),
+            }],
+        };
+        let new_root = FullState::empty().apply_diff(&diff).unwrap().root();
+        let output =
+            RuntimeRefineOutputV1::from_diff(EMPTY_STATE_ROOT_V1, new_root, receipts, diff)
+                .unwrap();
+        (output, new_root)
+    }
+
+    fn run_status(
+        network: WorkStatusNetwork,
+        state: &mut BackendState,
+        params: Value,
+    ) -> Result<Value, BackendError> {
+        let artifacts = tempfile::tempdir().unwrap();
+        let loader = Arc::new(PvmArtifactLoader::new(Arc::new(
+            DiskArtifactStore::new(artifacts.path()).unwrap(),
+        )));
+        BackendEngine::new(Arc::new(network), loader).status(state, params)
+    }
+
+    fn state_with_prediction(
+        package_hash: StateRoot,
+        output: RuntimeRefineOutputV1,
+    ) -> BackendState {
+        let service = record(10, 1);
+        let mut state = BackendState::default();
+        state.register(service.clone()).unwrap();
+        state
+            .provider
+            .insert(service.service_key, FullState::empty());
+        state.track_prediction(10, package_hash, output).unwrap();
+        state
+    }
+
+    #[test]
+    fn pending_and_voting_work_never_expose_action_receipts() {
+        let package_hash = [0x71; 32];
+        let (output, canonical_root) = output_with_receipts(vec![ActionReceiptV1 {
+            action_hash: [0x72; 32],
+            status: ActionStatusV1::Applied,
+            error_code: None,
+        }]);
+
+        for status in ["pending", "voting"] {
+            let mut state = state_with_prediction(package_hash, output.clone());
+            let result = run_status(
+                WorkStatusNetwork {
+                    result: work_status_result(status),
+                    canonical_root: Some(canonical_root),
+                },
+                &mut state,
+                status_params(package_hash),
+            )
+            .unwrap();
+            assert!(result.get("actionReceipts").is_none(), "status={status}");
+        }
+    }
+
+    #[test]
+    fn imported_canonical_prediction_exposes_canonical_action_receipts() {
+        let package_hash = [0x81; 32];
+        let receipts = vec![
+            ActionReceiptV1 {
+                action_hash: [0x11; 32],
+                status: ActionStatusV1::Applied,
+                error_code: None,
+            },
+            ActionReceiptV1 {
+                action_hash: [0x22; 32],
+                status: ActionStatusV1::Failed,
+                error_code: Some(17),
+            },
+            ActionReceiptV1 {
+                action_hash: [0x33; 32],
+                status: ActionStatusV1::Rejected,
+                error_code: Some(23),
+            },
+        ];
+        let (output, canonical_root) = output_with_receipts(receipts);
+        let mut state = state_with_prediction(package_hash, output);
+        let result = run_status(
+            WorkStatusNetwork {
+                result: work_status_result("imported"),
+                canonical_root: Some(canonical_root),
+            },
+            &mut state,
+            status_params(package_hash),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result["actionReceipts"],
+            json!([
+                {
+                    "actionHash": hash_hex(&[0x11; 32]),
+                    "status": "applied",
+                    "errorCode": null
+                },
+                {
+                    "actionHash": hash_hex(&[0x22; 32]),
+                    "status": "failed",
+                    "errorCode": 17
+                },
+                {
+                    "actionHash": hash_hex(&[0x33; 32]),
+                    "status": "rejected",
+                    "errorCode": 23
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn stale_prediction_never_exposes_action_receipts() {
+        let package_hash = [0x91; 32];
+        let (output, _canonical_root) = output_with_receipts(vec![ActionReceiptV1 {
+            action_hash: [0x92; 32],
+            status: ActionStatusV1::Failed,
+            error_code: Some(31),
+        }]);
+        let mut state = state_with_prediction(package_hash, output);
+        let result = run_status(
+            WorkStatusNetwork {
+                result: work_status_result("imported"),
+                canonical_root: Some([0x93; 32]),
+            },
+            &mut state,
+            status_params(package_hash),
+        );
+
+        assert_eq!(result, Err(BackendError::PredictionStale));
+        assert!(!state.pending.contains_key(&WorkKey {
+            service_id: 10,
+            package_hash,
+        }));
     }
 
     #[test]
