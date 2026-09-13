@@ -11,7 +11,7 @@ use jamscript_deployment::{
 use jamscript_ir::abi_for_language;
 use jamscript_parser::{parse_service_v02, parse_service_v03};
 use jamscript_target_jam::{verify_deployment_bundle, JamTarget, NativeModule};
-use jamscript_toolchain::{lld_executable_name, ToolchainManager};
+use jamscript_toolchain::ToolchainManager;
 use polkavm::{
     BackendKind, Config as PvmConfig, Engine, Linker, MemoryAccessError, Module, ModuleConfig, Reg,
 };
@@ -58,10 +58,6 @@ enum CommandKind {
     Toolchain {
         #[command(subcommand)]
         command: ToolchainCommand,
-    },
-    Doctor {
-        #[arg(long)]
-        json: bool,
     },
     Run {
         #[arg(default_value = "dist/service.pvm")]
@@ -111,7 +107,10 @@ enum ToolchainCommand {
         #[arg(long)]
         json: bool,
     },
-    Install,
+    Install {
+        #[arg(long)]
+        archive: Option<PathBuf>,
+    },
     Verify,
     Path,
 }
@@ -265,7 +264,6 @@ fn main() -> Result<()> {
             build(&path, &output)
         }
         CommandKind::Toolchain { command } => toolchain_command(command),
-        CommandKind::Doctor { json } => doctor(json),
         CommandKind::Run {
             artifact,
             export,
@@ -475,8 +473,11 @@ fn toolchain_command(command: ToolchainCommand) -> Result<()> {
             }
             Ok(())
         }
-        ToolchainCommand::Install => {
-            let toolchain = manager.install()?;
+        ToolchainCommand::Install { archive } => {
+            let toolchain = match archive {
+                Some(archive) => manager.install_archive(&archive)?,
+                None => manager.install()?,
+            };
             println!("Toolchain verified at {}", toolchain.root.display());
             Ok(())
         }
@@ -490,159 +491,6 @@ fn toolchain_command(command: ToolchainCommand) -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn doctor(json: bool) -> Result<()> {
-    let manager = ToolchainManager::new()?;
-    let status = manager.status();
-    let root = status.path.clone();
-    let lld_name = lld_executable_name(&status.platform);
-    let jams_binary = std::env::current_exe().ok();
-    let tool_paths = root.as_ref().map(|root| {
-        serde_json::json!({
-            "rustc": root.join("bin/rustc"),
-            "cargo": root.join("bin/cargo"),
-            "node": root.join("bin/node"),
-            "scriptc": root.join("scriptc"),
-            "clang": root.join("bin/clang"),
-            "llvm_ar": root.join("bin/llvm-ar"),
-            "lld": root.join("bin").join(lld_name),
-            "readelf": root.join("bin/llvm-readelf"),
-            "host_linker": root.join("bin/jamscript-host-linker"),
-            "polkavm": root.join("toolchains/polkavm.lock"),
-            "jam_sdk": root.join("targets/jam/sdk"),
-            "toolchain_root": root,
-            "jams": jams_binary,
-        })
-    });
-    let managed_paths_only = root.as_ref().is_some_and(|root| {
-        [
-            root.join("bin/rustc"),
-            root.join("bin/cargo"),
-            root.join("bin/node"),
-            root.join("scriptc"),
-            root.join("bin/clang"),
-            root.join("bin/llvm-ar"),
-            root.join("bin").join(lld_name),
-            root.join("bin/llvm-readelf"),
-            root.join("bin/jamscript-host-linker"),
-            root.join("toolchains/polkavm.lock"),
-            root.join("targets/jam/sdk"),
-        ]
-        .iter()
-        .all(|path| path.starts_with(root) && (path.is_file() || path.is_dir()))
-    });
-    let canonical_ready = status.installed && status.verified && managed_paths_only;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "jamscript": { "version": env!("CARGO_PKG_VERSION") },
-                "jams_binary": jams_binary,
-                "toolchain": {
-                    "id": status.toolchain_id,
-                    "platform": status.platform,
-                    "root": root,
-                    "manifest": root.as_ref().map(|path| path.join("manifest.json")),
-                    "digest": status.sha256,
-                    "verified": status.verified,
-                },
-                "resolved_tools": tool_paths,
-                "host_dependency_leakage": if managed_paths_only { "PASS" } else { "FAIL" },
-                "canonical_build_readiness": if canonical_ready { "PASS" } else { "FAIL" },
-                "canonical": canonical_ready,
-                "toolchain_home": root,
-                "node": root.as_ref().map(|path| path.join("bin/node")),
-                "rustc": root.as_ref().map(|path| path.join("bin/rustc")),
-                "cargo": root.as_ref().map(|path| path.join("bin/cargo")),
-                "clang": root.as_ref().map(|path| path.join("bin/clang")),
-                "scriptc": root.as_ref().map(|path| path.join("scriptc")),
-                "offline": matches!(
-                    std::env::var("JAMSCRIPT_OFFLINE").as_deref(),
-                    Ok("1") | Ok("true") | Ok("yes")
-                ),
-                "error": status.error,
-            }))?
-        );
-        if !canonical_ready {
-            bail!(
-                "canonical build readiness failed; run `jams toolchain install` and `jams doctor`"
-            );
-        }
-        return Ok(());
-    }
-    println!("JamScript CLI: {}", env!("CARGO_PKG_VERSION"));
-    println!("Language: 0.2\n");
-    println!("Host:\n{}\n", status.platform);
-    println!(
-        "Toolchain:\n{}\ninstalled: {}\nverified: {}\n",
-        status.toolchain_id,
-        yes_no(status.installed),
-        yes_no(status.verified)
-    );
-    if let Some(root) = &root {
-        println!("Bundle root:\n{}", root.display());
-        println!("Manifest:\n{}", root.join("manifest.json").display());
-        println!("Digest:\n{}", status.sha256);
-        for (name, path) in [
-            ("Rust compiler", root.join("bin/rustc")),
-            ("Cargo", root.join("bin/cargo")),
-            ("Node", root.join("bin/node")),
-            ("ScriptC", root.join("scriptc")),
-            ("Clang", root.join("bin/clang")),
-            ("LLVM/Clang linker", root.join("bin").join(lld_name)),
-            ("LLVM ELF inspector", root.join("bin/llvm-readelf")),
-            (
-                "Managed host linker",
-                root.join("bin/jamscript-host-linker"),
-            ),
-            ("PolkaVM lock", root.join("toolchains/polkavm.lock")),
-            ("JAM SDK", root.join("targets/jam/sdk")),
-        ] {
-            println!(
-                "{name}:\n{} {}",
-                path.display(),
-                check_marker(path.is_file() || path.is_dir())
-            );
-        }
-    }
-    println!(
-        "\nHost dependency leakage: {}",
-        check_marker(managed_paths_only)
-    );
-    println!(
-        "Canonical build readiness: {}",
-        check_marker(canonical_ready)
-    );
-    println!(
-        "Node:\n{} {}",
-        manager.manifest().node_version,
-        check_marker(status.verified)
-    );
-    println!(
-        "\nLLVM:\n{} {}",
-        manager.manifest().clang_version,
-        check_marker(status.verified)
-    );
-    println!(
-        "\nRust:\n{} {}",
-        manager.manifest().rust_toolchain,
-        check_marker(status.verified)
-    );
-    println!(
-        "\nPolkaVM:\n{} {}",
-        manager.manifest().polkavm_linker,
-        check_marker(status.verified)
-    );
-    println!(
-        "\nJAM target:\n{} {}",
-        manager.manifest().jam_target_version,
-        check_marker(status.verified)
-    );
-    if !canonical_ready {
-        bail!("canonical build readiness failed; run `jams toolchain install` and `jams doctor`");
-    }
-    Ok(())
 }
 
 fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Result<()> {
@@ -743,13 +591,6 @@ fn yes_no(value: bool) -> &'static str {
         "yes"
     } else {
         "no"
-    }
-}
-fn check_marker(value: bool) -> &'static str {
-    if value {
-        "PASS"
-    } else {
-        "FAIL"
     }
 }
 

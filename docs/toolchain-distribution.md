@@ -52,7 +52,7 @@ jams toolchain status --json
 jams toolchain install
 jams toolchain verify
 jams toolchain path
-jams doctor
+jams toolchain install --archive /path/to/toolchain.tar.zst
 ```
 
 Installation may use the network once. Compilation uses the installed bundle;

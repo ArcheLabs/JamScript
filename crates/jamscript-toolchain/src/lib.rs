@@ -124,7 +124,14 @@ impl ToolchainManager {
     /// Load the distribution manifest embedded in the JamScript CLI.
     pub fn new() -> Result<Self> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        Self::from_manifest_str(DISTRIBUTION_MANIFEST, &root)
+        // A binary launched from Cargo may validate the repository locks. A
+        // copied/installed binary must be independent of the build checkout,
+        // even when that checkout happens to remain on the same machine.
+        let source_root = match env::current_exe() {
+            Ok(executable) if executable.starts_with(root.join("target")) => root,
+            _ => PathBuf::from("/__jamscript_embedded_manifest__"),
+        };
+        Self::from_manifest_str(DISTRIBUTION_MANIFEST, &source_root)
     }
 
     pub fn from_manifest_path(path: &Path) -> Result<Self> {
@@ -228,17 +235,75 @@ impl ToolchainManager {
         result
     }
 
-    pub fn resolve(&self) -> Result<InstalledToolchain> {
-        let bundle = self.bundle()?;
-        let destination = self.install_root(bundle);
+    /// Import a locally produced immutable toolchain archive into the normal
+    /// managed cache. The archive's internal manifest and file hashes are
+    /// authoritative for the import; the archive digest becomes its cache
+    /// identity.
+    pub fn install_archive(&self, archive: &Path) -> Result<InstalledToolchain> {
+        let archive_name = archive
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !archive_name.ends_with(".tar.zst") {
+            bail!("managed toolchain archive must be a .tar.zst file");
+        }
+        let archive = archive
+            .canonicalize()
+            .with_context(|| format!("locating managed toolchain archive {}", archive.display()))?;
+        let archive_sha256 = sha256_file(&archive)?;
+        fs::create_dir_all(&self.cache_home)
+            .with_context(|| format!("creating toolchain cache {}", self.cache_home.display()))?;
+        let _lock = InstallLock::acquire(&self.cache_home)?;
+        let destination = self.local_install_root(&archive_sha256);
         if destination.join("manifest.json").is_file() {
-            return self
-                .verify_at(&destination, bundle)
-                .map(|_| self.installed(&destination, bundle));
+            self.verify_root(&destination)?;
+            return Ok(self.installed_with_digest(&destination, &archive_sha256));
+        }
+        let token = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let staging = self
+            .cache_home
+            .join(format!(".import-{}-{token}", std::process::id()));
+        let result = (|| {
+            fs::create_dir_all(&staging)?;
+            extract_archive(&archive, &staging, "tar.zst")?;
+            let root = normalize_archive_root(&staging)?;
+            self.verify_root(&root)?;
+            if destination.exists() {
+                bail!(
+                    "toolchain cache destination appeared during import: {}",
+                    destination.display()
+                );
+            }
+            fs::create_dir_all(destination.parent().unwrap())?;
+            fs::rename(&root, &destination).with_context(|| {
+                format!(
+                    "atomically installing toolchain into {}",
+                    destination.display()
+                )
+            })?;
+            Ok(self.installed_with_digest(&destination, &archive_sha256))
+        })();
+        let _ = fs::remove_dir_all(&staging);
+        result
+    }
+
+    pub fn resolve(&self) -> Result<InstalledToolchain> {
+        if let Some(bundle) = self.published_bundle() {
+            let destination = self.install_root(bundle);
+            if destination.join("manifest.json").is_file() {
+                return self
+                    .verify_at(&destination, bundle)
+                    .map(|_| self.installed(&destination, bundle));
+            }
+        } else if let Some((root, digest)) = self.find_local_installed()? {
+            return Ok(self.installed_with_digest(&root, &digest));
         }
         if offline() {
             bail!(
-                "JamScript toolchain is not installed for {}; offline mode forbids downloading it",
+                "JamScript toolchain is not installed for {}; offline mode forbids downloading it; import a local .tar.zst with `jams toolchain install --archive <path>`",
                 self.platform
             );
         }
@@ -246,15 +311,33 @@ impl ToolchainManager {
     }
 
     pub fn verify(&self) -> Result<InstalledToolchain> {
-        let bundle = self.bundle()?;
-        let destination = self.install_root(bundle);
-        self.verify_at(&destination, bundle)
-            .map(|_| self.installed(&destination, bundle))
+        if let Some(bundle) = self.published_bundle() {
+            let destination = self.install_root(bundle);
+            return self
+                .verify_at(&destination, bundle)
+                .map(|_| self.installed(&destination, bundle));
+        }
+        if let Some((root, digest)) = self.find_local_installed()? {
+            self.verify_root(&root)?;
+            return Ok(self.installed_with_digest(&root, &digest));
+        }
+        bail!(
+            "JamScript toolchain is not installed for {}; import a local .tar.zst with `jams toolchain install --archive <path>`",
+            self.platform
+        )
     }
 
     pub fn path(&self) -> Result<PathBuf> {
-        let bundle = self.bundle()?;
-        Ok(self.install_root(bundle))
+        if let Some(bundle) = self.published_bundle() {
+            return Ok(self.install_root(bundle));
+        }
+        if let Some((root, _digest)) = self.find_local_installed()? {
+            return Ok(root);
+        }
+        bail!(
+            "JamScript toolchain is not installed for {}; import a local .tar.zst with `jams toolchain install --archive <path>`",
+            self.platform
+        )
     }
 
     pub fn status(&self) -> ToolchainStatus {
@@ -273,17 +356,37 @@ impl ToolchainManager {
             }
         };
         if !bundle.published {
-            return ToolchainStatus {
-                installed: false,
-                verified: false,
-                toolchain_id: self.manifest.toolchain_id.clone(),
-                platform: self.platform.clone(),
-                sha256: bundle.sha256.clone(),
-                path: None,
-                error: Some(format!(
-                    "JamScript toolchain for {} is not yet published",
-                    self.platform
-                )),
+            return match self.find_local_installed() {
+                Ok(Some((root, digest))) => ToolchainStatus {
+                    installed: true,
+                    verified: true,
+                    toolchain_id: self.manifest.toolchain_id.clone(),
+                    platform: self.platform.clone(),
+                    sha256: digest,
+                    path: Some(root),
+                    error: None,
+                },
+                Ok(None) => ToolchainStatus {
+                    installed: false,
+                    verified: false,
+                    toolchain_id: self.manifest.toolchain_id.clone(),
+                    platform: self.platform.clone(),
+                    sha256: String::new(),
+                    path: None,
+                    error: Some(format!(
+                        "JamScript toolchain for {} is not installed; import a local .tar.zst with `jams toolchain install --archive <path>`",
+                        self.platform
+                    )),
+                },
+                Err(error) => ToolchainStatus {
+                    installed: false,
+                    verified: false,
+                    toolchain_id: self.manifest.toolchain_id.clone(),
+                    platform: self.platform.clone(),
+                    sha256: String::new(),
+                    path: None,
+                    error: Some(error.to_string()),
+                },
             };
         }
         let root = self.install_root(bundle);
@@ -305,19 +408,19 @@ impl ToolchainManager {
     }
 
     fn bundle(&self) -> Result<&PlatformBundle> {
-        let bundle = self.manifest.platforms.get(&self.platform).ok_or_else(|| {
+        self.published_bundle().ok_or_else(|| {
             anyhow::anyhow!(
-                "JamScript toolchain for {} is not yet published",
+                "JamScript toolchain for {} is not published; import a local .tar.zst with `jams toolchain install --archive <path>`",
                 self.platform
             )
-        })?;
-        if !bundle.published {
-            bail!(
-                "JamScript toolchain for {} is not yet published",
-                self.platform
-            );
-        }
-        Ok(bundle)
+        })
+    }
+
+    fn published_bundle(&self) -> Option<&PlatformBundle> {
+        self.manifest
+            .platforms
+            .get(&self.platform)
+            .filter(|bundle| bundle.published)
     }
 
     fn install_root(&self, bundle: &PlatformBundle) -> PathBuf {
@@ -328,6 +431,10 @@ impl ToolchainManager {
     }
 
     fn installed(&self, root: &Path, bundle: &PlatformBundle) -> InstalledToolchain {
+        self.installed_with_digest(root, &bundle.sha256)
+    }
+
+    fn installed_with_digest(&self, root: &Path, digest: &str) -> InstalledToolchain {
         let executable = |name: &str| {
             if self.platform.starts_with("windows-") {
                 root.join("bin").join(format!("{name}.exe"))
@@ -353,17 +460,20 @@ impl ToolchainManager {
             jam_target: root.join("targets/jam/sdk"),
             toolchain_id: self.manifest.toolchain_id.clone(),
             platform: self.platform.clone(),
-            bundle_sha256: bundle.sha256.clone(),
+            bundle_sha256: digest.to_string(),
             rust_toolchain: self.manifest.rust_toolchain.clone(),
         }
     }
 
     fn verify_at(&self, root: &Path, bundle: &PlatformBundle) -> Result<()> {
+        self.verify_root(root)?;
+        let _ = bundle;
+        Ok(())
+    }
+
+    fn verify_root(&self, root: &Path) -> Result<()> {
         let path = root.join("manifest.json");
-        let internal: InternalManifest = serde_json::from_slice(
-            &fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
-        )
-        .with_context(|| format!("decoding {}", path.display()))?;
+        let internal = read_internal_manifest(&path)?;
         if internal.format != self.manifest.format
             || internal.toolchain_id != self.manifest.toolchain_id
             || internal.platform != self.platform
@@ -387,7 +497,7 @@ impl ToolchainManager {
                 bail!("toolchain file hash mismatch for `{name}`");
             }
         }
-        let installed = self.installed(root, bundle);
+        let installed = self.installed_with_digest(root, "");
         for required in [
             &installed.node,
             &installed.clang,
@@ -433,6 +543,39 @@ impl ToolchainManager {
             }
         }
         Ok(())
+    }
+
+    fn local_install_root(&self, archive_sha256: &str) -> PathBuf {
+        self.cache_home
+            .join(&self.manifest.toolchain_id)
+            .join(&self.platform)
+            .join(normalize_hash(archive_sha256))
+    }
+
+    fn find_local_installed(&self) -> Result<Option<(PathBuf, String)>> {
+        let parent = self
+            .cache_home
+            .join(&self.manifest.toolchain_id)
+            .join(&self.platform);
+        if !parent.is_dir() {
+            return Ok(None);
+        }
+        let mut candidates = fs::read_dir(&parent)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|entry| entry.file_name());
+        for candidate in candidates {
+            let digest = candidate.file_name().to_string_lossy().to_string();
+            if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let root = candidate.path();
+            if root.join("manifest.json").is_file() && self.verify_root(&root).is_ok() {
+                return Ok(Some((root, normalize_hash(&digest))));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -670,6 +813,11 @@ fn download(url: &str, destination: &Path) -> Result<()> {
         bail!("toolchain download failed: {url}");
     }
     Ok(())
+}
+
+fn read_internal_manifest(path: &Path) -> Result<InternalManifest> {
+    serde_json::from_slice(&fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+        .with_context(|| format!("decoding {}", path.display()))
 }
 
 fn verify_archive(path: &Path, bundle: &PlatformBundle) -> Result<()> {

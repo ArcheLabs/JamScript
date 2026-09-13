@@ -37,14 +37,18 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${JAMSCRIPT_TEST_LOG:?}"
 case "$*" in
   'toolchain install')
-    printf 'Toolchain verified at test-fixture\n'
-    ;;
-  'doctor')
-    if [[ "${JAMSCRIPT_TEST_DOCTOR_FAIL:-}" == '1' ]]; then
-      printf 'fixture doctor failure\n' >&2
+    if [[ "${JAMSCRIPT_TEST_INSTALL_FAIL:-}" == '1' ]]; then
+      printf 'fixture toolchain installation failure\n' >&2
       exit 1
     fi
-    printf 'Canonical build readiness: PASS\n'
+    printf 'Toolchain verified at test-fixture\n'
+    ;;
+  'toolchain verify')
+    if [[ "${JAMSCRIPT_TEST_VERIFY_FAIL:-}" == '1' ]]; then
+      printf 'fixture toolchain verification failure\n' >&2
+      exit 1
+    fi
+    printf 'Toolchain verified at test-fixture\n'
     ;;
 esac
 FIXTURE
@@ -59,12 +63,17 @@ make_archive() {
   write_fixture_cli
   printf 'fixture license\n' > "${fixture_dir}/LICENSE"
   printf 'fixture readme\n' > "${fixture_dir}/README.md"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${fixture_dir}/jamscript-service-backend"
+  chmod 0755 "${fixture_dir}/jamscript-service-backend"
   if [[ "$mode" == 'legacy-jamscript' ]]; then
     printf '#!/usr/bin/env bash\nexit 0\n' > "${fixture_dir}/jamscript"
     chmod 0755 "${fixture_dir}/jamscript"
   fi
   if [[ "$mode" == 'missing-jams' ]]; then
     rm -f "${fixture_dir}/jams"
+  fi
+  if [[ "$mode" == 'missing-backend' ]]; then
+    rm -f "${fixture_dir}/jamscript-service-backend"
   fi
   (cd "$fixture_dir" && tar -czf "${asset_dir}/${asset}" .)
   case "$checksum_mode" in
@@ -90,7 +99,7 @@ run_install() {
   JAMSCRIPT_INSTALL_TEST=1 \
   JAMSCRIPT_INSTALL_TEST_ASSET_DIR="$asset_dir" \
   JAMSCRIPT_TEST_LOG="$log_file" \
-  JAMSCRIPT_TEST_DOCTOR_FAIL="${JAMSCRIPT_TEST_DOCTOR_FAIL:-}" \
+  JAMSCRIPT_TEST_INSTALL_FAIL="${JAMSCRIPT_TEST_INSTALL_FAIL:-}" \
   bash "$ROOT/install.sh" --version "$version" --bin-dir "$bin_dir" "$@"
 }
 
@@ -110,8 +119,11 @@ make_archive
 : > "$log_file"
 run_install > "${tmp}/success.out"
 test -x "${bin_dir}/jams"
+test -x "${bin_dir}/jamscript-service-backend"
 assert_log_contains 'toolchain install'
-assert_log_contains 'doctor'
+grep -Fq 'Backend:' "${tmp}/success.out"
+grep -Fq 'installed and verified' "${tmp}/success.out"
+! grep -Fq 'readiness' "${tmp}/success.out"
 if PATH="$test_path" command -v jams >/dev/null 2>&1; then
   ! grep -Fq "  export PATH=\"${canonical_bin_dir}:\$PATH\"" "${tmp}/success.out"
 else
@@ -165,13 +177,17 @@ grep -qx 'old CLI' "${bin_dir}/jams"
 make_archive missing-jams
 run_expect_failure run_install
 
+# I8b: archive structure requires the packaged backend.
+make_archive missing-backend
+run_expect_failure run_install
+
 # I9: legacy jamscript is forbidden.
 make_archive legacy-jamscript
 run_expect_failure run_install
 
-# I13: doctor failure leaves the verified CLI in place and fails overall.
+# I13: toolchain installation failure leaves the verified CLI in place and fails overall.
 make_archive
-JAMSCRIPT_TEST_DOCTOR_FAIL=1 run_expect_failure run_install
+JAMSCRIPT_TEST_INSTALL_FAIL=1 run_expect_failure run_install
 test -x "${bin_dir}/jams"
 
 # I14: reinstall is idempotent.
@@ -180,7 +196,6 @@ make_archive
 run_install >/dev/null
 run_install >/dev/null
 test "$(grep -c '^toolchain install$' "$log_file")" -eq 2
-test "$(grep -c '^doctor$' "$log_file")" -eq 2
 
 # I15: a download/source failure preserves the existing CLI.
 printf 'stable CLI\n' > "${bin_dir}/jams"

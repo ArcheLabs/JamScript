@@ -20,7 +20,7 @@ Root cause: the PolkaVM target selector still called
 RustcVersion::Autodetect, which attempted bare rustc --version before Cargo
 received the managed RUSTC path.
 
-Managed rustc was already present and verified by doctor --json.
+Managed rustc was already present and verified by `jams toolchain verify`.
 
 Classification: managed target-selection resolver gap.
 

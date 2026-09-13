@@ -25,11 +25,11 @@ curl -fsSL \
 ```
 
 The installer detects the host platform, downloads the matching gzip CLI
-archive, verifies its SHA-256 entry, installs `jams` atomically, then runs:
+archive, verifies its SHA-256 entry, installs `jams` and its sibling backend
+atomically, then runs:
 
 ```bash
 jams toolchain install
-jams doctor
 ```
 
 The user-facing bootstrap needs Bash, curl, tar, gzip, and either `sha256sum`
@@ -44,6 +44,16 @@ current shell's `PATH`, export it as shown by the installer:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+Before a public release is available, Linux x86_64 contributors can build the
+local product once from the JamScript repository:
+
+```bash
+./tools/local-install.sh
+```
+
+The producer utility installs the CLI, sibling service backend, and verified
+managed toolchain. Consumer projects do not compile the JamScript repository.
+
 ## Manual installation
 
 For users who do not want to pipe a script into Bash:
@@ -56,7 +66,7 @@ For users who do not want to pipe a script into Bash:
 3. Extract the CLI archive with `tar -xzf jamscript-<VERSION>-<TARGET>.tar.gz`.
 4. Install the extracted `jams` into a directory on `PATH`, for example
    `~/.local/bin`, without creating a `jamscript` compatibility alias.
-5. Run `jams toolchain install`, then `jams doctor`.
+5. Run `jams toolchain install`, then `jams toolchain verify`.
 
 The managed toolchain release asset remains `.tar.zst` because it is an
 internal, digest-addressed bundle consumed by the CLI. End users do not need
@@ -82,7 +92,7 @@ If the CLI is installed but the managed toolchain download fails, retry with:
 
 ```bash
 ~/.local/bin/jams toolchain install
-~/.local/bin/jams doctor
+~/.local/bin/jams toolchain verify
 ```
 
 Re-running the installer is safe and re-verifies the CLI before replacement.

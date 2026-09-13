@@ -113,7 +113,7 @@ For `v0.1.0-rc.*`, publication passes both `--prerelease` and
 
 The kill test starts with isolated `HOME`, Cargo, Rustup, and JamScript cache
 directories. It hides host Rust, Cargo, rustup, Node, npm, Clang, LLVM, and Zig
-behind a restricted `PATH`, installs the digest-pinned bundle, runs `doctor`,
+behind a restricted `PATH`, installs the digest-pinned bundle, runs `jams toolchain verify`,
 builds an external fixture twice with network disabled, executes the resulting
 PVM artifact, and compares the two artifact hashes. It runs natively on both
 Linux x86_64 and macOS arm64; the macOS native Builder linkage is where the

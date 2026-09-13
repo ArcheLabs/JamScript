@@ -172,6 +172,7 @@ dependencies = [
  "anyhow",
  "jamscript-toolchain",
  "toml 0.8.23",
+ "zstd",
 ]
 
 [[package]]

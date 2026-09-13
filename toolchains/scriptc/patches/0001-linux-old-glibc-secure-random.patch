@@ -1,0 +1,45 @@
+--- scriptc/node_modules/@scriptc/runtime/src/scr_runtime.h
++++ scriptc/node_modules/@scriptc/runtime/src/scr_runtime.h
+@@ -30,0 +31,11 @@
++/* Linux glibc before 2.36 does not declare arc4random_buf. Keep the
++ * runtime's CSPRNG contract independent of the host libc by using the
++ * kernel-backed JamScript shim on every non-musl Linux build. A unique
++ * symbol avoids colliding with newer libcs that do provide arc4random_buf. */
++#if defined(__linux__) && !defined(SCR_MUSL)
++void jamscript_secure_random(void *buf, size_t n);
++#define SCR_RUNTIME_RANDOM jamscript_secure_random
++#else
++#define SCR_RUNTIME_RANDOM arc4random_buf
++#endif
++
+--- scriptc/node_modules/@scriptc/runtime/src/scr_bytes_io.c
++++ scriptc/node_modules/@scriptc/runtime/src/scr_bytes_io.c
+@@ -150,1 +150,1 @@
+-  if (b->len > 0) arc4random_buf(b->data, b->len);
++  if (b->len > 0) SCR_RUNTIME_RANDOM(b->data, b->len);
+--- scriptc/node_modules/@scriptc/runtime/src/scr_lib.c
++++ scriptc/node_modules/@scriptc/runtime/src/scr_lib.c
+@@ -2622,1 +2622,1 @@
+-    arc4random_buf(r, sizeof r);
++    SCR_RUNTIME_RANDOM(r, sizeof r);
+@@ -3382,1 +3382,1 @@
+-  arc4random_buf(&r, sizeof r);
++  SCR_RUNTIME_RANDOM(&r, sizeof r);
+@@ -3390,1 +3390,1 @@
+-  arc4random_buf(b, sizeof b);
++  SCR_RUNTIME_RANDOM(b, sizeof b);
+@@ -3423,1 +3423,1 @@
+-  arc4random_buf(bytes, size);
++  SCR_RUNTIME_RANDOM(bytes, size);
+--- scriptc/node_modules/@scriptc/runtime/src/scr_web.c
++++ scriptc/node_modules/@scriptc/runtime/src/scr_web.c
+@@ -1763,1 +1763,1 @@
+-  if (len > 0) arc4random_buf(buf + off, len);
++  if (len > 0) SCR_RUNTIME_RANDOM(buf + off, len);
+--- scriptc/node_modules/@scriptc/compiler/dist/backend/cc.js
++++ scriptc/node_modules/@scriptc/compiler/dist/backend/cc.js
+@@ -995,0 +996,4 @@
++        // Linux glibc before 2.36 does not declare arc4random_buf. The
++        // JamScript-owned getrandom shim is selected by the prepared runtime
++        // sources without defining or shadowing the libc symbol.
++        ...(targetPlatform(driver) === "linux" && !isMuslTarget(driver) ? ["scr_linux.c"] : []),
