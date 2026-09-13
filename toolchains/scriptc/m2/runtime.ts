@@ -12,6 +12,10 @@ const MAX_VIEW_BYTES = 1048576;
 const MAX_ABORT_CODE = 0x00ffffff;
 const FATAL_UNCAUGHT = 0x80000001;
 const FATAL_INVALID_VIEW = 0x80000002;
+export const FATAL_NUMERIC_OVERFLOW = 0x80000003;
+export const FATAL_NUMERIC_UNDERFLOW = 0x80000004;
+export const FATAL_NUMERIC_DIV_ZERO = 0x80000005;
+export const FATAL_NUMERIC_CAST = 0x80000006;
 
 type StateEntry = {
   key: Uint8Array;
@@ -28,6 +32,12 @@ function failStateView(): never {
   pendingKind = KIND_FATAL;
   pendingCode = FATAL_INVALID_VIEW;
   throw new Error("jamscript state view failure");
+}
+
+export function failNumeric(code: number): never {
+  pendingKind = KIND_FATAL;
+  pendingCode = code;
+  throw new Error("jamscript numeric failure");
 }
 
 function needState(key: Uint8Array): never {

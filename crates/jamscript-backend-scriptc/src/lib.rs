@@ -10,7 +10,8 @@ use std::{
 };
 
 pub const BACKEND_VERSION: &str = "scriptc-m2";
-pub const RUNTIME_PROFILE_VERSION: &str = "scriptc-deterministic-v1";
+pub const RUNTIME_PROFILE_VERSION: &str = "scriptc-deterministic-v2";
+pub const LEGACY_RUNTIME_PROFILE_VERSION: &str = "scriptc-deterministic-v1";
 pub const SCRIPT_C_VERSION: &str = "0.0.34";
 pub const TYPESCRIPT_VERSION: &str = "7.0.2";
 
@@ -108,6 +109,7 @@ impl ScriptcCompiler {
                 // runs from output_dir, where this source file is written.
                 "source": "scriptc_service.ts",
                 "package_name": ir.package_name,
+                "language_version": ir.language_version,
                 "states": ir.states,
                 "actions": ir.actions.iter().map(|action| serde_json::json!({
                     "name": action.name,
@@ -206,9 +208,13 @@ impl ScriptcCompiler {
                     .join("node_modules/@scriptc/compiler/surface-manifest.json"),
             )?,
             package_lock_hash: hash_file(&self.toolchain_root.join("package-lock.json"))?,
-            runtime_profile_version: RUNTIME_PROFILE_VERSION.into(),
+            runtime_profile_version: if ir.language_version == "0.3" {
+                RUNTIME_PROFILE_VERSION.into()
+            } else {
+                LEGACY_RUNTIME_PROFILE_VERSION.into()
+            },
             generated_actions,
-            typed_runtime_version: 1,
+            typed_runtime_version: if ir.language_version == "0.3" { 2 } else { 1 },
             state_view_version: 1,
         };
         Ok(ScriptcArtifact {

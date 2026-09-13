@@ -940,9 +940,7 @@ impl PvmApplication {
                 } else {
                     &[]
                 };
-                if value.is_empty() && !(mode == 13 && index == 0) {
-                    caller.instance.set_reg(Reg::A0, u64::MAX);
-                } else if offset > value.len() {
+                if (value.is_empty() && !(mode == 13 && index == 0)) || offset > value.len() {
                     caller.instance.set_reg(Reg::A0, u64::MAX);
                 } else {
                     let remaining = &value[offset..];
@@ -2422,20 +2420,18 @@ impl BackendRpcHandler {
             let result = BackendEngine::new(Arc::clone(network), Arc::clone(loader))
                 .status(&mut state, params)?;
             if let Some((key, output)) = prediction {
-                if !was_finalized && state.is_finalized(key) {
-                    if self.database.is_none() {
-                        if let Some(store) = &self.persistence {
-                            let service_key = state.registry.resolve_key(key.service_id)?;
-                            store.persist_registry(&state.registry)?;
-                            state.append_recovery(
-                                store.recovery_path(),
-                                &RecoveryEnvelopeV1 {
-                                    service_id: key.service_id,
-                                    service_key,
-                                    output,
-                                },
-                            )?;
-                        }
+                if !was_finalized && state.is_finalized(key) && self.database.is_none() {
+                    if let Some(store) = &self.persistence {
+                        let service_key = state.registry.resolve_key(key.service_id)?;
+                        store.persist_registry(&state.registry)?;
+                        state.append_recovery(
+                            store.recovery_path(),
+                            &RecoveryEnvelopeV1 {
+                                service_id: key.service_id,
+                                service_key,
+                                output,
+                            },
+                        )?;
                     }
                 }
             }
@@ -2706,10 +2702,9 @@ fn read_http_request(
                 return Err(BackendError::Rpc("duplicate Content-Length".into()));
             }
         }
-        if name.eq_ignore_ascii_case("origin") {
-            if origin.replace(value.trim().to_owned()).is_some() {
-                return Err(BackendError::Rpc("duplicate Origin".into()));
-            }
+        if name.eq_ignore_ascii_case("origin") && origin.replace(value.trim().to_owned()).is_some()
+        {
+            return Err(BackendError::Rpc("duplicate Origin".into()));
         }
     }
     let length = content_length.unwrap_or(0);

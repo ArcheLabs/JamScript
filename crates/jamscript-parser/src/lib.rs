@@ -29,7 +29,16 @@ pub fn parse_service_v02(
     package_version: &str,
     native_modules: &[String],
 ) -> Result<ServiceIr, ParseError> {
-    parse_service_formal(source, package_name, package_version, native_modules)
+    parse_service_formal(source, package_name, package_version, native_modules, "0.2")
+}
+
+pub fn parse_service_v03(
+    source: &str,
+    package_name: &str,
+    package_version: &str,
+    native_modules: &[String],
+) -> Result<ServiceIr, ParseError> {
+    parse_service_formal(source, package_name, package_version, native_modules, "0.3")
 }
 
 fn parse_service_formal(
@@ -37,6 +46,7 @@ fn parse_service_formal(
     package_name: &str,
     package_version: &str,
     native_modules: &[String],
+    language_version: &str,
 ) -> Result<ServiceIr, ParseError> {
     let cm: Lrc<SourceMap> = Default::default();
     let file = cm.new_source_file(
@@ -153,6 +163,7 @@ fn parse_service_formal(
     Ok(ServiceIr {
         package_name: package_name.into(),
         package_version: package_version.into(),
+        language_version: language_version.into(),
         source: source.into(),
         states,
         actions,
@@ -249,6 +260,11 @@ fn collect_import(
                     | "enumType"
                     | "result"
                     | "address"
+                    | "toU8"
+                    | "toU16"
+                    | "toU32"
+                    | "toU64"
+                    | "toU128"
                     | "state"
                     | "stateMap"
                     | "query"
@@ -842,5 +858,24 @@ export const increment = action({ auth: wallet(), input: { value: u64 }, execute
         let source = r#"import { action, wallet, u64 } from "jam"; export const now = action({ auth: wallet(), input: { value: u64 }, execute(ctx, input) { return Date.now(); } });"#;
         let ir = parse_service_v02(source, "counter", "0.2.0", &[]).unwrap();
         assert!(matches!(ir.actions[0].body, ActionBodyIr::ScriptC { .. }));
+    }
+
+    #[test]
+    fn parses_numeric_language_v03_without_changing_abi_types() {
+        let source = r#"
+            import { action, wallet, stateMap, fixedBytes, u64, u128 } from "jam";
+            const Id = fixedBytes(32);
+            const balances = stateMap({ schema: "asset.balance/v1", key: Id, value: u128 });
+            const nonces = stateMap({ schema: "asset.nonce/v1", key: Id, value: u64 });
+            export const transfer = action({
+                auth: wallet(),
+                input: { owner: Id, amount: u128 },
+                execute(ctx, input) { balances.set(input.owner, input.amount); }
+            });
+        "#;
+        let ir = parse_service_v03(source, "asset", "0.3.0", &[]).unwrap();
+        assert_eq!(ir.language_version, "0.3");
+        assert_eq!(ir.states[0].value_type, TypeIr::U128);
+        assert_eq!(ir.actions[0].input[1].ty, TypeIr::U128);
     }
 }

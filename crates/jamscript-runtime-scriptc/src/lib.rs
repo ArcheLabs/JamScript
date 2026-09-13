@@ -1,4 +1,4 @@
-pub const RUNTIME_PROFILE_VERSION: &str = "scriptc-deterministic-v1";
+pub const RUNTIME_PROFILE_VERSION: &str = "scriptc-deterministic-v2";
 pub const HEAP_POLICY: &str = "per-refine bounded allocator; reset at guest entry";
 
 pub fn selected_runtime_units() -> &'static [&'static str] {

@@ -1,0 +1,19 @@
+{
+  "profile_format": 1,
+  "name": "jamscript-scriptc-narrow-numeric-conformance",
+  "entry": "narrow-conformance.ts",
+  "emission": "c",
+  "optimization": "dev",
+  "abi": {
+    "prefix": "jamscript_numeric_narrow_",
+    "init_symbol": "jamscript_numeric_narrow_init",
+    "sink_register_symbol": "jamscript_numeric_narrow_set_panic_sink",
+    "collect_symbol": null,
+    "result_reset_symbol": null
+  },
+  "exports": [
+    { "export": "executeU8", "symbol": "jamscript_numeric_narrow_execute_u8", "params": ["bytes", "bytes", "bytes"], "returns": "bytes" },
+    { "export": "executeU16", "symbol": "jamscript_numeric_narrow_execute_u16", "params": ["bytes", "bytes", "bytes"], "returns": "bytes" },
+    { "export": "executeU32", "symbol": "jamscript_numeric_narrow_execute_u32", "params": ["bytes", "bytes", "bytes"], "returns": "bytes" }
+  ]
+}

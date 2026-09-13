@@ -9,7 +9,7 @@ use jamscript_deployment::{
     NetworkConfig, NetworkOverrides,
 };
 use jamscript_ir::abi_for_language;
-use jamscript_parser::parse_service_v02;
+use jamscript_parser::{parse_service_v02, parse_service_v03};
 use jamscript_target_jam::{verify_deployment_bundle, JamTarget, NativeModule};
 use jamscript_toolchain::{lld_executable_name, ToolchainManager};
 use polkavm::{
@@ -250,7 +250,7 @@ fn main() -> Result<()> {
         }
         CommandKind::Abi { path } => {
             let (_manifest, ir) = load(&path)?;
-            let abi = abi_for_language(&ir, "0.2")?;
+            let abi = abi_for_language(&ir, &ir.language_version)?;
             println!("{}", serde_json::to_string_pretty(&abi)?);
             Ok(())
         }
@@ -667,9 +667,7 @@ fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Re
             } else {
                 &[]
             };
-            if value.is_empty() && !(mode == 13 && index == 0) {
-                caller.instance.set_reg(Reg::A0, u64::MAX);
-            } else if offset > value.len() {
+            if (value.is_empty() && !(mode == 13 && index == 0)) || offset > value.len() {
                 caller.instance.set_reg(Reg::A0, u64::MAX);
             } else {
                 let remaining = &value[offset..];
@@ -1092,14 +1090,17 @@ fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
         .compiler
         .as_ref()
         .map(|config| config.backend.as_str());
-    if manifest.package.language != "0.2" {
+    if manifest.package.language != "0.2" && manifest.package.language != "0.3" {
         bail!(
-            "unsupported JamScript language version {}; supported version: 0.2",
+            "unsupported JamScript language version {}; supported versions: 0.2, 0.3",
             manifest.package.language
         );
     }
     if backend != Some("scriptc") {
-        bail!("language 0.2 requires [compiler] backend = \"scriptc\"");
+        bail!(
+            "JamScript language {} requires [compiler] backend = \"scriptc\"",
+            manifest.package.language
+        );
     }
     let source_path = path.join(&manifest.package.entry);
     let source = fs::read_to_string(&source_path)
@@ -1109,12 +1110,21 @@ fn load(path: &Path) -> Result<(Manifest, jamscript_ir::ServiceIr)> {
         .as_ref()
         .map(|modules| modules.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    let ir = parse_service_v02(
-        &source,
-        &manifest.package.name,
-        &manifest.package.version,
-        &native_modules,
-    )
+    let ir = match manifest.package.language.as_str() {
+        "0.2" => parse_service_v02(
+            &source,
+            &manifest.package.name,
+            &manifest.package.version,
+            &native_modules,
+        ),
+        "0.3" => parse_service_v03(
+            &source,
+            &manifest.package.name,
+            &manifest.package.version,
+            &native_modules,
+        ),
+        _ => unreachable!("manifest language was validated above"),
+    }
     .map_err(|e| anyhow::anyhow!("{}: {e}", source_path.display()))?;
     Ok((manifest, ir))
 }
@@ -1209,7 +1219,7 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         diagnostic: std::env::var_os("JAMSCRIPT_DIAGNOSTIC_GUEST").is_some(),
     };
     fs::create_dir_all(output)?;
-    let abi = abi_for_language(&ir, "0.2")?;
+    let abi = abi_for_language(&ir, &ir.language_version)?;
     fs::write(
         output.join("service.abi.json"),
         serde_json::to_vec_pretty(&abi)?,
