@@ -137,6 +137,8 @@ class NumericContext {
 
   transformExpression(node, expected) {
     if (!node) return node;
+    if (ts.isAsExpression(node)) return this.transformAsExpression(node, expected);
+    if (isFixed(expected)) assertSameNumericType(expected, this.infer(node), node, node);
     if (ts.isParenthesizedExpression(node)) {
       return ts.factory.updateParenthesizedExpression(node, this.transformExpression(node.expression, expected));
     }
@@ -202,6 +204,18 @@ class NumericContext {
     }
     if (ts.isNonNullExpression(node)) return ts.factory.updateNonNullExpression(node, this.transformExpression(node.expression, expected));
     return node;
+  }
+
+  transformAsExpression(node, expected) {
+    const source = this.infer(node.expression);
+    const target = typeFromTypeNode(node.type);
+    if (isFixed(source) || isFixed(target)) {
+      if (isFixed(source) && isFixed(target) && source === target) {
+        return this.transformExpression(node.expression, expected ?? target);
+      }
+      throw new Error(`JAM1208: numeric type assertions are not casts near ${node.getText()}`);
+    }
+    return ts.factory.updateAsExpression(node, this.transformExpression(node.expression, expected), node.type);
   }
 
   transformBinary(node, expected) {
@@ -291,8 +305,11 @@ class NumericContext {
       const target = node.expression.text.toLowerCase().slice(2);
       const source = this.infer(node.arguments[0]);
       const helper = castName(source, target);
-      if (!helper) throw new Error(`JAM1206: cannot checked-cast ${source ?? "unknown"} to ${target}`);
-      return ts.factory.createCallExpression(ts.factory.createIdentifier(helper), undefined, [this.transformExpression(node.arguments[0], source)]);
+      if (helper === undefined) throw new Error(`JAM1206: cannot checked-cast ${source ?? "unknown"} to ${target}`);
+      const value = this.transformExpression(node.arguments[0], source);
+      return helper === null
+        ? value
+        : ts.factory.createCallExpression(ts.factory.createIdentifier(helper), undefined, [value]);
     }
     if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)) {
       const state = this.states.get(node.expression.expression.text);
@@ -363,13 +380,14 @@ function fromIrType(type) {
 }
 
 function typeFromTypeNode(node) {
+  if (node?.kind === ts.SyntaxKind.NumberKeyword) return "number";
   if (!node || !ts.isTypeReferenceNode(node) || !ts.isIdentifier(node.typeName)) return undefined;
   const name = node.typeName.text.toLowerCase();
   return FIXED.has(name) ? name : undefined;
 }
 
 function runtimeTypeNode(type, original) {
-  if (!type || !isFixed(type)) return original && !typeFromTypeNode(original) ? original : undefined;
+  if (!type || !isFixed(type)) return original && !isFixed(typeFromTypeNode(original)) ? original : undefined;
   return ts.factory.createTypeReferenceNode(type === "u64" ? "JamU64" : type === "u128" ? "JamU128" : "number", undefined);
 }
 
@@ -385,21 +403,19 @@ function compareName(type) { return `${runtimePrefix(type)}Compare`; }
 function runtimePrefix(type) { return `jam${type[0].toUpperCase()}${type.slice(1)}`; }
 
 function castName(source, target) {
-  if (!source) return undefined;
-  if (source === target) return `jam${target[0].toUpperCase()}${target.slice(1)}Identity`;
-  if (source === "number") return `jam${target[0].toUpperCase()}${target.slice(1)}FromNumber`;
+  if (!source || !isFixed(target)) return undefined;
+  if (source === target) return null;
+  if (source === "number" || ["u8", "u16", "u32"].includes(source)) return `jam${target[0].toUpperCase()}${target.slice(1)}FromNumber`;
   if (source === "u64" && target === "u128") return "jamU128FromU64";
   if (source === "u128" && target === "u64") return "jamU64FromU128";
   if (source === "u64" && ["u8", "u16", "u32"].includes(target)) return `jam${target[0].toUpperCase()}${target.slice(1)}FromU64`;
   if (source === "u128" && ["u8", "u16", "u32"].includes(target)) return `jam${target[0].toUpperCase()}${target.slice(1)}FromU128`;
-  if (["u8", "u16", "u32"].includes(source) && ["u64", "u128"].includes(target)) return `jam${target[0].toUpperCase()}${target.slice(1)}FromNumber`;
-  if (isFixed(source) && isFixed(target)) return undefined;
   return undefined;
 }
 
 function assertSameNumericType(expected, actual, node, operand) {
-  if (!expected || !isFixed(expected) || !actual || actual === expected) return;
-  if (actual === "number" && (ts.isNumericLiteral(operand) || operand.kind === ts.SyntaxKind.BigIntLiteral)) return;
+  if (!isFixed(expected) || actual === expected) return;
+  if ((actual === "number" || actual === undefined) && isContextualLiteral(operand)) return;
   throw new Error(`JAM1203: fixed-width numeric operands must have identical types near ${node.getText()}`);
 }
 

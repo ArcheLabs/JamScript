@@ -15,9 +15,9 @@ function bodyOf(sourceText) {
   return { source, declaration };
 }
 
-function transform(sourceText, parameters = [], returnType = undefined) {
+function transform(sourceText, parameters = [], returnType = undefined, transformService = service) {
   const { source, declaration } = bodyOf(sourceText);
-  const transformed = transformNumericFunction(declaration.body, parameters, returnType, service);
+  const transformed = transformNumericFunction(declaration.body, parameters, returnType, transformService);
   return printer.printNode(ts.EmitHint.Unspecified, transformed, source);
 }
 
@@ -63,5 +63,69 @@ assert.throws(
   ),
   /JAM1203/,
 );
+
+assert.throws(
+  () => transform(
+    "function execute(value: number): u8 { let x: u8 = 1; let y: number = value; x = y; return x; }",
+    [{ name: "value", type: "number" }],
+    "u8",
+  ),
+  /JAM1203/,
+);
+assert.throws(
+  () => transform("function execute(value: number): u8 { return value; }", [{ name: "value", type: "number" }], "u8"),
+  /JAM1203/,
+);
+assert.throws(
+  () => transform("function execute(): u8 { let value: u8 = 300; return value; }", [], "u8"),
+  /JAM1204/,
+);
+assert.throws(
+  () => transform("function execute(value: number): u8 { return value as u8; }", [{ name: "value", type: "number" }], "u8"),
+  /JAM1208/,
+);
+const sameTypeAssertion = transform("function execute(value: u8): u8 { return value as u8; }", [{ name: "value", type: "u8" }], "u8");
+assert.doesNotMatch(sameTypeAssertion, / as u8/);
+assert.throws(
+  () => transform(
+    "function execute(value: number): u8 { return takeU8(value); }",
+    [{ name: "value", type: "number" }],
+    "u8",
+    { states: [], helpers: [{ name: "takeU8", parameters: [{ type: "U8" }], return_type: "U8" }] },
+  ),
+  /JAM1203/,
+);
+
+for (const sourceType of ["u8", "u16", "u32", "u64", "u128"]) {
+  for (const targetType of ["u8", "u16", "u32", "u64", "u128"]) {
+    const targetName = targetType[0].toUpperCase() + targetType.slice(1);
+    const text = transform(
+      `function execute(value: ${sourceType}): ${targetType} { return to${targetName}(value); }`,
+      [{ name: "value", type: sourceType }],
+      targetType,
+    );
+    if (sourceType === targetType) {
+      assert.doesNotMatch(text, /Identity/);
+    } else if (["u8", "u16", "u32"].includes(sourceType)) {
+      assert.match(text, new RegExp(`jam${targetName}FromNumber`));
+    } else if (sourceType === "u64" && targetType === "u128") {
+      assert.match(text, /jamU128FromU64/);
+    } else if (sourceType === "u128" && targetType === "u64") {
+      assert.match(text, /jamU64FromU128/);
+    } else {
+      assert.match(text, new RegExp(`jam${targetName}From${sourceType === "u64" ? "U64" : "U128"}`));
+    }
+  }
+}
+
+for (const targetType of ["u8", "u16", "u32", "u64", "u128"]) {
+  const targetName = targetType[0].toUpperCase() + targetType.slice(1);
+  const text = transform(
+    `function execute(value: number): ${targetType} { return to${targetName}(value); }`,
+    [{ name: "value", type: "number" }],
+    targetType,
+  );
+  assert.match(text, new RegExp(`jam${targetName}FromNumber`));
+}
 
 console.log("SCRIPTC_NUMERIC_TRANSFORM=PASS");

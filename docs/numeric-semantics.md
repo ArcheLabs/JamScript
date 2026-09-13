@@ -9,8 +9,12 @@ Unsigned arithmetic is checked for `u8`, `u16`, `u32`, `u64`, and `u128`.
 `+`, `-`, `*`, `/`, `%`, comparisons, and `+=`, `-=`, `*=` do not silently wrap.
 Division and modulo by zero are fatal. Fixed-width operands must have the same
 type; use an explicit checked `toU8`, `toU16`, `toU32`, `toU64`, or `toU128`
-conversion for a type change. Integer literals are contextual and are checked
+conversion for a type change. This rule also applies to assignment, returns,
+state/helper arguments, and record fields: a runtime `number` is never silently
+accepted as a fixed-width value. Integer literals are contextual and are checked
 from their source text, so values above `2^53` never pass through a JS number.
+TypeScript `as` assertions are not numeric casts; they are rejected for a
+fixed-width source or target except for a same-type no-op assertion.
 
 The runtime fatal codes are:
 
