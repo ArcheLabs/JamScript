@@ -220,13 +220,11 @@ unset JAMSCRIPT_DEV_TOOLCHAIN JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING
 unset JAMSCRIPT_MINIJAM_SDK JAMSCRIPT_CLANG JAMSCRIPT_LLVM_ROOT JAMSCRIPT_LLVM_AR JAMSCRIPT_LLVM_LD
 
 "${install}/jams" toolchain install
-doctor_json="${work_dir}/doctor.json"
-"${install}/jams" doctor --json >"${doctor_json}"
-grep -q '"canonical_build_readiness": "PASS"' "${doctor_json}"
-grep -q '"host_dependency_leakage": "PASS"' "${doctor_json}"
-grep -q "${JAMSCRIPT_TOOLCHAIN_HOME}" "${doctor_json}"
-echo "K7_DOCTOR=PASS"
-echo "K8_MANAGED_PATHS=PASS"
+"${install}/jams" toolchain verify
+grep -q "${JAMSCRIPT_TOOLCHAIN_HOME}" <("${install}/jams" toolchain path)
+test -x "${install}/jamscript-service-backend"
+echo "K7_TOOLCHAIN_VERIFY=PASS"
+echo "K8_BACKEND=PASS"
 
 apple_sdk_status="not-applicable"
 if [[ "${target}" == "macos-arm64" ]]; then

@@ -10,3 +10,4 @@ publish = false
 anyhow = "1.0.100"
 jamscript-toolchain = { path = "../../../crates/jamscript-toolchain" }
 toml = "0.8.23"
+zstd = "0.13.3"

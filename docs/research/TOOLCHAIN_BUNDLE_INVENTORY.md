@@ -45,7 +45,7 @@ built and before the bundle can be consumed by Release Kill Test 001.
 The installed consumer sets `CARGO_HOME` to an empty external directory. The
 guest build receives the bundle's own Cargo home and the ScriptC child process
 receives the bundle's `bin` directory, so bare `clang`/`ar` resolution cannot
-fall through to the host. `doctor --json` asserts that every managed path is
+fall through to the host. `jams toolchain verify` asserts that every managed path is
 under `JAMSCRIPT_TOOLCHAIN_HOME`.
 
 ## Managed process-tree audit

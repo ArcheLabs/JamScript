@@ -87,12 +87,12 @@ fi
 asset="jamscript-${version}-${platform}.tar.gz"
 release_base="https://github.com/${INSTALLER_REPOSITORY}/releases/download/${version}"
 tmp="$(mktemp -d)"
-new_path=''
+new_jams_path=''
+new_backend_path=''
 cleanup() {
   rm -rf "$tmp"
-  if [[ -n "$new_path" ]]; then
-    rm -f "$new_path"
-  fi
+  [[ -z "$new_jams_path" ]] || rm -f "$new_jams_path"
+  [[ -z "$new_backend_path" ]] || rm -f "$new_backend_path"
 }
 trap cleanup EXIT
 
@@ -145,6 +145,7 @@ extract="${tmp}/extract"
 mkdir -p "$extract"
 tar -xzf "$archive_path" -C "$extract"
 test -x "$extract/jams" || fail 'release archive does not contain an executable jams'
+test -x "$extract/jamscript-service-backend" || fail 'release archive does not contain an executable jamscript-service-backend'
 test -f "$extract/LICENSE" || fail 'release archive does not contain LICENSE'
 test -f "$extract/README.md" || fail 'release archive does not contain README.md'
 test ! -e "$extract/jamscript" || fail 'legacy jamscript executable unexpectedly present'
@@ -152,32 +153,30 @@ test ! -e "$extract/jamscript" || fail 'legacy jamscript executable unexpectedly
 mkdir -p "$bin_dir"
 bin_dir="$(cd "$bin_dir" && pwd -P)"
 installed_jams="${bin_dir}/jams"
-new_path="${bin_dir}/.jams.new.$$"
-install -m 0755 "$extract/jams" "$new_path"
-mv -f "$new_path" "$installed_jams"
-new_path=''
+installed_backend="${bin_dir}/jamscript-service-backend"
+new_jams_path="${bin_dir}/.jams.new.$$"
+new_backend_path="${bin_dir}/.jamscript-service-backend.new.$$"
+install -m 0755 "$extract/jams" "$new_jams_path"
+install -m 0755 "$extract/jamscript-service-backend" "$new_backend_path"
+mv -f "$new_jams_path" "$installed_jams"
+mv -f "$new_backend_path" "$installed_backend"
+new_jams_path=''
+new_backend_path=''
 
 printf 'JamScript installer\nRelease:  %s\nPlatform: %s\n\n' "$version" "$platform"
 printf 'CLI verified and installed at %s\n\n' "$installed_jams"
+printf 'Backend verified and installed at %s\n\n' "$installed_backend"
 printf 'Installing managed toolchain...\n'
 if ! "$installed_jams" toolchain install; then
   printf '\nJamScript CLI was installed at %s, but managed toolchain installation failed.\n' \
     "$installed_jams" >&2
-  printf 'Installation is incomplete.\n\nRetry:\n  %s toolchain install\n  %s doctor\n' \
+  printf 'Installation is incomplete.\n\nRetry:\n  %s toolchain install\n  %s toolchain verify\n' \
     "$installed_jams" "$installed_jams" >&2
   exit 1
 fi
 
-printf 'Running doctor...\n'
-if ! "$installed_jams" doctor; then
-  printf '\nJamScript CLI was installed at %s, but doctor failed.\n' "$installed_jams" >&2
-  printf 'Installation is incomplete.\n\nRetry:\n  %s toolchain install\n  %s doctor\n' \
-    "$installed_jams" "$installed_jams" >&2
-  exit 1
-fi
-
-printf '\nJamScript installation complete.\n\nCLI:\n  %s\n\nRelease:\n  %s\n\nPlatform:\n  %s\n\nManaged toolchain:\n  verified\n\nCanonical build readiness:\n  PASS\n' \
-  "$installed_jams" "$version" "$platform"
+printf '\nJamScript installation complete.\n\nCLI:\n  %s\nBackend:\n  %s\nRelease:\n  %s\nPlatform:\n  %s\n\nManaged toolchain:\n  installed and verified\n' \
+  "$installed_jams" "$installed_backend" "$version" "$platform"
 
 resolved_jams="$(command -v jams 2>/dev/null || true)"
 if [[ "$resolved_jams" != "$installed_jams" ]]; then
@@ -186,4 +185,4 @@ if [[ "$resolved_jams" != "$installed_jams" ]]; then
   printf 'Add the same line to your shell profile if needed.\n'
 fi
 
-printf '\nTry:\n  jams --help\n  jams new hello\n'
+printf '\nTry:\n  jams --help\n  jams new hello\n  jams build\n'

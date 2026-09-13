@@ -28,12 +28,26 @@ curl -fsSL \
 Then:
 
 ```bash
-jams doctor
+jams toolchain verify
 jams --help
 ```
 
 The installer does not modify shell profiles. If `~/.local/bin` is not on the
 current shell's `PATH`, export it as shown by the installer.
+
+## Local product installation
+
+Before a public release is available, Linux x86_64 contributors can build the
+local product once from this repository:
+
+```bash
+./tools/local-install.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+This installs both `jams` and `jamscript-service-backend`, imports the managed
+toolchain into the normal immutable cache, and verifies it. Consumer projects
+then use the installed `jams` command without compiling this repository.
 
 ## Manual installation
 
@@ -46,7 +60,7 @@ checksums, extract the CLI, and install the pinned bundle:
 sha256sum -c SHA256SUMS
 tar -xzf jamscript-v0.1.0-linux-x86_64.tar.gz
 ./jams toolchain install
-./jams doctor
+./jams toolchain verify
 ```
 
 On macOS, use `shasum -a 256 -c SHA256SUMS` and the matching
@@ -76,8 +90,8 @@ interpreter and prints `PVM_EXECUTION=PASS` on success.
 ## Build
 
 The canonical build installs the managed bundle once and then compiles without
-network access. `jams doctor` reports every resolved compiler path and
-fails when a canonical build cannot be satisfied.
+network access. `jams toolchain verify` checks the immutable managed bundle
+before a canonical build can use it.
 
 The release ABI uses a single typed descriptor for actions, managed state,
 queries, and clients.
@@ -115,7 +129,7 @@ cargo run --locked --bin jams -- new hello-jam
 cargo run --locked --bin jams -- check examples/counter
 cargo run --locked --bin jams -- build examples/counter
 cargo run --locked --bin jams -- toolchain status
-cargo run --locked --bin jams -- doctor
+cargo run --locked --bin jams -- toolchain verify
 ```
 
 ## Run

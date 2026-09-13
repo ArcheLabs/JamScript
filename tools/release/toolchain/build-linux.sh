@@ -7,6 +7,8 @@ SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "${ROOT}" log -1 --format=%ct)}
 NODE_BIN="${SCRIPTC_NODE:?set SCRIPTC_NODE to the exact Node binary}"
 LLVM_LOCK="${ROOT}/toolchains/llvm/linux-x86_64.lock"
 LLVM_LOCK_PARSER="${ROOT}/tools/release/toolchain/llvm-lock.py"
+SCRIPTC_LINUX_RANDOM="${ROOT}/toolchains/scriptc/compat/linux_random.c"
+SCRIPTC_LINUX_PATCH="${ROOT}/toolchains/scriptc/patches/0001-linux-old-glibc-secure-random.patch"
 LLVM_VERSION="$(python3 "${LLVM_LOCK_PARSER}" "${LLVM_LOCK}" --get llvm_version)"
 LLVM_DISTRIBUTION="$(python3 "${LLVM_LOCK_PARSER}" "${LLVM_LOCK}" --get distribution)"
 LLVM_ARCHIVE_SHA256="$(python3 "${LLVM_LOCK_PARSER}" "${LLVM_LOCK}" --get archive_sha256)"
@@ -62,6 +64,30 @@ copy_file "${ROOT}/Cargo.lock" Cargo.lock
 copy_file "${ROOT}/toolchains/polkavm.lock" toolchains/polkavm.lock
 copy_tree "${ROOT}/toolchains/polkavm-guest" toolchains/polkavm-guest
 copy_tree "${ROOT}/toolchains/scriptc" scriptc
+copy_file "${SCRIPTC_LINUX_RANDOM}" scriptc/node_modules/@scriptc/runtime/src/scr_linux.c
+test -f "${SCRIPTC_LINUX_PATCH}"
+command -v patch >/dev/null 2>&1 || {
+  echo "missing bundle input: patch" >&2
+  exit 1
+}
+RUNTIME_SRC="${STAGE}/scriptc/node_modules/@scriptc/runtime/src"
+COMPILER_CC="${STAGE}/scriptc/node_modules/@scriptc/compiler/dist/backend/cc.js"
+grep -Fq 'if (b->len > 0) arc4random_buf(b->data, b->len);' "${RUNTIME_SRC}/scr_bytes_io.c" || {
+  echo "ScriptC Linux compatibility patch precondition failed: scr_bytes_io.c" >&2
+  exit 1
+}
+grep -Fq 'arc4random_buf(r, sizeof r);' "${RUNTIME_SRC}/scr_lib.c" || {
+  echo "ScriptC Linux compatibility patch precondition failed: scr_lib.c" >&2
+  exit 1
+}
+grep -Fq 'targetPlatform(driver) === "win32" ? ["scr_win.c"]' "${COMPILER_CC}" || {
+  echo "ScriptC Linux compatibility patch precondition failed: cc.js" >&2
+  exit 1
+}
+patch --batch --forward --fuzz=0 --strip=0 --directory="${STAGE}" < "${SCRIPTC_LINUX_PATCH}"
+grep -Fq 'void jamscript_secure_random(void *buf, size_t n);' "${RUNTIME_SRC}/scr_runtime.h"
+grep -Fq '"scr_linux.c"' "${COMPILER_CC}"
+echo "SCRIPTC_LINUX_COMPAT_PATCH=PASS"
 copy_tree "${ROOT}/crates/jamscript-runtime-scriptc" runtime-scriptc
 copy_tree "${ROOT}/crates/jamscript-target-jam/sdk" targets/jam/sdk
 
@@ -174,7 +200,17 @@ python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
 find "${STAGE}" -type f -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
 find "${STAGE}" -type d -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
 ARCHIVE="${OUT}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
-(cd "${STAGE}" && tar --sort=name --numeric-owner --owner=0 --group=0 --mtime="@${SOURCE_DATE_EPOCH}" --zstd -cf "${ARCHIVE}" .)
+if command -v zstd >/dev/null 2>&1; then
+  (cd "${STAGE}" && tar --sort=name --numeric-owner --owner=0 --group=0 --mtime="@${SOURCE_DATE_EPOCH}" --zstd -cf "${ARCHIVE}" .)
+else
+  # The producer may run on a minimal development host without the zstd CLI.
+  # The archive remains the same tar.zst format and the managed CLI decodes it
+  # through its Rust implementation.
+  (cd "${STAGE}" && tar --sort=name --numeric-owner --owner=0 --group=0 --mtime="@${SOURCE_DATE_EPOCH}" -cf - .) | \
+    CARGO_TARGET_DIR="${OUT}/.cargo-target" "${CARGO_BIN}" run --quiet --locked \
+      --manifest-path "${ROOT}/tools/release/toolchain/Cargo.toml" \
+      --bin compress-zstd -- "${ARCHIVE}"
+fi
 sha256sum "${ARCHIVE}"
 stat -c '%s' "${ARCHIVE}"
 cp -L "${STAGE}/manifest.json" "${OUT}/toolchain-manifest.json"
