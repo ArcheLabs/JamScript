@@ -140,7 +140,7 @@ pub struct BuilderNativeModuleMetadata {
 #[derive(Clone, Debug, Serialize)]
 struct ProtocolBoundaryV0 {
     release_channel: &'static str,
-    language: &'static str,
+    language: String,
     signed_action: &'static str,
     #[serde(rename = "signedActionVersion")]
     signed_action_version: u8,
@@ -262,7 +262,7 @@ impl JamTarget {
             output_dir.join("protocol-v0.json"),
             serde_json::to_vec_pretty(&ProtocolBoundaryV0 {
                 release_channel: "testnet-developer-preview",
-                language: "0.2",
+                language: ir.language_version.clone(),
                 signed_action: "SignedActionV1",
                 signed_action_version: 1,
                 application_abi: 1,
@@ -273,7 +273,7 @@ impl JamTarget {
                 builder_artifact: 1,
             })?,
         )?;
-        let abi = abi_for_language(ir, "0.2")?;
+        let abi = abi_for_language(ir, &ir.language_version)?;
         fs::write(
             output_dir.join("service.abi.json"),
             serde_json::to_vec_pretty(&abi)?,
@@ -457,7 +457,7 @@ impl JamTarget {
             native_metadata,
             artifacts,
             Some(scriptc.metadata.clone()),
-            "0.2",
+            &ir.language_version,
             self.toolchain.as_ref(),
         );
         fs::write(
@@ -481,6 +481,7 @@ impl JamTarget {
             "scriptc/scriptc_service.json",
             "scriptc/scriptc_service.transformed.ts",
             "scriptc/scriptc_runtime.ts",
+            "scriptc/jamscript_numeric_runtime.ts",
             "scriptc/scriptc_service.profile.json",
             "scriptc/scriptc_service.lib.c",
             "scriptc/scriptc_service_adapter.c",

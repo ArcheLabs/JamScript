@@ -1,7 +1,8 @@
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
 
-pub const LANGUAGE_VERSION: &str = "0.2";
+pub const LANGUAGE_VERSION: &str = "0.3";
+pub const LEGACY_LANGUAGE_VERSION: &str = "0.2";
 pub const ABI_VERSION: u32 = 1;
 pub const ACTION_DOMAIN: &[u8] = b"jamscript/action/v1:";
 pub const MAX_ACTION_PAYLOAD_BYTES: u32 = 1_000_000;
@@ -11,6 +12,11 @@ pub const NATIVE_ABI_VERSION: u32 = 1;
 pub struct ServiceIr {
     pub package_name: String,
     pub package_version: String,
+    /// Source-language semantics selected by the project manifest.  This is
+    /// separate from ABI_VERSION because 0.3 changes checked arithmetic while
+    /// retaining the canonical wire representation.
+    #[serde(default = "default_language_version")]
+    pub language_version: String,
     /// Original TypeScript compilation unit retained for the opt-in ScriptC
     /// backend. Legacy consumers continue to use the structured IR fields.
     #[serde(default)]
@@ -19,6 +25,10 @@ pub struct ServiceIr {
     pub actions: Vec<ActionIr>,
     pub queries: Vec<QueryIr>,
     pub native_imports: Vec<NativeImportIr>,
+}
+
+fn default_language_version() -> String {
+    LEGACY_LANGUAGE_VERSION.into()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -680,6 +690,7 @@ mod tests {
         let abi = abi_for(&ServiceIr {
             package_name: "game".into(),
             package_version: "0.1.0".into(),
+            language_version: LEGACY_LANGUAGE_VERSION.into(),
             source: String::new(),
             states: Vec::new(),
             actions: vec![ActionIr {
@@ -713,6 +724,7 @@ mod tests {
         let ir = ServiceIr {
             package_name: "future".into(),
             package_version: "0.1.0".into(),
+            language_version: LEGACY_LANGUAGE_VERSION.into(),
             source: String::new(),
             states: Vec::new(),
             actions: vec![ActionIr {
@@ -741,6 +753,7 @@ mod tests {
         let ir = ServiceIr {
             package_name: "states".into(),
             package_version: "0.1.0".into(),
+            language_version: LEGACY_LANGUAGE_VERSION.into(),
             source: String::new(),
             states: vec![
                 StateIr {

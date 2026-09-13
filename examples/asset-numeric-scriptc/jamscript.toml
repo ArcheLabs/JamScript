@@ -1,0 +1,11 @@
+[package]
+name = "asset-numeric-scriptc"
+version = "0.3.0"
+entry = "src/service.ts"
+language = "0.3"
+
+[compiler]
+backend = "scriptc"
+
+[target.jam]
+genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"

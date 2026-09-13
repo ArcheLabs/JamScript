@@ -36,6 +36,21 @@ test("shared ABI vectors are consumed by the TypeScript codec", () => {
   }
 });
 
+test("wide integers preserve bigint precision through action/state codec paths", () => {
+  const value = 1000000000000000000000000000n;
+  const encoded = encodeValue("u128", value);
+  assert.equal(typeof decodeValue("u128", encoded), "bigint");
+  assert.equal(decodeValue("u128", encoded), value);
+  const stateType = { kind: "record", fields: [
+    { name: "nonce", type: { kind: "u64" } },
+    { name: "balance", type: { kind: "u128" } },
+  ] };
+  const state = { nonce: 18446744073709551615n, balance: value };
+  assert.deepEqual(decodeValue(stateType, encodeValue(stateType, state)), state);
+  console.log("JS_U64_BIGINT=PASS");
+  console.log("JS_U128_BIGINT=PASS");
+});
+
 test("sequence boundaries use JAM natural encoding", () => {
   const cases = new Map([
     [0, [0x00]], [1, [0x01]], [127, [0x7f]], [128, [0x80, 0x80]],
