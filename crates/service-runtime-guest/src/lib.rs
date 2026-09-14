@@ -13,12 +13,36 @@ use service_runtime_core::{
 };
 use service_runtime_state::ProofState;
 
+/// Fixed production arena budget for one guest invocation.
+pub const GUEST_HEAP_LIMIT: usize = 256 * 1024;
+
+#[cfg(any(target_env = "polkavm", test))]
+#[inline]
+fn bump_allocation_range(offset: usize, layout: core::alloc::Layout) -> (usize, usize) {
+    let alignment_mask = layout.align() - 1;
+    let aligned_offset = offset.saturating_add(alignment_mask) & !alignment_mask;
+    let end = aligned_offset.saturating_add(layout.size());
+    (aligned_offset, end)
+}
+
+#[cfg(test)]
+#[inline]
+fn try_bump_allocation(
+    offset: usize,
+    heap_size: usize,
+    layout: core::alloc::Layout,
+) -> Option<(usize, usize)> {
+    let range = bump_allocation_range(offset, layout);
+    (range.1 <= heap_size).then_some(range)
+}
+
 #[cfg(target_env = "polkavm")]
 pub mod guest_support {
     use super::{
-        RefineObserver, STAGE_APPLICATION, STAGE_APPLICATION_COMMIT, STAGE_APPLICATION_COMMITTED,
-        STAGE_APPLICATION_DONE, STAGE_FINISH, STAGE_FINISH_DONE, STAGE_FIRST_TRIE_GET,
-        STAGE_PROOF_READY, STAGE_PROOF_STATE, STAGE_STATE_ERROR,
+        bump_allocation_range, RefineObserver, GUEST_HEAP_LIMIT, STAGE_APPLICATION,
+        STAGE_APPLICATION_COMMIT, STAGE_APPLICATION_COMMITTED, STAGE_APPLICATION_DONE,
+        STAGE_FINISH, STAGE_FINISH_DONE, STAGE_FIRST_TRIE_GET, STAGE_PROOF_READY,
+        STAGE_PROOF_STATE, STAGE_STATE_ERROR,
     };
     use core::alloc::{GlobalAlloc, Layout};
 
@@ -27,7 +51,7 @@ pub mod guest_support {
     const HEAP_SIZE: usize = if cfg!(feature = "diagnostic") {
         16 * 1024 * 1024
     } else {
-        64 * 1024
+        GUEST_HEAP_LIMIT
     };
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     static mut HEAP_OFFSET: usize = 0;
@@ -47,19 +71,29 @@ pub mod guest_support {
     static mut REQUESTED_BYTES: usize = 0;
     #[cfg(feature = "diagnostic")]
     static mut HIGH_WATER_MARK: usize = 0;
+    #[cfg(feature = "diagnostic")]
+    static mut FAILED_REQUEST_BYTES: usize = 0;
+    #[cfg(feature = "diagnostic")]
+    static mut FAILED_OFFSET: usize = 0;
+    #[cfg(feature = "diagnostic")]
+    static mut FAILED_END: usize = 0;
 
     struct RuntimeAllocator;
 
     unsafe impl GlobalAlloc for RuntimeAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             let base = HEAP.as_mut_ptr() as usize;
-            let offset = (HEAP_OFFSET + layout.align() - 1) & !(layout.align() - 1);
-            let end = offset.saturating_add(layout.size());
+            let (offset, end) = bump_allocation_range(HEAP_OFFSET, layout);
             if end > HEAP_SIZE {
                 #[cfg(feature = "diagnostic")]
-                diagnostic_trap(0xE001);
+                {
+                    FAILED_REQUEST_BYTES = layout.size();
+                    FAILED_OFFSET = offset;
+                    FAILED_END = end;
+                    diagnostic_trap(0xE001);
+                }
                 #[cfg(not(feature = "diagnostic"))]
-                return core::ptr::null_mut();
+                abort();
             }
             #[cfg(feature = "diagnostic")]
             {
@@ -90,6 +124,9 @@ pub mod guest_support {
                 ALLOCATION_COUNT = 0;
                 REQUESTED_BYTES = 0;
                 HIGH_WATER_MARK = 0;
+                FAILED_REQUEST_BYTES = 0;
+                FAILED_OFFSET = 0;
+                FAILED_END = 0;
             }
         }
     }
@@ -121,7 +158,7 @@ pub mod guest_support {
     fn diagnostic_metrics(stage: &[u8]) {
         let mut args = [0u64; 6];
         let gas_remaining = unsafe { minijam_host_call(0, args.as_ptr()) };
-        let mut message = [0u8; 192];
+        let mut message = [0u8; 256];
         let mut offset = 0usize;
 
         append_bytes(&mut message, &mut offset, b"jamscript:metrics stage=");
@@ -134,6 +171,12 @@ pub mod guest_support {
         append_decimal(&mut message, &mut offset, unsafe { REQUESTED_BYTES });
         append_bytes(&mut message, &mut offset, b" high_water_mark=");
         append_decimal(&mut message, &mut offset, unsafe { HIGH_WATER_MARK });
+        append_bytes(&mut message, &mut offset, b" failed_request_bytes=");
+        append_decimal(&mut message, &mut offset, unsafe { FAILED_REQUEST_BYTES });
+        append_bytes(&mut message, &mut offset, b" failed_offset=");
+        append_decimal(&mut message, &mut offset, unsafe { FAILED_OFFSET });
+        append_bytes(&mut message, &mut offset, b" failed_end=");
+        append_decimal(&mut message, &mut offset, unsafe { FAILED_END });
 
         args[0] = 1;
         args[3] = message.as_ptr() as usize as u64;
@@ -276,7 +319,7 @@ pub mod guest_support {
     #[cfg(not(feature = "diagnostic"))]
     #[panic_handler]
     fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-        loop {}
+        unsafe { abort() }
     }
 
     pub struct DiagnosticObserver;
@@ -432,6 +475,25 @@ pub mod guest_support {
     pub struct DiagnosticObserver;
     pub fn diagnostic_stage(_message: &'static [u8]) {}
     pub fn reset_runtime() {}
+}
+
+#[cfg(test)]
+mod allocator_tests {
+    use super::{try_bump_allocation, GUEST_HEAP_LIMIT};
+    use core::alloc::Layout;
+
+    #[test]
+    fn production_arena_exhaustion_is_bounded_without_hang() {
+        assert_eq!(GUEST_HEAP_LIMIT, 262_144);
+
+        // This models the top-level runtime allocation repro: once the shared
+        // arena is full, the next allocation must fail as a bounded decision.
+        let almost_full = Layout::from_size_align(GUEST_HEAP_LIMIT - 32, 8).unwrap();
+        let (_, used) = try_bump_allocation(0, GUEST_HEAP_LIMIT, almost_full).unwrap();
+        let final_allocation = Layout::from_size_align(64, 8).unwrap();
+
+        assert!(try_bump_allocation(used, GUEST_HEAP_LIMIT, final_allocation).is_none());
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
