@@ -250,7 +250,17 @@ function decodeExpression(type, cursor, lines, next) {
     return value;
   }
   if (kind === "Record") {
-    const fields = data.fields.map((field) => `${field.name}: ${decodeExpression(field.ty, cursor, lines, next)}`);
+    // Decode every field into a local in declaration order. Dynamic values
+    // need setup statements for their length and payload, so putting those
+    // statements in one prelude would consume the cursor before preceding
+    // fixed-width fields. The locals also preserve the original field order
+    // when the record is reconstructed below.
+    const fields = data.fields.map((field) => {
+      const value = next();
+      const expression = decodeExpression(field.ty, cursor, lines, next);
+      lines.push(`const ${value} = ${expression};`);
+      return `${field.name}: ${value}`;
+    });
     return `{ ${fields.join(", ")} }`;
   }
   throw new Error(`ScriptC M2 refuses unsupported executable codec type ${kind}`);
