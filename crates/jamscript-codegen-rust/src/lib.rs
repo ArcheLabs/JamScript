@@ -699,6 +699,9 @@ fn payload_decoder(action: &ActionIr) -> Result<String, String> {
             TypeIr::Address => {
                 reads.push(format!("let {variable} = reader.fixed_bytes(32usize)?;"))
             }
+            TypeIr::Ownership => reads.push(format!(
+                "let {variable} = jamscript_runtime_core::decode_ownership(reader.bounded_bytes(4096usize)?).map_err(|_| ())?;"
+            )),
             _ => {
                 return Err(format!(
                     "unsupported action input type for `{}`",
@@ -720,6 +723,7 @@ fn payload_decoder(action: &ActionIr) -> Result<String, String> {
             | TypeIr::String { .. }
             | TypeIr::FixedBytes { .. }
             | TypeIr::Address => "&[u8]",
+            TypeIr::Ownership => "jamscript_runtime_core::Ownership",
             _ => "()",
         })
         .collect::<Vec<_>>()
@@ -819,6 +823,23 @@ fn application_body(
             &marker("application-nonce-writing"),
             "context.state().set(&nonce_key, &next_nonce.to_le_bytes())?;",
             &marker("application-nonce-written"),
+            "let input = verified.payload;",
+        ].join(" "),
+        AuthKind::Ownership => [
+            "let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action).map_err(|_| StateAccessError::Backend)?;",
+            &marker("application-auth-decoded"),
+            "let nonce_owner = signed.act_as.as_ref().unwrap_or(&signed.controller);",
+            "let nonce_key = jamscript_runtime_core::ownership_nonce_key(nonce_owner).map_err(|_| StateAccessError::Backend)?;",
+            "let nonce_bytes = context.state().get(&nonce_key)?.unwrap_or_default();",
+            "let expected_nonce = match nonce_bytes.as_slice() { [] => 0u64, bytes if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?), _ => return Err(StateAccessError::Backend) };",
+            "let claim_key = if let Some(owner) = signed.act_as.as_ref() { Some(jamscript_runtime_core::control_claim_key(owner, &signed.controller).map_err(|_| StateAccessError::Backend)?) } else { None };",
+            "let active_control_claim = match claim_key.as_ref() { Some(key) => matches!(context.state().get(key)?.as_deref(), Some([1])), None => false };",
+            "let verified = jamscript_runtime_core::verify_signed_action_v2(signed, NETWORK_DOMAIN, SERVICE_KEY, ACTION_SELECTOR, Some(expected_nonce), active_control_claim).map_err(|_| StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::InvalidOwnershipAuthorization.code()))?;",
+            "context.set_ownership(verified.owner.clone(), verified.controller.clone());",
+            "context.constrain_valid_until(verified.valid_until);",
+            "let next_nonce = expected_nonce.checked_add(1).ok_or(StateAccessError::Backend)?;",
+            "context.state().set(&nonce_key, &next_nonce.to_le_bytes())?;",
+            "let sender = verified.owner.public.as_slice();",
             "let input = verified.payload;",
         ].join(" ")
     };

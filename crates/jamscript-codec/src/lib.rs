@@ -6,6 +6,7 @@
 //! second wire format for actions or state.
 
 use jamscript_ir::TypeIr;
+use ownership_core::Ownership;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -15,6 +16,7 @@ pub enum Value {
     Unsigned(u128),
     Signed(i128),
     Bytes(Vec<u8>),
+    Ownership(Ownership),
     String(String),
     Array(Vec<Value>),
     Tuple(Vec<Value>),
@@ -108,6 +110,9 @@ fn encode_into(ty: &TypeIr, value: &Value, out: &mut Vec<u8>) -> Result<(), Code
         }
         (TypeIr::I128, Value::Signed(value)) => push_signed(out, *value, i128::MIN, i128::MAX, 16)?,
         (TypeIr::Address, Value::Bytes(value)) if value.len() == 32 => out.extend(value),
+        (TypeIr::Ownership, Value::Ownership(value)) => {
+            out.extend(value.encode().map_err(|_| CodecError::InvalidLength)?);
+        }
         (TypeIr::FixedBytes { len }, Value::Bytes(value)) if value.len() == *len as usize => {
             out.extend(value)
         }
@@ -295,6 +300,21 @@ fn decode_from(ty: &TypeIr, reader: &mut Reader<'_>) -> Result<Value, CodecError
             reader.take(16)?.try_into().unwrap(),
         ))),
         TypeIr::Address => Ok(Value::Bytes(reader.take(32)?.to_vec())),
+        TypeIr::Ownership => {
+            let start = reader.offset;
+            let _version = reader.u8()?;
+            let _kind = reader.u8()?;
+            let length = u16::from_le_bytes(
+                reader
+                    .take(2)?
+                    .try_into()
+                    .map_err(|_| CodecError::InvalidLength)?,
+            ) as usize;
+            reader.take(length)?;
+            Ownership::decode(&reader.bytes[start..reader.offset])
+                .map(Value::Ownership)
+                .map_err(|_| CodecError::InvalidLength)
+        }
         TypeIr::FixedBytes { len } => Ok(Value::Bytes(reader.take(*len as usize)?.to_vec())),
         TypeIr::Bytes { max } => {
             let len = usize::try_from(reader.natural()?).map_err(|_| CodecError::InvalidLength)?;
@@ -472,6 +492,7 @@ mod tests {
             "i64" => TypeIr::I64,
             "i128" => TypeIr::I128,
             "address" => TypeIr::Address,
+            "ownership" => TypeIr::Ownership,
             "fixedBytes" => TypeIr::FixedBytes {
                 len: object["len"].as_u64().unwrap() as u32,
             },
@@ -550,6 +571,10 @@ mod tests {
             TypeIr::Address | TypeIr::FixedBytes { .. } | TypeIr::Bytes { .. } => {
                 Value::Bytes(hex::decode(value.as_str().unwrap()).unwrap())
             }
+            TypeIr::Ownership => Value::Ownership(
+                ownership_core::Ownership::decode(&hex::decode(value.as_str().unwrap()).unwrap())
+                    .unwrap(),
+            ),
             TypeIr::String { .. } => Value::String(value.as_str().unwrap().into()),
             TypeIr::FixedArray { item, .. } | TypeIr::Array { item, .. } => Value::Array(
                 value

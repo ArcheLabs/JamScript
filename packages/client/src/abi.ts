@@ -1,5 +1,5 @@
 export type AbiTypeDescriptor =
-  | { kind: "unit" | "bool" | "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128" | "address" }
+  | { kind: "unit" | "bool" | "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128" | "address" | "ownership" }
   | { kind: "fixedBytes"; len: number }
   | { kind: "bytes" | "string"; max: number }
   | { kind: "fixedArray"; item: AbiTypeDescriptor; len: number }
@@ -15,7 +15,7 @@ export type AbiField = { name: string; type: AbiTypeRef };
 export type AbiAction = {
   name: string;
   selector: string;
-  auth: string;
+  auth: string | { kind: "ownership"; version: 1 };
   input: AbiField[];
   executeOutput: AbiTypeRef;
 };

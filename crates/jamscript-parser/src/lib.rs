@@ -237,6 +237,7 @@ fn collect_import(
                 "action"
                     | "wallet"
                     | "publicAction"
+                    | "ownership"
                     | "unit"
                     | "bool"
                     | "u8"
@@ -336,12 +337,19 @@ fn parse_auth(expr: &Expr) -> Result<AuthKind, ParseError> {
         unreachable!()
     };
     if !call.args.is_empty() {
-        return Err(diag("1019", "auth must be wallet() or publicAction()"));
+        return Err(diag(
+            "1019",
+            "auth must be wallet(), ownership(), or publicAction()",
+        ));
     }
     match name.as_str() {
         "wallet" => Ok(AuthKind::Wallet),
+        "ownership" => Ok(AuthKind::Ownership),
         "publicAction" => Ok(AuthKind::Public),
-        _ => Err(diag("1019", "auth must be wallet() or publicAction()")),
+        _ => Err(diag(
+            "1019",
+            "auth must be wallet(), ownership(), or publicAction()",
+        )),
     }
 }
 
@@ -394,6 +402,7 @@ fn parse_type(
             "i64" => Ok(TypeIr::I64),
             "i128" => Ok(TypeIr::I128),
             "address" => Ok(TypeIr::Address),
+            "ownership" => Ok(TypeIr::Ownership),
             other => Err(diag("1023", format!("unsupported ABI type `{other}`"))),
         };
     }
@@ -851,6 +860,26 @@ export const increment = action({ auth: wallet(), input: { value: u64 }, execute
         let source = r#"import { action, publicAction, u64 } from "jam"; export const increment = action({ auth: publicAction(), input: { value: u64 }, execute(ctx, input) { return input.value + 1; } });"#;
         let ir = parse_service_v02(source, "counter", "0.2.0", &[]).unwrap();
         assert_eq!(ir.actions[0].auth, AuthKind::Public);
+    }
+
+    #[test]
+    fn parses_ownership_auth_and_ownership_value_type() {
+        let source = r#"import { action, ownership } from "jam"; export const transfer = action({ auth: ownership(), input: { to: ownership }, execute(ctx, input) {} });"#;
+        let ir = parse_service_v02(source, "ownership", "1.0.0", &[]).unwrap();
+        assert_eq!(ir.actions[0].auth, AuthKind::Ownership);
+        assert_eq!(ir.actions[0].input[0].ty, TypeIr::Ownership);
+        let abi = jamscript_ir::abi_for(&ir).unwrap();
+        assert_eq!(
+            abi.actions[0].auth,
+            jamscript_ir::AbiAuth::Ownership {
+                kind: "ownership".into(),
+                version: 1
+            }
+        );
+        assert_eq!(
+            abi.actions[0].input[0].ty,
+            jamscript_ir::AbiTypeDescriptor::Ownership
+        );
     }
 
     #[test]

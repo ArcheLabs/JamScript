@@ -1262,6 +1262,7 @@ struct PendingAction {
     action: Vec<u8>,
     sender: Option<[u8; 32]>,
     nonce: Option<u64>,
+    nonce_storage_key: Option<Vec<u8>>,
     arrival_sequence: u64,
     params: Value,
     extrinsics: Vec<String>,
@@ -1408,16 +1409,27 @@ impl TransactionCoordinator {
         id_input.extend_from_slice(&current.to_le_bytes());
         id_input.extend_from_slice(&action);
         let logical_id = hash_hex(&service_runtime_core::blake2_256(&id_input));
-        let (sender, nonce) = jamscript_runtime_core::decode_signed_action_v1(&action)
-            .ok()
-            .and_then(|signed| {
-                (signed.public_key.len() == 32).then(|| {
+        let (sender, nonce, nonce_storage_key) =
+            if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v1(&action) {
+                if signed.public_key.len() == 32 {
                     let mut sender = [0u8; 32];
                     sender.copy_from_slice(signed.public_key);
-                    (Some(sender), Some(signed.nonce))
-                })
-            })
-            .unwrap_or((None, None));
+                    (
+                        Some(sender),
+                        Some(signed.nonce),
+                        Some(jamscript_runtime_core::nonce_key(&sender)),
+                    )
+                } else {
+                    (None, None, None)
+                }
+            } else if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v2(&action) {
+                let owner = signed.act_as.as_ref().unwrap_or(&signed.controller);
+                let sender = owner.key().ok();
+                let nonce_key = jamscript_runtime_core::ownership_nonce_key(owner).ok();
+                (sender, Some(signed.nonce), nonce_key)
+            } else {
+                (None, None, None)
+            };
         let arrival_sequence = state.next_arrival_sequence;
         state.next_arrival_sequence = state.next_arrival_sequence.saturating_add(1);
         let extrinsics = params
@@ -1451,6 +1463,7 @@ impl TransactionCoordinator {
                 action,
                 sender,
                 nonce,
+                nonce_storage_key,
                 arrival_sequence,
                 params,
                 extrinsics,
@@ -1479,14 +1492,14 @@ impl TransactionCoordinator {
         Ok(queue != 0 && (queue >= self.max_actions || deadline_reached))
     }
 
-    fn pending_senders(&self, service_id: u32) -> Vec<[u8; 32]> {
+    fn pending_senders(&self, service_id: u32) -> Vec<([u8; 32], Vec<u8>)> {
         self.state
             .lock()
             .ok()
             .and_then(|state| state.queued.get(&service_id).cloned())
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|item| item.sender)
+            .filter_map(|item| item.sender.zip(item.nonce_storage_key))
             .collect()
     }
 
@@ -1778,6 +1791,22 @@ impl BackendEngine {
                     let nonce_key = jamscript_runtime_core::nonce_key(&sender);
                     if !keys.contains(&nonce_key) {
                         keys.push(nonce_key);
+                    }
+                }
+            } else if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v2(action) {
+                let owner = signed.act_as.as_ref().unwrap_or(&signed.controller);
+                if let Ok(nonce_key) = jamscript_runtime_core::ownership_nonce_key(owner) {
+                    if !keys.contains(&nonce_key) {
+                        keys.push(nonce_key);
+                    }
+                }
+                if let Some(subject) = signed.act_as.as_ref() {
+                    if let Ok(claim_key) =
+                        jamscript_runtime_core::control_claim_key(subject, &signed.controller)
+                    {
+                        if !keys.contains(&claim_key) {
+                            keys.push(claim_key);
+                        }
                     }
                 }
             }
@@ -3022,14 +3051,13 @@ impl BackendRpcHandler {
             return Err(BackendError::StateNotMaterialized);
         }
         let mut expected = BTreeMap::new();
-        for sender in senders {
+        for (sender, nonce_key) in senders {
             if expected.contains_key(&sender) {
                 continue;
             }
-            let key = jamscript_runtime_core::nonce_key(&sender);
             let value = state
                 .provider
-                .value_at(record.service_key, root, &key)
+                .value_at(record.service_key, root, &nonce_key)
                 .map_err(BackendError::Provider)?;
             let nonce = match value {
                 None => 0,
@@ -4200,6 +4228,7 @@ mod tests {
             action: vec![action],
             sender: sender.map(|value| [value; 32]),
             nonce,
+            nonce_storage_key: sender.map(|value| jamscript_runtime_core::nonce_key(&[value; 32])),
             arrival_sequence,
             params: json!({"extrinsicsBase64": []}),
             extrinsics: Vec::new(),

@@ -3,16 +3,21 @@ import { decodeStateValue, decodeValue, encodeActionPayload, encodeValue, type C
 import {
   actionSelector,
   encodeSignedActionV1,
+  encodeSignedActionV2,
   MANAGED_STATE_COMMITMENT_KEY_V1,
   nonceKey,
+  ownershipNonceKey,
   parseHex,
   signingDigestV1,
+  signingMessageV2,
   stateKey,
   toHex,
   type SignedActionV1,
+  type Ownership,
+  type SignedActionV2,
 } from "./crypto.js";
 import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
-import type { JamSigner } from "./signer.js";
+import type { JamSigner, OwnershipSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
 import {
@@ -122,6 +127,63 @@ export class JamScriptClient {
     } finally {
       release();
       if (this.signerTails.get(signerKey) === lane) this.signerTails.delete(signerKey);
+    }
+  }
+
+  async submitOwnershipAction(
+    actionName: string,
+    input: Record<string, CodecValue>,
+    signer: OwnershipSigner,
+    options: { actAs?: Ownership; ttl?: bigint; extrinsics?: Uint8Array[] } = {},
+  ): Promise<SubmitActionResult> {
+    const controller = await signer.getController();
+    const signerLane = toHex(controller.public).toLowerCase();
+    const previous = this.signerTails.get(signerLane) ?? Promise.resolve();
+    let release!: () => void;
+    const lane = new Promise<void>((resolve) => { release = resolve; });
+    this.signerTails.set(signerLane, lane);
+    await previous;
+    try {
+      await this.validateDeployment();
+      const action = actionByName(this.deployment.abi, actionName);
+      if (!isOwnershipAuth(action.auth)) throw new Error("submitOwnershipAction requires an ownership-authenticated action");
+      const payload = encodeActionPayload(this.deployment.abi, actionName, input);
+      const selector = actionSelector(actionName);
+      if (!sameHex(toHex(selector), action.selector)) throw new Error("deployment ABI selector does not match the canonical selector");
+      const context = await this.rpc.finalizedContext();
+      const effectiveOwner = options.actAs ?? controller;
+      const root = await this.managedStateRoot(context);
+      const nonceBytes = await this.readManagedValue(root, ownershipNonceKey(effectiveOwner));
+      const chainNonce = nonceBytes === null ? 0n : decodeValue("u64", nonceBytes);
+      if (typeof chainNonce !== "bigint") throw new Error("ownership nonce storage is not u64");
+      const unsigned: Omit<SignedActionV2, "authorizationProof"> = {
+        version: 2,
+        networkDomain: parseHex(this.deployment.genesisHash, 32),
+        serviceKey: parseHex(this.deployment.serviceKey, 32),
+        actionSelector: selector,
+        controller,
+        actAs: options.actAs ?? null,
+        nonce: chainNonce,
+        validUntil: BigInt(context.slot) + (options.ttl ?? 64n),
+        payloadHash: blake2(payload),
+        payload,
+      };
+      const message = signingMessageV2(unsigned);
+      const authorizationProof = await signer.signJamScriptAction({ ...unsigned, message });
+      if (authorizationProof.length === 0 || authorizationProof.length > 65536) throw new Error("invalid Ownership authorization proof");
+      const signed = encodeSignedActionV2({ ...unsigned, authorizationProof });
+      const actionHash = toHex(blake2(signed));
+      const submitted = await this.rpc.submitTransaction({
+        serviceId: this.deployment.serviceId,
+        serviceCodeHash: this.deployment.codeHash,
+        payloadBase64: toBase64(signed),
+        extrinsicsBase64: (options.extrinsics ?? []).map(toBase64),
+      });
+      this.actionHashes.set(submitted.transactionId.toLowerCase(), actionHash);
+      return { ...submitted, actionHash };
+    } finally {
+      release();
+      if (this.signerTails.get(signerLane) === lane) this.signerTails.delete(signerLane);
     }
   }
 
@@ -316,6 +378,10 @@ export class JamScriptClient {
 
 function isUnitType(type: string | { kind: string }): boolean {
   return typeof type === "string" ? type === "unit" : type.kind === "unit";
+}
+
+function isOwnershipAuth(auth: string | { kind: "ownership"; version: 1 }): auth is { kind: "ownership"; version: 1 } {
+  return typeof auth === "object" && auth.kind === "ownership" && auth.version === 1;
 }
 
 function blake2(bytes: Uint8Array): Uint8Array {

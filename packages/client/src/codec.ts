@@ -1,4 +1,5 @@
 import type { AbiTypeDescriptor, AbiTypeRef, JamScriptAbi } from "./abi.js";
+import { decodeOwnership, encodeOwnership, type Ownership } from "./crypto.js";
 
 export type CodecValue = null | undefined | bigint | number | boolean | string | Uint8Array | CodecValue[] | { [key: string]: CodecValue };
 
@@ -25,7 +26,7 @@ function descriptor(type: AbiTypeRef): AbiTypeDescriptor {
   if (typeof type !== "string") return type;
   const bounded = /^(Bytes|bytes|String|string)<([0-9]+)>$/.exec(type); if (bounded) return { kind: bounded[1].toLowerCase() === "bytes" ? "bytes" : "string", max: Number(bounded[2]) };
   const fixed = /^(FixedBytes|fixedBytes)<([0-9]+)>$/.exec(type); if (fixed) return { kind: "fixedBytes", len: Number(fixed[2]) };
-  if (["unit", "bool", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "address"].includes(type)) return { kind: type as AbiTypeDescriptor["kind"] } as AbiTypeDescriptor;
+  if (["unit", "bool", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "address", "ownership"].includes(type)) return { kind: type as AbiTypeDescriptor["kind"] } as AbiTypeDescriptor;
   throw new Error("unsupported ABI type: " + type);
 }
 
@@ -45,6 +46,7 @@ function encode(type: AbiTypeRef, value: CodecValue, writer: Writer): void {
     case "i64": writer.push(le(integer(value, -(1n << 63n), (1n << 63n) - 1n, "i64"), 8)); return;
     case "i128": writer.push(le(integer(value, -(1n << 127n), (1n << 127n) - 1n, "i128"), 16)); return;
     case "address": { const data = asBytes(value); if (data.length !== 32) throw new Error("address must be 32 bytes"); writer.push(data); return; }
+    case "ownership": { if (value === null || typeof value !== "object" || Array.isArray(value) || value instanceof Uint8Array) throw new Error("ownership must be an Ownership object"); writer.push(encodeOwnership(value as Ownership)); return; }
     case "fixedBytes": { const data = asBytes(value); if (data.length !== ty.len) throw new Error(`fixedBytes length must be ${ty.len}`); writer.push(data); return; }
     case "bytes": { const data = asBytes(value); if (data.length > ty.max) throw new Error("bytes value exceeds its bound"); writer.push(compact(BigInt(data.length))); writer.push(data); return; }
     case "string": { if (typeof value !== "string") throw new Error("string must be a string"); const data = new TextEncoder().encode(value); if (data.length > ty.max) throw new Error("string value exceeds its UTF-8 byte bound"); writer.push(compact(BigInt(data.length))); writer.push(data); return; }
@@ -62,7 +64,7 @@ function decode(reader: Reader, type: AbiTypeRef): CodecValue { const ty = descr
   case "unit": return undefined; case "bool": { const value = reader.u8(); if (value > 1) throw new Error("invalid bool value"); return value === 1; }
   case "u8": return Number(readLe(reader, 1, false)); case "u16": return Number(readLe(reader, 2, false)); case "u32": return Number(readLe(reader, 4, false)); case "u64": return readLe(reader, 8, false); case "u128": return readLe(reader, 16, false);
   case "i8": return Number(readLe(reader, 1, true)); case "i16": return Number(readLe(reader, 2, true)); case "i32": return Number(readLe(reader, 4, true)); case "i64": return readLe(reader, 8, true); case "i128": return readLe(reader, 16, true);
-  case "address": return reader.take(32); case "fixedBytes": return reader.take(ty.len);
+  case "address": return reader.take(32); case "ownership": { const start = reader.take(4); const length = start[2] | (start[3] << 8); return decodeOwnership(new Uint8Array([...start, ...reader.take(length)])); } case "fixedBytes": return reader.take(ty.len);
   case "bytes": { const length = reader.natural(); if (length > BigInt(ty.max)) throw new Error("bytes value exceeds its bound"); return reader.take(Number(length)); }
   case "string": { const length = reader.natural(); if (length > BigInt(ty.max)) throw new Error("string value exceeds its UTF-8 byte bound"); return new TextDecoder("utf-8", { fatal: true }).decode(reader.take(Number(length))); }
   case "fixedArray": return Array.from({ length: ty.len }, () => decode(reader, ty.item)); case "array": { const length = reader.natural(); if (length > BigInt(ty.max)) throw new Error("array value exceeds its bound"); return Array.from({ length: Number(length) }, () => decode(reader, ty.item)); }

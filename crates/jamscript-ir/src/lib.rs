@@ -113,6 +113,7 @@ pub enum StateEffectIr {
 pub enum AuthKind {
     Wallet,
     Public,
+    Ownership,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -136,6 +137,7 @@ pub enum TypeIr {
     I128,
     Bool,
     Address,
+    Ownership,
     FixedBytes { len: u32 },
     Bytes { max: u32 },
     String { max: u32 },
@@ -172,6 +174,7 @@ impl TypeIr {
             Self::I128 => "i128".into(),
             Self::Bool => "bool".into(),
             Self::Address => "address".into(),
+            Self::Ownership => "ownership".into(),
             Self::FixedBytes { len } => format!("FixedBytes<{len}>"),
             Self::Bytes { max } => format!("Bytes<{max}>"),
             Self::String { max } => format!("String<{max}>"),
@@ -245,6 +248,7 @@ impl TypeIr {
             Self::U64 | Self::I64 => Ok(8),
             Self::U128 | Self::I128 => Ok(16),
             Self::Address => Ok(32),
+            Self::Ownership => Ok(4096),
             Self::FixedBytes { len } => Ok(*len as usize),
             Self::Bytes { max } | Self::String { max } => {
                 add(compact_len(*max as u128), *max as usize)
@@ -294,10 +298,17 @@ pub struct AbiPackage {
 pub struct AbiAction {
     pub name: String,
     pub selector: String,
-    pub auth: String,
+    pub auth: AbiAuth,
     pub input: Vec<AbiField>,
     #[serde(rename = "executeOutput")]
     pub execute_output: AbiTypeDescriptor,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AbiAuth {
+    Legacy(String),
+    Ownership { kind: String, version: u8 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -373,6 +384,7 @@ pub enum AbiTypeDescriptor {
     I64,
     I128,
     Address,
+    Ownership,
     FixedBytes { len: u32 },
     Bytes { max: u32 },
     String { max: u32 },
@@ -411,6 +423,7 @@ impl TryFrom<&TypeIr> for AbiTypeDescriptor {
             TypeIr::I64 => Self::I64,
             TypeIr::I128 => Self::I128,
             TypeIr::Address => Self::Address,
+            TypeIr::Ownership => Self::Ownership,
             TypeIr::FixedBytes { len } => Self::FixedBytes { len: *len },
             TypeIr::Bytes { max } => Self::Bytes { max: *max },
             TypeIr::String { max } => Self::String { max: *max },
@@ -513,8 +526,12 @@ pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Result<Abi, A
         .iter()
         .map(|action| -> Result<AbiAction, AbiError> {
             let auth = match action.auth {
-                AuthKind::Wallet => "wallet",
-                AuthKind::Public => "public",
+                AuthKind::Wallet => AbiAuth::Legacy("wallet".into()),
+                AuthKind::Public => AbiAuth::Legacy("public".into()),
+                AuthKind::Ownership => AbiAuth::Ownership {
+                    kind: "ownership".into(),
+                    version: 1,
+                },
             };
             Ok(AbiAction {
                 name: action.name.clone(),
@@ -640,6 +657,7 @@ fn abi_kind_max(ty: &TypeIr) -> (&str, Option<u32>) {
         TypeIr::I128 => ("i128", None),
         TypeIr::Bool => ("bool", None),
         TypeIr::Address => ("address", Some(32)),
+        TypeIr::Ownership => ("ownership", Some(4096)),
         TypeIr::FixedBytes { len } => ("fixedBytes", Some(*len)),
         TypeIr::Bytes { max } => ("bytes", Some(*max)),
         TypeIr::String { max } => ("string", Some(*max)),

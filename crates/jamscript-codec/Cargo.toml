@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ownership-core = { path = "../ownership-core" }
 jamscript-ir = { path = "../jamscript-ir" }
 
 [dev-dependencies]
