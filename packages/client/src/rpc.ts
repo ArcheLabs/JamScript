@@ -21,6 +21,44 @@ export type SubmitWorkResult = {
   actionHash?: string;
 };
 
+export type SubmitTransactionRequest = {
+  serviceId: number;
+  serviceCodeHash: string;
+  payloadBase64: string;
+  extrinsicsBase64: string[];
+};
+
+export type TransactionState =
+  | "queued"
+  | "packaged"
+  | "refining"
+  | "reported"
+  | "imported"
+  | "failed";
+
+export type SubmitTransactionResult = {
+  transactionId: string;
+  status: TransactionState;
+  packageHash?: string | null;
+  itemIndex?: number | null;
+  actionIndex?: number | null;
+};
+
+export type SubmitActionResult = SubmitTransactionResult & {
+  actionHash: string;
+};
+
+export type TransactionStatusResult = {
+  transactionId: string;
+  status: TransactionState;
+  packageHash: string | null;
+  itemIndex: number | null;
+  actionIndex: number | null;
+  executionReceipt: string | null;
+  error: string | null;
+  actionReceipts?: ActionReceipt[];
+};
+
 export type WorkStatus =
   | "insufficient_workers"
   | "awaiting_candidate"
@@ -80,6 +118,8 @@ export interface RpcTransport {
 const FORMAL_WORK_METHODS = new Set([
   "minijam_submitWorkV1",
   "minijam_getWorkStatusV1",
+  "minijam_submitTransactionV1",
+  "minijam_getTransactionStatusV1",
 ]);
 
 const STATE_PROVIDER_METHODS = new Set([
@@ -138,6 +178,8 @@ export type WorkRpc = RpcTransport & {
   ): Promise<ManagedStateResult>;
   submitWork(request: SubmitWorkRequest): Promise<SubmitWorkResult>;
   workStatus(packageHash: string, serviceId?: number): Promise<WorkStatusResult>;
+  submitTransaction(request: SubmitTransactionRequest): Promise<SubmitTransactionResult>;
+  transactionStatus(transactionId: string): Promise<TransactionStatusResult>;
 };
 
 export function asWorkRpc(transport: RpcTransport): WorkRpc {
@@ -155,5 +197,21 @@ export function asWorkRpc(transport: RpcTransport): WorkRpc {
         "minijam_getWorkStatusV1",
         serviceId === undefined ? { packageHash } : { packageHash, serviceId },
       ),
+    submitTransaction: (request) =>
+      transport.call("minijam_submitTransactionV1", request),
+    transactionStatus: async (transactionId) => {
+      const result = await transport.call<TransactionStatusResult & { receipt?: string | null }>(
+        "minijam_getTransactionStatusV1",
+        { transactionId },
+      );
+      return {
+        ...result,
+        packageHash: result.packageHash ?? null,
+        itemIndex: result.itemIndex ?? null,
+        actionIndex: result.actionIndex ?? null,
+        executionReceipt: result.executionReceipt ?? result.receipt ?? null,
+        error: result.error ?? null,
+      };
+    },
   };
 }

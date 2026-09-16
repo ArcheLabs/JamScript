@@ -78,6 +78,8 @@ trap cleanup EXIT INT TERM
 command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 1; }
 docker info >/dev/null
 locked_revision="$(sed -n 's/^revision = "\([^"]*\)"/\1/p' "${LOCK_FILE}")"
+container_revision="$(sed -n 's/^container_revision = "\([^"]*\)"/\1/p' "${LOCK_FILE}")"
+container_revision="${container_revision:-${locked_revision}}"
 export MINIJAM_NODE_IMAGE="${MINIJAM_NODE_IMAGE:-$(sed -n 's/^node_image = "\([^"]*\)"/\1/p' "${LOCK_FILE}")}"
 export MINIJAM_WORKER_IMAGE="${MINIJAM_WORKER_IMAGE:-$(sed -n 's/^worker_image = "\([^"]*\)"/\1/p' "${LOCK_FILE}")}"
 export MINIJAM_FORMAL_RPC_IMAGE="${MINIJAM_FORMAL_RPC_IMAGE:-$(sed -n 's/^formal_rpc_image = "\([^"]*\)"/\1/p' "${LOCK_FILE}")}"
@@ -89,12 +91,12 @@ done
 mkdir -p "${E2E_RUNTIME}/logs"
 rm -f "${E2E_RUNTIME}"/logs/*.log
 
-echo "[prepare] MiniJAM container revision: ${locked_revision}"
+echo "[prepare] MiniJAM container revision: ${container_revision} (native pin: ${locked_revision})"
 "${compose[@]}" pull --quiet
 for image in "${MINIJAM_NODE_IMAGE}" "${MINIJAM_WORKER_IMAGE}" "${MINIJAM_FORMAL_RPC_IMAGE}"; do
   image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")"
-  [[ "${image_revision}" == "${locked_revision}" ]] || {
-    echo "MiniJAM image revision ${image_revision} does not match ${locked_revision}" >&2
+  [[ "${image_revision}" == "${container_revision}" ]] || {
+    echo "MiniJAM image revision ${image_revision} does not match ${container_revision}" >&2
     exit 1
   }
 done
