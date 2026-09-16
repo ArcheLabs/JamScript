@@ -136,7 +136,12 @@ if [[ "${JAMSCRIPT_SKIP_SERVICE_BUILD:-0}" == "1" ]]; then
   mkdir -p "${ARTIFACTS}"
   cp -a "${prebuilt}/." "${ARTIFACTS}/"
 else
-  (cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jams -- build "${E2E_PROJECT}" --output "${ARTIFACTS}")
+  npm --prefix "${JAMSCRIPT_ROOT}/toolchains/scriptc" ci --ignore-scripts --no-audit --no-fund
+  (
+    cd "${JAMSCRIPT_ROOT}"
+    JAMSCRIPT_DEV_TOOLCHAIN=1 \
+      cargo run --locked --bin jams -- build "${E2E_PROJECT}" --output "${ARTIFACTS}"
+  )
 fi
 code_hash="$(
   node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).code_hash));' < "${ARTIFACTS}/build.json"
