@@ -1254,6 +1254,7 @@ pub struct MiniJamNetworkGateway<T> {
 
 const DEFAULT_BATCH_MAX_ACTIONS: usize = 4;
 const DEFAULT_BATCH_FLUSH_MS: u64 = 50;
+const FUTURE_NONCE_RECHECK_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 struct PendingAction {
@@ -1523,12 +1524,18 @@ impl TransactionCoordinator {
                 .is_some_and(|sender| !expected_nonces.contains_key(&sender))
         }) {
             state.queued.insert(service_id, pending);
+            state
+                .flush_deadlines
+                .insert(service_id, Instant::now() + FUTURE_NONCE_RECHECK_DELAY);
             return Ok(None);
         }
         let selected_indices =
             select_canonical_indices(&pending, expected_nonces, self.max_actions);
         if selected_indices.is_empty() {
             state.queued.insert(service_id, pending);
+            state
+                .flush_deadlines
+                .insert(service_id, Instant::now() + FUTURE_NONCE_RECHECK_DELAY);
             return Ok(None);
         }
         let selected = selected_indices
@@ -4240,6 +4247,32 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(select_canonical_indices(&pending, &expected, 5), first);
         }
+    }
+
+    #[test]
+    fn future_only_queue_uses_slow_recheck_deadline() {
+        let coordinator = TransactionCoordinator {
+            state: Mutex::new(TransactionCoordinatorState::default()),
+            wake: Condvar::new(),
+            max_actions: 3,
+            flush_delay: Duration::ZERO,
+        };
+        {
+            let mut state = coordinator.state.lock().unwrap();
+            state
+                .queued
+                .insert(7, vec![pending(Some(1), Some(2), 0, 2)]);
+            state
+                .flush_deadlines
+                .insert(7, Instant::now() - Duration::from_secs(1));
+        }
+        assert!(coordinator
+            .take_ready_batch(7, &BTreeMap::from([([1; 32], 0)]))
+            .unwrap()
+            .is_none());
+        assert!(!coordinator.is_batch_ready(7).unwrap());
+        let state = coordinator.state.lock().unwrap();
+        assert!(state.flush_deadlines[&7] > Instant::now() + Duration::from_millis(900));
     }
 
     #[test]

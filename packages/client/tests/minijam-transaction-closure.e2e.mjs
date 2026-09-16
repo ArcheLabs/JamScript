@@ -156,7 +156,7 @@ async function main() {
   console.log("BATCHED_ACTION_E2E=PASS");
 
   const outOfOrderPair = signer("0a").pair;
-  const outOfOrder = await Promise.all([2, 0, 1].map(async (nonce) => {
+  const submitDirect = async (nonce) => {
     const action = await directSignedAction(abi, "advance", { key: firstKey }, outOfOrderPair, nonce);
     const submitted = await backend.call("minijam_submitTransactionV1", {
       serviceId,
@@ -165,7 +165,14 @@ async function main() {
       extrinsicsBase64: [],
     });
     return { ...submitted, actionHash: action.actionHash, nonce };
-  }));
+  };
+  // Submit in this order at the actual HTTP ingress. The scheduler must
+  // canonicalize the queued nonce-2, nonce-0, nonce-1 sequence to 0,1,2.
+  const outOfOrder = [
+    await submitDirect(2),
+    await submitDirect(0),
+    await submitDirect(1),
+  ];
   const outOfOrderResults = await Promise.all(outOfOrder.map((item) =>
     client.waitForAction(item.transactionId, item.actionHash, { intervalMs: 250, timeoutMs: 180_000 })));
   assert.deepEqual(outOfOrderResults.map((item) => item.actionIndex), [2, 0, 1]);
@@ -253,7 +260,7 @@ async function main() {
     stale: measured([staleSubmitted], [staleStatus]),
   };
   await fs.writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`);
-  console.log("REAL_MINIJAM_E2E=PASS");
+  console.log("TRANSACTION_SCENARIOS=PASS");
 }
 
 main().catch((error) => {

@@ -207,4 +207,6 @@ if [[ "${JAMSCRIPT_CLEAN_REPRO:-0}" != 1 ]]; then
   echo "CLEAN_WORKTREE_E2E=PASS"
 fi
 echo "LOCAL_PRIMARY_E2E=PASS"
-echo "REAL_MINIJAM_E2E=PASS"
+if [[ "${JAMSCRIPT_CLEAN_REPRO:-0}" != 1 ]]; then
+  echo "REAL_MINIJAM_E2E=PASS"
+fi
