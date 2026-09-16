@@ -43,6 +43,7 @@ struct AdapterState {
     provider: FullStateProvider,
     pending: BTreeMap<String, RuntimeRefineOutputV1>,
     predictions: BTreeMap<String, RuntimeRefineOutputV1>,
+    transaction_predictions: BTreeMap<String, RuntimeRefineOutputV1>,
     query_fault: Option<String>,
 }
 
@@ -83,16 +84,7 @@ fn tampered_verifier_rejects(
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ContextParams {
-    block_hash: String,
-    state_root: String,
-    slot: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SubmitParams {
-    context: ContextParams,
+struct SubmitTransactionParams {
     service_id: u32,
     service_code_hash: String,
     payload_base64: String,
@@ -103,7 +95,7 @@ struct SubmitParams {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusParams {
-    package_hash: String,
+    transaction_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -172,17 +164,17 @@ impl Adapter {
     fn handle_rpc(&self, request: RpcRequest) -> Value {
         let id = request.id;
         let result = match request.method.as_str() {
-            "minijam_submitWorkV1" => {
-                parse_params(request.params).and_then(|p| self.submit(p, false))
+            "minijam_submitTransactionV1" => {
+                parse_params(request.params).and_then(|p| self.submit_transaction(p, false))
             }
             "jamscript_testSubmitTamperedWitnessV1" => self
                 .require_test()
                 .and_then(|_| parse_params(request.params))
-                .and_then(|p| self.submit(p, true)),
+                .and_then(|p| self.submit_transaction(p, true)),
             "jamscript_testGetPredictionV1" => self
                 .require_test()
                 .and_then(|_| parse_params::<StatusParams>(request.params))
-                .and_then(|p| self.prediction(&p.package_hash)),
+                .and_then(|p| self.prediction(&p.transaction_id)),
             "jamscript_testForgetProviderV1" => self.require_test().map(|_| {
                 self.state.lock().expect("adapter state lock").provider =
                     FullStateProvider::default();
@@ -202,7 +194,9 @@ impl Adapter {
                     self.state.lock().expect("adapter state lock").query_fault = Some(mode);
                     json!(true)
                 }),
-            "minijam_getWorkStatusV1" => parse_params(request.params).and_then(|p| self.status(p)),
+            "minijam_getTransactionStatusV1" => {
+                parse_params(request.params).and_then(|p| self.status(p))
+            }
             "minijam_getManagedStateV1" => parse_params(request.params).and_then(|p| self.query(p)),
             _ => Err(RpcFailure::new(-32601, "method not found", None)),
         };
@@ -215,19 +209,13 @@ impl Adapter {
         }
     }
 
-    fn submit(&self, mut request: SubmitParams, tamper_witness: bool) -> RpcResult {
+    fn submit_transaction(
+        &self,
+        mut request: SubmitTransactionParams,
+        tamper_witness: bool,
+    ) -> RpcResult {
         self.validate_request(&request)?;
         let finalized = self.node_context().map_err(RpcFailure::chain)?;
-        if request.context.block_hash.to_lowercase() != finalized.block_hash.to_lowercase()
-            || request.context.state_root.to_lowercase() != finalized.state_root.to_lowercase()
-            || request.context.slot != finalized.slot
-        {
-            return Err(RpcFailure::new(
-                -32010,
-                "stale finalized context",
-                Some(serde_json::to_value(finalized).expect("context serializes")),
-            ));
-        }
         let action = STANDARD
             .decode(&request.payload_base64)
             .map_err(|error| RpcFailure::invalid(error.to_string()))?;
@@ -281,29 +269,21 @@ impl Adapter {
         request.payload_base64 = STANDARD.encode(built.refine_input.encode().map_err(|error| {
             RpcFailure::builder(format!("encode formal V1 refine input: {error:?}"))
         })?);
-        request.context = ContextParams {
-            block_hash: finalized.block_hash,
-            state_root: finalized.state_root,
-            slot: finalized.slot,
-        };
         let result = rpc_call(
             &self.config.formal_url,
-            "minijam_submitWorkV1",
+            "minijam_submitTransactionV1",
             serde_json::to_value(request).expect("request serializes"),
         )
         .map_err(RpcFailure::downstream)?;
-        let package_hash = result
-            .get("packageHash")
+        let transaction_id = result
+            .get("transactionId")
             .and_then(Value::as_str)
-            .ok_or_else(|| RpcFailure::chain("formal RPC omitted packageHash"))?
+            .ok_or_else(|| RpcFailure::chain("formal RPC omitted transactionId"))?
             .to_owned();
         if !tamper_witness {
             state
-                .pending
-                .insert(package_hash.to_lowercase(), predicted_output.clone());
-            state
-                .predictions
-                .insert(package_hash.to_lowercase(), predicted_output);
+                .transaction_predictions
+                .insert(transaction_id.to_lowercase(), predicted_output);
         }
         Ok(result)
     }
@@ -311,20 +291,36 @@ impl Adapter {
     fn status(&self, request: StatusParams) -> RpcResult {
         let mut result = rpc_call(
             &self.config.formal_url,
-            "minijam_getWorkStatusV1",
-            json!({"packageHash":request.package_hash}),
+            "minijam_getTransactionStatusV1",
+            json!({"transactionId":request.transaction_id}),
         )
         .map_err(RpcFailure::downstream)?;
         if result.get("status").and_then(Value::as_str) == Some("imported") {
-            self.materialize(&request.package_hash)?;
-            if let Some(output) = self
+            let package_hash = result
+                .get("packageHash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| RpcFailure::chain("formal RPC omitted packageHash"))?
+                .to_owned();
+            let output = self
                 .state
                 .lock()
                 .expect("adapter state lock")
-                .predictions
-                .get(&request.package_hash.to_lowercase())
-                .cloned()
-            {
+                .transaction_predictions
+                .get(&request.transaction_id.to_lowercase())
+                .cloned();
+            if let Some(output) = output {
+                {
+                    let mut state = self.state.lock().expect("adapter state lock");
+                    state
+                        .pending
+                        .entry(package_hash.to_lowercase())
+                        .or_insert_with(|| output.clone());
+                    state
+                        .predictions
+                        .entry(package_hash.to_lowercase())
+                        .or_insert_with(|| output.clone());
+                }
+                self.materialize(&package_hash)?;
                 if let Some(object) = result.as_object_mut() {
                     object.insert("actionReceipts".into(), action_receipts(&output));
                 }
@@ -433,7 +429,7 @@ impl Adapter {
         }))
     }
 
-    fn validate_request(&self, request: &SubmitParams) -> Result<(), RpcFailure> {
+    fn validate_request(&self, request: &SubmitTransactionParams) -> Result<(), RpcFailure> {
         if request.service_id != self.config.service_id {
             return Err(RpcFailure::new(-32011, "service not found", None));
         }
@@ -453,13 +449,12 @@ impl Adapter {
         }
     }
 
-    fn prediction(&self, package_hash: &str) -> RpcResult {
-        let output = self
-            .state
-            .lock()
-            .expect("adapter state lock")
-            .predictions
-            .get(&package_hash.to_lowercase())
+    fn prediction(&self, transaction_id: &str) -> RpcResult {
+        let state = self.state.lock().expect("adapter state lock");
+        let output = state
+            .transaction_predictions
+            .get(&transaction_id.to_lowercase())
+            .or_else(|| state.predictions.get(&transaction_id.to_lowercase()))
             .cloned()
             .ok_or_else(|| RpcFailure::new(-32013, "prediction not found", None))?;
         Ok(json!({

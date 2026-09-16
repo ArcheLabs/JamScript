@@ -83,30 +83,23 @@ function managedCommitment(root) {
   return "0x88" + "0101" + root.slice(2);
 }
 
-function contextResult(context) {
-  return { packageHash: "0x" + "77".repeat(32), submissionHash: "0x" + "88".repeat(32), context };
-}
-
-test("submitAction reads finalized nonce and signs exactly once across stale retry", async () => {
+test("submitAction queues an opaque transaction and signs exactly once", async () => {
   const calls = [];
-  let contextReads = 0;
-  let submissions = 0;
   const transport = {
     async call(method, params = []) {
       calls.push({ method, params });
       if (method === "chain_getBlockHash") return genesisHash;
-      if (method === "minijam_getFinalizedContext") {
-        contextReads += 1;
-        return contextReads === 1 ? initialContext : refreshedContext;
-      }
+      if (method === "minijam_getFinalizedContext") return initialContext;
       if (method === "minijam_getServiceStorageAt") return null;
       if (method === "minijam_getManagedStateV1") {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null, proofBase64: ["AA=="] };
       }
-      if (method === "minijam_submitWorkV1") {
-        submissions += 1;
-        if (submissions === 1) throw new RpcError("stale", -32010);
-        return contextResult(refreshedContext);
+      if (method === "minijam_submitTransactionV1") {
+        assert.equal(params.serviceId, 1000);
+        assert.equal(params.serviceCodeHash, codeHash);
+        assert.equal(params.extrinsicsBase64.length, 0);
+        assert.ok(params.payloadBase64.length > 0);
+        return { transactionId: "0x" + "77".repeat(32), status: "queued" };
       }
       throw new Error("unexpected RPC method: " + method);
     },
@@ -124,9 +117,11 @@ test("submitAction reads finalized nonce and signs exactly once across stale ret
   const client = new JamScriptClient(deployment, transport);
   const result = await client.submitAction("submit", { score: 9n }, signer);
 
-  assert.equal(result.context.blockHash, refreshedContext.blockHash);
+  assert.equal(result.transactionId, "0x" + "77".repeat(32));
+  assert.equal(result.status, "queued");
+  assert.match(result.actionHash, /^0x[0-9a-f]{64}$/);
   assert.equal(signatures, 1);
-  assert.equal(submissions, 2);
+  assert.equal(calls.filter(({ method }) => method === "minijam_submitTransactionV1").length, 1);
   const nonceRead = calls.find((call) => call.method === "minijam_getServiceStorageAt");
   assert.equal(nonceRead.params[0], initialContext.blockHash);
 });
@@ -170,46 +165,61 @@ test("managed-state provider unavailability does not fall back to Service KV by 
   assert.equal(storageReads, 1);
 });
 
-test("waitForWork tolerates not-finalized package lookup and stops at Imported", async () => {
+test("waitForTransaction tolerates not-finalized lookup and stops at Imported", async () => {
   let reads = 0;
   const transport = {
     async call(method) {
-      if (method !== "minijam_getWorkStatusV1") throw new Error("unexpected RPC method");
+      if (method !== "minijam_getTransactionStatusV1") throw new Error("unexpected RPC method");
       reads += 1;
       if (reads === 1) throw new RpcError("not finalized", -32013);
       if (reads === 2) {
-        return { packageHash: "0x" + "77".repeat(32), workId: 3, status: "accepted", executionReceipt: null, context: initialContext };
+        return { transactionId: "0x" + "66".repeat(32), status: "packaged", packageHash: "0x" + "77".repeat(32), itemIndex: 3, executionReceipt: null, error: null };
       }
-      return { packageHash: "0x" + "77".repeat(32), workId: 3, status: "imported", executionReceipt: "0x" + "99".repeat(32), context: initialContext };
+      return { transactionId: "0x" + "66".repeat(32), status: "imported", packageHash: "0x" + "77".repeat(32), itemIndex: 3, executionReceipt: "0x" + "99".repeat(32), error: null };
     },
   };
   const client = new JamScriptClient(deployment, transport);
-  const result = await client.waitForWork("0x" + "77".repeat(32), { intervalMs: 0, timeoutMs: 1000 });
+  const result = await client.waitForTransaction("0x" + "66".repeat(32), { intervalMs: 0, timeoutMs: 1000 });
   assert.equal(result.status, "imported");
   assert.equal(reads, 3);
 });
 
 test("waitForAction distinguishes an imported failed application receipt", async () => {
+  let actionHash;
   const transport = {
-    async call(method) {
-      if (method !== "minijam_getWorkStatusV1") throw new Error("unexpected RPC method");
+    async call(method, params = []) {
+      if (method === "chain_getBlockHash") return genesisHash;
+      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "minijam_getManagedStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null, proofBase64: ["AA=="] };
+      }
+      if (method === "minijam_submitTransactionV1") {
+        return { transactionId: "0x" + "66".repeat(32), status: "queued" };
+      }
+      if (method !== "minijam_getTransactionStatusV1") throw new Error("unexpected RPC method");
       return {
-        packageHash: "0x" + "77".repeat(32),
-        workId: 3,
+        transactionId: "0x" + "66".repeat(32),
         status: "imported",
+        packageHash: "0x" + "77".repeat(32),
+        itemIndex: 0,
         executionReceipt: "0x" + "99".repeat(32),
-        actionReceipts: [{ actionHash: "0x" + "aa".repeat(32), status: "failed", errorCode: 2 }],
-        context: initialContext,
+        error: null,
+        actionReceipts: [{ actionHash, status: "failed", errorCode: 2 }],
       };
     },
   };
   const client = new JamScriptClient(deployment, transport);
-  const result = await client.waitForAction(
-    "0x" + "77".repeat(32),
-    "0x" + "aa".repeat(32),
-    { intervalMs: 0, timeoutMs: 1000 },
-  );
-  assert.equal(result.status, "imported");
+  const submitted = await client.submitAction("submit", { score: 9n }, {
+    publicKey: new Uint8Array(32).fill(9),
+    async signRaw() { return new Uint8Array(64).fill(10); },
+  });
+  actionHash = submitted.actionHash;
+  const result = await client.waitForAction(submitted.transactionId, { intervalMs: 0, timeoutMs: 1000 });
+  assert.equal(result.status, "failed");
+  assert.equal(result.transactionStatus, "imported");
   assert.equal(result.actionReceipt.status, "failed");
   assert.equal(result.actionReceipt.errorCode, 2);
+  assert.equal(result.actionHash, actionHash);
+  assert.equal(result.errorCode, 2);
 });

@@ -71,7 +71,12 @@ async function managedStateValue(node, state, key) {
 
 async function main() {
   await cryptoWaitReady();
-  const [metadata, abi] = await Promise.all([readJson("build.json"), readJson("service.abi.json")]);
+  const [metadata, abiJson] = await Promise.all([readJson("build.json"), readJson("service.abi.json")]);
+  const abi = {
+    ...abiJson,
+    abiVersion: abiJson.abiVersion ?? abiJson.abi_version,
+    languageVersion: abiJson.languageVersion ?? abiJson.language_version,
+  };
   assert.equal(metadata.language_version ?? metadata.languageVersion, "0.2");
   assert.equal(metadata.runtime_profile_version, "scriptc-deterministic-v1");
   assert.equal(metadata.runtimeRefineInputVersion, 1);
@@ -109,11 +114,12 @@ async function main() {
     { key: key1, next: key2, value: 10 },
     signer,
   );
-  const seedResult = await client.waitForAction(seed.packageHash, seed.actionHash, {
+  const seedResult = await client.waitForAction(seed.transactionId, {
     intervalMs: 500,
     timeoutMs: 120_000,
   });
-  assert.equal(seedResult.status, "imported");
+  assert.equal(seedResult.status, "applied");
+  assert.equal(seedResult.transactionStatus, "imported");
   assert.equal(await client.readNonce(pair.publicKey), 1n);
   const valueKey = stateKey("test.values/v1", key2);
   const seeded = await managedStateValue(node, state, valueKey);
@@ -123,11 +129,12 @@ async function main() {
   console.log("[dynamic] seed inserted authenticated value at the second-order key");
 
   const advance = await client.submitAction("advance", { key: key1 }, signer);
-  const advanceResult = await client.waitForAction(advance.packageHash, advance.actionHash, {
+  const advanceResult = await client.waitForAction(advance.transactionId, {
     intervalMs: 500,
     timeoutMs: 120_000,
   });
-  assert.equal(advanceResult.status, "imported");
+  assert.equal(advanceResult.status, "applied");
+  assert.equal(advanceResult.transactionStatus, "imported");
   assert.equal(await client.readNonce(pair.publicKey), 2n);
   const advanced = await managedStateValue(node, state, valueKey);
   assert.ok(advanced);

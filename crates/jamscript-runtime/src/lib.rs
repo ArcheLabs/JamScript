@@ -242,7 +242,7 @@ mod tests {
         let actions = (0..10)
             .map(|sender| {
                 if sender == 5 {
-                    Err(ProtocolError::PayloadHashMismatch)
+                    Err(ProtocolError::InvalidSignature)
                 } else {
                     Ok(action(sender, 0, sender))
                 }
@@ -280,14 +280,15 @@ mod tests {
         let mut runtime = InMemoryRuntime::new(182);
         let first = action(3, 0, 1);
         let second = action(3, 1, 2);
-        let gap = action(3, 3, 3);
+        let third = action(3, 2, 3);
+        let gap = action(3, 4, 4);
         assert_eq!(
             runtime
-                .apply_batch(vec![Ok(first), Ok(second)], |_, _| Ok(()))
+                .apply_batch(vec![Ok(first), Ok(second), Ok(third)], |_, _| Ok(()))
                 .iter()
                 .filter(|r| r.status == ActionStatus::Applied)
                 .count(),
-            2
+            3
         );
         let receipt = runtime.apply_action(&gap, |_, _| Ok(()));
         assert_eq!(receipt.status, ActionStatus::Rejected);
@@ -301,6 +302,33 @@ mod tests {
                 .code()
             )
         );
+    }
+
+    #[test]
+    fn business_failure_isolated_and_later_action_still_applies() {
+        let mut runtime = InMemoryRuntime::new(182);
+        let receipts = runtime.apply_batch(
+            vec![
+                Ok(action(8, 0, 1)),
+                Ok(action(8, 1, 2)),
+                Ok(action(8, 2, 3)),
+            ],
+            |tx, action| {
+                tx.set(b"scores", &action.sender, action.payload.clone());
+                if action.nonce == 1 {
+                    Err(77)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert_eq!(receipts[0].status, ActionStatus::Applied);
+        assert_eq!(receipts[1].status, ActionStatus::Failed);
+        assert_eq!(receipts[1].error_code, Some(77));
+        assert_eq!(receipts[2].status, ActionStatus::Applied);
+        assert_eq!(runtime.next_nonce(&[8; 32]), 3);
+        assert_eq!(runtime.read(b"scores", &[8; 32]), Some(&[3][..]));
     }
 
     #[test]

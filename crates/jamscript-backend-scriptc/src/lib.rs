@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use blake2b_simd::Params;
 use jamscript_ir::{action_selector, ActionBodyIr, ServiceIr};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
@@ -14,7 +14,7 @@ pub const RUNTIME_PROFILE_VERSION: &str = "scriptc-deterministic-v1";
 pub const SCRIPT_C_VERSION: &str = "0.0.34";
 pub const TYPESCRIPT_VERSION: &str = "7.0.2";
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScriptcBuildMetadata {
     pub backend: String,
     pub scriptc_version: String,
@@ -31,7 +31,7 @@ pub struct ScriptcBuildMetadata {
     pub state_view_version: u8,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScriptcGeneratedAction {
     pub name: String,
     pub selector: String,

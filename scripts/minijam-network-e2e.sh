@@ -11,7 +11,6 @@ LOCK_FILE="${JAMSCRIPT_ROOT}/toolchains/minijam.lock"
 minijam_result=FAIL
 
 export JAMSCRIPT_MINIJAM_SDK="${MINIJAM_ROOT}"
-export MINIJAM_ENABLE_FORMAL_RPC=true
 export MINIJAM_NATIVE_RUNTIME_ROOT="${E2E_RUNTIME}"
 export MINIJAM_FORMAL_RPC_BIND="${MINIJAM_FORMAL_RPC_BIND:-127.0.0.1:8090}"
 export MINIJAM_FORMAL_RPC_URL="${MINIJAM_FORMAL_RPC_URL:-http://127.0.0.1:8090}"
@@ -20,7 +19,7 @@ export JAMSCRIPT_ADAPTER_URL="${JAMSCRIPT_ADAPTER_URL:-http://127.0.0.1:8091}"
 export MINIJAM_NODE_RPC="${MINIJAM_NODE_RPC:-http://127.0.0.1:9944}"
 export MINIJAM_WORK_RPC="${MINIJAM_WORK_RPC:-${JAMSCRIPT_ADAPTER_URL}}"
 export MINIJAM_STATE_RPC="${MINIJAM_STATE_RPC:-${JAMSCRIPT_ADAPTER_URL}}"
-export MINIJAM_FORMAL_RELAYER_URI="${MINIJAM_FORMAL_RELAYER_URI:-0x9292929292929292929292929292929292929292929292929292929292929292}"
+export MINIJAM_NATIVE_LOCAL_RUNTIME="${E2E_RUNTIME}"
 
 cleanup() {
   local status=$?
@@ -29,7 +28,7 @@ cleanup() {
     kill "${adapter_pid}" 2>/dev/null || true
     wait "${adapter_pid}" 2>/dev/null || true
   fi
-  "${MINIJAM_ROOT}/scripts/stage0-native.sh" down || true
+  MINIJAM_LOCAL_PURGE=0 "${MINIJAM_ROOT}/scripts/stage1-native-local-down.sh" || true
   if [[ "${status}" -ne 0 ]]; then
     echo "JamScript MiniJAM network E2E: FAIL" >&2
     echo "MiniJAM logs: ${E2E_RUNTIME}/logs" >&2
@@ -40,14 +39,14 @@ cleanup() {
       tail -n 100 "${log}" >&2 || true
     done
   elif [[ "${JAMSCRIPT_E2E_KEEP_DATA:-0}" != "1" ]]; then
-    rm -rf "${E2E_RUNTIME}/data" "${E2E_RUNTIME}/run"
+    rm -rf "${E2E_RUNTIME}"
   fi
   echo "REAL_MINIJAM_E2E=${minijam_result}"
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
 
-[[ -x "${MINIJAM_ROOT}/scripts/stage0-native.sh" ]] || {
+[[ -x "${MINIJAM_ROOT}/scripts/stage1-native-local-up.sh" ]] || {
   echo "MiniJAM checkout not found: ${MINIJAM_ROOT}" >&2
   exit 1
 }
@@ -76,24 +75,29 @@ mkdir -p "${E2E_RUNTIME}/logs"
 rm -f "${E2E_RUNTIME}"/logs/*.log
 
 echo "[prepare] MiniJAM revision: ${actual_revision}"
-"${MINIJAM_ROOT}/scripts/stage0-native.sh" deps
-"${MINIJAM_ROOT}/scripts/stage0-native.sh" build
 
 (cd "${JAMSCRIPT_ROOT}" && cargo build --locked --bin jams)
-npm --prefix "${JAMSCRIPT_ROOT}/packages/client" ci --no-audit
-npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run build
+if [[ "${JAMSCRIPT_SKIP_CLIENT_BUILD:-0}" == "1" ]]; then
+  test -s "${JAMSCRIPT_ROOT}/packages/client/dist/index.js" || {
+    echo "client build is required when JAMSCRIPT_SKIP_CLIENT_BUILD=1" >&2
+    exit 1
+  }
+else
+  npm --prefix "${JAMSCRIPT_ROOT}/packages/client" ci --no-audit
+  npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run build
+fi
 
 echo "[network] starting isolated MiniJAM network"
-"${MINIJAM_ROOT}/scripts/stage0-native.sh" reset
-"${MINIJAM_ROOT}/scripts/stage0-native.sh" up
+MINIJAM_LOCAL_PURGE=1 "${MINIJAM_ROOT}/scripts/stage1-native-local-down.sh" >/dev/null 2>&1 || true
+"${MINIJAM_ROOT}/scripts/stage1-native-local-up.sh"
 curl -fsS "${MINIJAM_FORMAL_RPC_URL}/health/ready" >/dev/null
 curl -fsS \
   -H "content-type: application/json" \
   --data '{"jsonrpc":"2.0","id":1,"method":"system_health","params":[]}' \
   "${MINIJAM_NODE_RPC}" >/dev/null
 echo "[network] MiniJAM node ready"
-echo "[network] Formal Work RPC ready"
-echo "[network] Workers ready"
+echo "[network] Formal transaction RPC ready"
+echo "[network] Worker ready"
 
 genesis_hash="$(
   curl -fsS \
@@ -123,7 +127,17 @@ sed -i \
   "${E2E_PROJECT}/jamscript.toml"
 
 (cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jams -- check "${E2E_PROJECT}")
-(cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jams -- build "${E2E_PROJECT}" --output "${ARTIFACTS}")
+if [[ "${JAMSCRIPT_SKIP_SERVICE_BUILD:-0}" == "1" ]]; then
+  prebuilt="${JAMSCRIPT_PREBUILT_ARTIFACTS:-}"
+  [[ -n "${prebuilt}" && -d "${prebuilt}" ]] || {
+    echo "JAMSCRIPT_PREBUILT_ARTIFACTS is required when JAMSCRIPT_SKIP_SERVICE_BUILD=1" >&2
+    exit 1
+  }
+  mkdir -p "${ARTIFACTS}"
+  cp -a "${prebuilt}/." "${ARTIFACTS}/"
+else
+  (cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jams -- build "${E2E_PROJECT}" --output "${ARTIFACTS}")
+fi
 code_hash="$(
   node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).code_hash));' < "${ARTIFACTS}/build.json"
 )"
@@ -163,6 +177,9 @@ builder_native_includes="$(
     process.stdout.write(metadata.native_modules.flatMap(module => module.include_dirs.map(include => path.resolve(project, include))).join(path.delimiter));
   ' "${ARTIFACTS}/builder.json" "${E2E_PROJECT}"
 )"
+scriptc_runtime_sources="${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_library.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_number.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_string.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_array.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_bytes.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_closure.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_cycle.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_error.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_exception.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_json.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_object.c:${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src/scr_union.c:${JAMSCRIPT_ROOT}/crates/jamscript-runtime-scriptc/src/scr_lib_cleanup.c"
+builder_native_sources="${builder_native_sources:+${builder_native_sources}:}${ARTIFACTS}/scriptc/scriptc_service.lib.c:${ARTIFACTS}/scriptc/scriptc_service_adapter.c:${scriptc_runtime_sources}"
+builder_native_includes="${builder_native_includes:+${builder_native_includes}:}${JAMSCRIPT_SCRIPTC_RUNTIME_INCLUDE:-${JAMSCRIPT_ROOT}/toolchains/scriptc/node_modules/@scriptc/runtime/src}"
 JAMSCRIPT_BUILDER_APPLICATION_RS="${ARTIFACTS}/generated_builder_application.rs" \
 JAMSCRIPT_BUILDER_NATIVE_SOURCES="${builder_native_sources}" \
 JAMSCRIPT_BUILDER_NATIVE_INCLUDES="${builder_native_includes}" \
@@ -186,11 +203,33 @@ done
 curl -fsS "${JAMSCRIPT_ADAPTER_URL}/health/ready" >/dev/null
 echo "[network] JamScript managed-state Builder/Provider RPC ready"
 
-JAMSCRIPT_E2E_ARTIFACTS="${ARTIFACTS}" \
-JAMSCRIPT_E2E_SERVICE_ID="${service_id}" \
-JAMSCRIPT_E2E_SERVICE_KEY="${service_key}" \
-JAMSCRIPT_E2E_CODE_HASH="${code_hash}" \
-JAMSCRIPT_E2E_GENESIS_HASH="${genesis_hash}" \
-JAMSCRIPT_E2E_LOG_DIR="${E2E_RUNTIME}/logs" \
-npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run test:network
+if [[ "$(node --input-type=module -e 'process.stdout.write(process.platform)')" == "win32" ]] && command -v wslpath >/dev/null 2>&1; then
+  client_root_win="$(wslpath -w "${JAMSCRIPT_ROOT}/packages/client")"
+  client_artifacts_win="$(wslpath -w "${ARTIFACTS}")"
+  client_wsl_env="${WSLENV:-}"
+  for client_env_name in \
+    JAMSCRIPT_E2E_ARTIFACTS JAMSCRIPT_E2E_SERVICE_ID JAMSCRIPT_E2E_SERVICE_KEY \
+    JAMSCRIPT_E2E_CODE_HASH JAMSCRIPT_E2E_GENESIS_HASH JAMSCRIPT_E2E_LOG_DIR \
+    MINIJAM_NODE_RPC MINIJAM_WORK_RPC MINIJAM_STATE_RPC; do
+    if [[ ":${client_wsl_env}:" != *":${client_env_name}:"* ]]; then
+      client_wsl_env="${client_wsl_env:+${client_wsl_env}:}${client_env_name}"
+    fi
+  done
+  WSLENV="${client_wsl_env}" \
+  JAMSCRIPT_E2E_ARTIFACTS="${client_artifacts_win}" \
+  JAMSCRIPT_E2E_SERVICE_ID="${service_id}" \
+  JAMSCRIPT_E2E_SERVICE_KEY="${service_key}" \
+  JAMSCRIPT_E2E_CODE_HASH="${code_hash}" \
+  JAMSCRIPT_E2E_GENESIS_HASH="${genesis_hash}" \
+  JAMSCRIPT_E2E_LOG_DIR="${E2E_RUNTIME}/logs" \
+    node "${client_root_win}/tests/minijam-network.e2e.mjs"
+else
+  JAMSCRIPT_E2E_ARTIFACTS="${ARTIFACTS}" \
+  JAMSCRIPT_E2E_SERVICE_ID="${service_id}" \
+  JAMSCRIPT_E2E_SERVICE_KEY="${service_key}" \
+  JAMSCRIPT_E2E_CODE_HASH="${code_hash}" \
+  JAMSCRIPT_E2E_GENESIS_HASH="${genesis_hash}" \
+  JAMSCRIPT_E2E_LOG_DIR="${E2E_RUNTIME}/logs" \
+    npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run test:network
+fi
 minijam_result=PASS

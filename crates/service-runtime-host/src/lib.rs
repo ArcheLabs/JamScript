@@ -824,6 +824,38 @@ mod tests {
     }
 
     #[test]
+    fn batch_builder_preserves_work_item_order_for_sequential_nonces() {
+        let provider = FullStateProvider::default();
+        let mut source = TestFinalizedSource::default();
+        source.push(finalized(6), None);
+        let actions = (0..3)
+            .map(|nonce| signed_counter_action(7, nonce, nonce + 1))
+            .collect::<Vec<_>>();
+        let built = AuthenticatedWorkBuilder::new(&mut source, &provider)
+            .build_actions(SERVICE, &SignedCounter, actions.clone())
+            .unwrap();
+
+        assert_eq!(built.refine_input.actions, actions);
+        assert_eq!(built.predicted_output.receipts.len(), 3);
+        assert!(built
+            .predicted_output
+            .receipts
+            .iter()
+            .all(|receipt| receipt.status == ActionStatusV1::Applied));
+        for (action, receipt) in built
+            .refine_input
+            .actions
+            .iter()
+            .zip(&built.predicted_output.receipts)
+        {
+            assert_eq!(
+                receipt.action_hash,
+                service_runtime_core::blake2_256(action)
+            );
+        }
+    }
+
+    #[test]
     fn refreshed_context_rebuilds_root_and_witness() {
         let mut provider = FullStateProvider::default();
         let first_state = FullState::from_pairs([(b"key".as_slice(), [1])]).unwrap();

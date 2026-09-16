@@ -5,37 +5,42 @@ export type FinalizedContext = {
   slot: number;
 };
 
-export type SubmitWorkRequest = {
-  context: { blockHash: string; stateRoot: string; slot: number };
+export type SubmitTransactionRequest = {
   serviceId: number;
   serviceCodeHash: string;
   payloadBase64: string;
   extrinsicsBase64: string[];
 };
 
-export type SubmitWorkResult = {
-  packageHash: string;
-  submissionHash: string;
-  context: FinalizedContext;
-  /** Hash of the exact SignedActionV1 bytes submitted by submitAction. */
-  actionHash?: string;
-};
-
-export type WorkStatus =
-  | "insufficient_workers"
-  | "awaiting_candidate"
-  | "voting"
-  | "accepted"
+export type TransactionState =
+  | "queued"
+  | "packaged"
+  | "refining"
+  | "reported"
   | "imported"
   | "failed";
 
-export type WorkStatusResult = {
-  packageHash: string;
-  workId: number | null;
-  status: WorkStatus;
+export type SubmitTransactionResult = {
+  transactionId: string;
+  status: TransactionState;
+  packageHash?: string | null;
+  itemIndex?: number | null;
+};
+
+export type SubmitActionResult = SubmitTransactionResult & {
+  /** Hash of the exact SignedActionV1 bytes submitted by submitAction. */
+  actionHash: string;
+};
+
+export type TransactionStatusResult = {
+  transactionId: string;
+  status: TransactionState;
+  packageHash: string | null;
+  itemIndex: number | null;
   executionReceipt: string | null;
+  error: string | null;
+  /** Optional application-level receipts exposed by a compatible gateway. */
   actionReceipts?: ActionReceipt[];
-  context: FinalizedContext;
 };
 
 export type ActionReceipt = {
@@ -67,8 +72,8 @@ export interface RpcTransport {
 }
 
 const FORMAL_WORK_METHODS = new Set([
-  "minijam_submitWorkV1",
-  "minijam_getWorkStatusV1",
+  "minijam_submitTransactionV1",
+  "minijam_getTransactionStatusV1",
 ]);
 
 const STATE_PROVIDER_METHODS = new Set(["minijam_getManagedStateV1"]);
@@ -121,8 +126,8 @@ export type WorkRpc = RpcTransport & {
     stateRoot: string,
     keyBase64: string,
   ): Promise<ManagedStateResult>;
-  submitWork(request: SubmitWorkRequest): Promise<SubmitWorkResult>;
-  workStatus(packageHash: string): Promise<WorkStatusResult>;
+  submitTransaction(request: SubmitTransactionRequest): Promise<SubmitTransactionResult>;
+  transactionStatus(transactionId: string): Promise<TransactionStatusResult>;
 };
 
 export function asWorkRpc(transport: RpcTransport): WorkRpc {
@@ -134,8 +139,19 @@ export function asWorkRpc(transport: RpcTransport): WorkRpc {
       transport.call("minijam_getServiceStorageAt", [blockHash, serviceId, key]),
     managedStateAt: (serviceId, stateRoot, keyBase64) =>
       transport.call("minijam_getManagedStateV1", { serviceId, stateRoot, keyBase64 }),
-    submitWork: (request) => transport.call("minijam_submitWorkV1", request),
-    workStatus: (packageHash) =>
-      transport.call("minijam_getWorkStatusV1", { packageHash }),
+    submitTransaction: (request) => transport.call("minijam_submitTransactionV1", request),
+    transactionStatus: async (transactionId) => {
+      const result = await transport.call<TransactionStatusResult & { receipt?: string | null }>(
+        "minijam_getTransactionStatusV1",
+        { transactionId },
+      );
+      return {
+        ...result,
+        packageHash: result.packageHash ?? null,
+        itemIndex: result.itemIndex ?? null,
+        executionReceipt: result.executionReceipt ?? result.receipt ?? null,
+        error: result.error ?? null,
+      };
+    },
   };
 }

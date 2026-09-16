@@ -213,16 +213,21 @@ impl JamTarget {
         output_dir: &Path,
         native_modules: &[NativeModule],
     ) -> Result<BuildMetadata> {
-        let scriptc_root = self
-            .toolchain
-            .as_ref()
-            .map(|toolchain| toolchain.scriptc.clone())
-            .unwrap_or_else(|| workspace_root().join("toolchains/scriptc"));
-        let compiler = match self.toolchain.as_ref() {
-            Some(toolchain) => ScriptcCompiler::from_paths(&scriptc_root, &toolchain.node)?,
-            None => ScriptcCompiler::from_toolchain(&scriptc_root)?,
+        let artifact = if let Some(source_dir) = std::env::var_os("JAMSCRIPT_SCRIPTC_ARTIFACT_DIR")
+        {
+            reuse_scriptc_artifact(Path::new(&source_dir), &output_dir.join("scriptc"))?
+        } else {
+            let scriptc_root = self
+                .toolchain
+                .as_ref()
+                .map(|toolchain| toolchain.scriptc.clone())
+                .unwrap_or_else(|| workspace_root().join("toolchains/scriptc"));
+            let compiler = match self.toolchain.as_ref() {
+                Some(toolchain) => ScriptcCompiler::from_paths(&scriptc_root, &toolchain.node)?,
+                None => ScriptcCompiler::from_toolchain(&scriptc_root)?,
+            };
+            compiler.compile_service(ir, &output_dir.join("scriptc"))?
         };
-        let artifact = compiler.compile_service(ir, &output_dir.join("scriptc"))?;
         self.build_probe_inner(
             project_root,
             ir,
@@ -455,6 +460,49 @@ impl JamTarget {
         )?;
         Ok(metadata)
     }
+}
+
+/// Reuse a previously compiled ScriptC C artifact while regenerating the Rust
+/// guest and JAM blob for the current service context. This is intentionally an
+/// explicit development escape hatch for hosts where the ScriptC compiler's C
+/// toolchain is unavailable; normal builds always compile ScriptC from source.
+fn reuse_scriptc_artifact(source_dir: &Path, output_dir: &Path) -> Result<ScriptcArtifact> {
+    let source_dir = source_dir.canonicalize().with_context(|| {
+        format!(
+            "canonicalizing ScriptC artifact directory {}",
+            source_dir.display()
+        )
+    })?;
+    let metadata_path = source_dir
+        .parent()
+        .unwrap_or(&source_dir)
+        .join("build.json");
+    let metadata: ScriptcBuildMetadata = serde_json::from_slice(
+        &fs::read(&metadata_path)
+            .with_context(|| format!("reading {}", metadata_path.display()))?,
+    )
+    .with_context(|| format!("reading ScriptC metadata from {}", metadata_path.display()))?;
+
+    fs::create_dir_all(output_dir)?;
+    for entry in fs::read_dir(&source_dir)? {
+        let entry = entry?;
+        let source = entry.path();
+        if source.is_file() {
+            fs::copy(&source, output_dir.join(entry.file_name()))?;
+        }
+    }
+    let generated_c = output_dir.join("scriptc_service.lib.c");
+    let adapter_c = output_dir.join("scriptc_service_adapter.c");
+    for path in [&generated_c, &adapter_c] {
+        if !path.is_file() {
+            bail!("reused ScriptC artifact is missing {}", path.display());
+        }
+    }
+    Ok(ScriptcArtifact {
+        generated_c,
+        adapter_c,
+        metadata,
+    })
 }
 
 impl Default for JamTarget {

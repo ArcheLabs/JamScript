@@ -6,7 +6,7 @@ JamScript v0 is released as a testnet developer preview. Its supported product p
 JamScript source
   -> canonical PolkaVM Service artifact
   -> generated, statically linked Builder application
-  -> Formal Work RPC
+  -> Formal transaction ingress and batch queue
   -> finalized managed-state commitment
   -> proof-verified client query
 ```
