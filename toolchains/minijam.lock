@@ -1,5 +1,5 @@
 repository = "https://github.com/ArcheLabs/minijam-client"
-revision = "14853282f194adcfc6e462daf05a0a5ededfe687"
+revision = "042d21b91c2eb3daf35db395a1cf6629aa3a641c"
 container_revision = "465b75a355239b4828fdc0630539c439bb3764dd"
 node_image = "ghcr.io/archelabs/minijam-node@sha256:07fd511fc2a5e7c42913797743b3ea024ae91d4fa44b926babc44f194188f05c"
 worker_image = "ghcr.io/archelabs/minijam-worker@sha256:1120aba911cfd163e3fdd1ae069629dfbc0567dbc1b5420376d77a9e011e3d58"

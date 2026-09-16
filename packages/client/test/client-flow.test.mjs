@@ -4,6 +4,7 @@ import {
   JamScriptClient,
   RpcError,
   actionSelector,
+  decodeSignedActionV1,
   toHex,
 } from "../dist/index.js";
 
@@ -132,6 +133,78 @@ test("submitAction signs once and submits a logical transaction", async () => {
   assert.equal(contextReads, 1);
   const nonceRead = calls.find((call) => call.method === "minijam_getServiceStorageAt");
   assert.equal(nonceRead.params[0], initialContext.blockHash);
+});
+
+function nonceAwareTransport({ failFirstSubmission = false, submissionDelayMs = 0 } = {}) {
+  const submissions = [];
+  let submissionCount = 0;
+  let activeSubmissions = 0;
+  let maxActiveSubmissions = 0;
+  return {
+    submissions,
+    get maxActiveSubmissions() { return maxActiveSubmissions; },
+    async call(method, params = []) {
+      if (method === "chain_getBlockHash") return genesisHash;
+      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "jamscript_getStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
+      if (method === "minijam_submitTransactionV1") {
+        submissions.push(params);
+        submissionCount += 1;
+        if (failFirstSubmission && submissionCount === 1) throw new RpcError("admission failed", -32001);
+        activeSubmissions += 1;
+        maxActiveSubmissions = Math.max(maxActiveSubmissions, activeSubmissions);
+        if (submissionDelayMs) await new Promise((resolve) => setTimeout(resolve, submissionDelayMs));
+        activeSubmissions -= 1;
+        return transactionResult("0x" + submissionCount.toString(16).padStart(2, "0").repeat(32));
+      }
+      throw new Error("unexpected RPC method: " + method);
+    },
+  };
+}
+
+test("client keeps a per-signer lane while different signers submit in parallel", async () => {
+  const transport = nonceAwareTransport({ submissionDelayMs: 25 });
+  const client = new JamScriptClient(deployment, transport);
+  const alice = {
+    publicKey: new Uint8Array(32).fill(1),
+    async signRaw() { return new Uint8Array(64).fill(1); },
+  };
+  const bob = {
+    publicKey: new Uint8Array(32).fill(2),
+    async signRaw() { return new Uint8Array(64).fill(2); },
+  };
+  await Promise.all([
+    client.submitAction("submit", { score: 1n }, alice),
+    client.submitAction("submit", { score: 3n }, alice),
+    client.submitAction("submit", { score: 2n }, bob),
+  ]);
+  assert.equal(transport.submissions.length, 3);
+  assert.equal(transport.maxActiveSubmissions, 2);
+  const nonces = transport.submissions.map((request) =>
+    decodeSignedActionV1(Uint8Array.from(Buffer.from(request.payloadBase64, "base64"))));
+  assert.deepEqual(
+    nonces.filter((action) => action.publicKey[0] === 1).map((action) => action.nonce),
+    [0n, 1n],
+  );
+  console.log("CLIENT_PER_SIGNER_LANE=PASS");
+  console.log("CLIENT_CROSS_SIGNER_PARALLEL=PASS");
+});
+
+test("client resynchronizes a signer nonce after admission failure", async () => {
+  const transport = nonceAwareTransport({ failFirstSubmission: true });
+  const client = new JamScriptClient(deployment, transport);
+  const signer = {
+    publicKey: new Uint8Array(32).fill(3),
+    async signRaw() { return new Uint8Array(64).fill(3); },
+  };
+  await assert.rejects(client.submitAction("submit", { score: 3n }, signer), /admission failed/);
+  await client.submitAction("submit", { score: 4n }, signer);
+  const second = decodeSignedActionV1(Uint8Array.from(Buffer.from(transport.submissions[1].payloadBase64, "base64")));
+  assert.equal(second.nonce, 0n);
+  console.log("CLIENT_ADMISSION_FAILURE_RESYNC=PASS");
 });
 
 test("query reads and decodes state at the finalized block", async () => {

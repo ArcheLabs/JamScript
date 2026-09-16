@@ -26,6 +26,7 @@ const serviceId = Number(process.env.JAMSCRIPT_E2E_SERVICE_ID);
 const serviceKey = process.env.JAMSCRIPT_E2E_SERVICE_KEY;
 const codeHash = process.env.JAMSCRIPT_E2E_CODE_HASH;
 const genesisHash = process.env.JAMSCRIPT_E2E_GENESIS_HASH;
+const resultPath = process.env.JAMSCRIPT_E2E_RESULT ?? path.join(artifacts ?? ".", "e2e-result.json");
 
 if (!artifacts || !Number.isInteger(serviceId) || !serviceKey || !codeHash || !genesisHash) {
   throw new Error("transaction E2E deployment variables are incomplete");
@@ -67,10 +68,60 @@ function signer(seed) {
   };
 }
 
+async function directSignedAction(abi, actionName, input, pair, nonce) {
+  const payload = encodeActionPayload(abi, actionName, input);
+  const unsigned = {
+    version: 1,
+    networkDomain: parseHex(genesisHash, 32),
+    serviceKey: parseHex(serviceKey, 32),
+    actionSelector: actionSelector(actionName),
+    signerScheme: 0,
+    publicKey: pair.publicKey,
+    nonce: BigInt(nonce),
+    validUntil: BigInt((await backendContext()).slot) + 64n,
+    payloadHash: blake2AsU8a(payload, 256),
+    payload,
+  };
+  const signature = await sr25519Sign(signingDigestV1(unsigned), pair);
+  const bytes = encodeSignedActionV1({ ...unsigned, signature });
+  return {
+    nonce,
+    actionHash: toHex(blake2AsU8a(bytes, 256)),
+    payloadBase64: Buffer.from(bytes).toString("base64"),
+  };
+}
+
+let backend;
+async function backendContext() {
+  return backend.call("minijam_getFinalizedContext");
+}
+
+function measured(submissions, statuses) {
+  const formalTransactionIds = [...new Set(statuses.map((item) => item.formalTransactionId).filter(Boolean))];
+  const packageHashes = [...new Set(statuses.map((item) => item.packageHash).filter(Boolean))];
+  const workItems = [...new Set(statuses
+    .filter((item) => item.packageHash !== null && item.itemIndex !== null)
+    .map((item) => `${item.packageHash}:${item.itemIndex}`))]
+    .map((value) => {
+      const [packageHash, itemIndex] = value.split(":");
+      return { packageHash, itemIndex: Number(itemIndex) };
+    });
+  const receipts = statuses
+    .map((item) => item.actionReceipts?.[item.actionIndex ?? -1])
+    .filter(Boolean);
+  return {
+    logicalTransactionIds: submissions.map((item) => item.transactionId),
+    formalTransactionIds,
+    packageHashes,
+    workItems,
+    receipts,
+  };
+}
+
 async function main() {
   await cryptoWaitReady();
   const abi = await readJson("service.abi.json");
-  const backend = new FetchRpcTransport(backendUrl);
+  backend = new FetchRpcTransport(backendUrl);
   const client = new JamScriptClient(deployment(abi), backend, { stateVerification: "proof" });
   const { pair, value: wallet } = signer("09");
   const firstKey = new Uint8Array(32).fill(0x11);
@@ -86,7 +137,6 @@ async function main() {
   console.log(`SEEDED_VALUE_BYTES=${toHex(seededValue)}`);
   assert.equal(new DataView(seededValue.buffer, seededValue.byteOffset + 32, 4).getUint32(0, true), 10);
   console.log("SINGLE_ACTION_SERVICE_DEPLOY=PASS");
-  console.log("LOGICAL_TRANSACTION_COUNT=1");
   console.log("SINGLE_ACTION_E2E=PASS");
 
   const batch = await Promise.all([
@@ -105,6 +155,36 @@ async function main() {
   console.log("CONCURRENT_BATCH_ORDER_DETERMINISTIC=PASS");
   console.log("BATCHED_ACTION_E2E=PASS");
 
+  const outOfOrderPair = signer("0a").pair;
+  const outOfOrder = await Promise.all([2, 0, 1].map(async (nonce) => {
+    const action = await directSignedAction(abi, "advance", { key: firstKey }, outOfOrderPair, nonce);
+    const submitted = await backend.call("minijam_submitTransactionV1", {
+      serviceId,
+      serviceCodeHash: codeHash,
+      payloadBase64: action.payloadBase64,
+      extrinsicsBase64: [],
+    });
+    return { ...submitted, actionHash: action.actionHash, nonce };
+  }));
+  const outOfOrderResults = await Promise.all(outOfOrder.map((item) =>
+    client.waitForAction(item.transactionId, item.actionHash, { intervalMs: 250, timeoutMs: 180_000 })));
+  assert.deepEqual(outOfOrderResults.map((item) => item.actionIndex), [2, 0, 1]);
+  assert.deepEqual(outOfOrderResults.map((item) => item.status), ["applied", "applied", "applied"]);
+  console.log("OUT_OF_ORDER_SUBMISSION_NONCES=2,0,1");
+  console.log("OUT_OF_ORDER_CANONICAL_NONCES=0,1,2");
+  console.log("OUT_OF_ORDER_ACTION_INDEXES=2,0,1");
+  console.log("OUT_OF_ORDER_SAME_SIGNER=PASS");
+
+  const crossSignerInputs = ["0b", "0c", "0d"].map((seed) => signer(seed));
+  const crossSigner = await Promise.all(crossSignerInputs.map(({ value }) =>
+    client.submitAction("advance", { key: firstKey }, value)));
+  const crossSignerResults = await Promise.all(crossSigner.map((item) =>
+    client.waitForAction(item.transactionId, item.actionHash, { intervalMs: 250, timeoutMs: 180_000 })));
+  assert.deepEqual(crossSignerResults.map((item) => item.status), ["applied", "applied", "applied"]);
+  assert.equal(new Set(crossSignerResults.map((item) => item.packageHash)).size, 1);
+  console.log("CROSS_SIGNER_ACTION_HASH_MAPPING=PASS");
+  console.log("CROSS_SIGNER_E2E=PASS");
+
   const second = await Promise.all([
     client.submitAction("advance", { key: firstKey }, wallet),
     client.submitAction("advance", { key: firstKey }, wallet),
@@ -113,7 +193,7 @@ async function main() {
   assert.deepEqual(secondResults.map((item) => item.actionIndex), [0, 1]);
   assert.deepEqual(secondResults.map((item) => item.status), ["applied", "applied"]);
   const secondValue = await managedValue(backend, valueKey);
-  assert.equal(new DataView(secondValue.buffer, secondValue.byteOffset + 32, 4).getUint32(0, true), 15);
+  assert.equal(new DataView(secondValue.buffer, secondValue.byteOffset + 32, 4).getUint32(0, true), 21);
   console.log("BATCH_CHAIN_CONTINUITY=PASS");
   console.log("SECOND_BATCH_PARENT_MATCH=PASS");
 
@@ -126,7 +206,7 @@ async function main() {
   assert.deepEqual(failureResults.map((item) => item.actionIndex), [0, 1, 2]);
   assert.deepEqual(failureResults.map((item) => item.status), ["applied", "failed", "applied"]);
   const finalValue = await managedValue(backend, valueKey);
-  assert.equal(new DataView(finalValue.buffer, finalValue.byteOffset + 32, 4).getUint32(0, true), 17);
+  assert.equal(new DataView(finalValue.buffer, finalValue.byteOffset + 32, 4).getUint32(0, true), 23);
   console.log("FAILURE_ISOLATION=PASS");
   console.log("FINALIZED_STATE_MATCH=PASS");
 
@@ -160,8 +240,19 @@ async function main() {
   assert.equal(staleStatus.status, "imported");
   assert.equal(staleStatus.actionReceipts?.[staleStatus.actionIndex ?? 0]?.status, "rejected");
   const unchangedValue = await managedValue(backend, valueKey);
-  assert.equal(new DataView(unchangedValue.buffer, unchangedValue.byteOffset + 32, 4).getUint32(0, true), 17);
+  assert.equal(new DataView(unchangedValue.buffer, unchangedValue.byteOffset + 32, 4).getUint32(0, true), 23);
   console.log("STALE_NONCE=PASS");
+  const result = {
+    jamscriptHead: process.env.JAMSCRIPT_EXECUTED_SHA ?? null,
+    single: measured([seed], [seeded]),
+    batch: measured(batch, batchResults),
+    outOfOrder: measured(outOfOrder, outOfOrderResults),
+    crossSigner: measured(crossSigner, crossSignerResults),
+    secondBatch: measured(second, secondResults),
+    failureBatch: measured(failureBatch, failureResults),
+    stale: measured([staleSubmitted], [staleStatus]),
+  };
+  await fs.writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`);
   console.log("REAL_MINIJAM_E2E=PASS");
 }
 

@@ -42,6 +42,7 @@ export type SubmitTransactionResult = {
   packageHash?: string | null;
   itemIndex?: number | null;
   actionIndex?: number | null;
+  formalTransactionId?: string | null;
 };
 
 export type SubmitActionResult = SubmitTransactionResult & {
@@ -54,6 +55,7 @@ export type TransactionStatusResult = {
   packageHash: string | null;
   itemIndex: number | null;
   actionIndex: number | null;
+  formalTransactionId: string | null;
   executionReceipt: string | null;
   error: string | null;
   actionReceipts?: ActionReceipt[];
@@ -209,6 +211,7 @@ export function asWorkRpc(transport: RpcTransport): WorkRpc {
         packageHash: result.packageHash ?? null,
         itemIndex: result.itemIndex ?? null,
         actionIndex: result.actionIndex ?? null,
+        formalTransactionId: result.formalTransactionId ?? null,
         executionReceipt: result.executionReceipt ?? result.receipt ?? null,
         error: result.error ?? null,
       };

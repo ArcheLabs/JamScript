@@ -11,7 +11,7 @@ import {
   toHex,
   type SignedActionV1,
 } from "./crypto.js";
-import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitActionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
@@ -46,9 +46,7 @@ export class JamScriptClient {
   private readonly rpc: WorkRpc;
   private readonly actionHashes = new Map<string, string>();
   private readonly nextNonces = new Map<string, bigint>();
-  private readonly chainNonceLoads = new Map<string, Promise<bigint>>();
-  private nonceTail: Promise<void> = Promise.resolve();
-  private submitTail: Promise<void> = Promise.resolve();
+  private readonly signerTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly deployment: DeploymentDescriptor,
@@ -94,47 +92,37 @@ export class JamScriptClient {
     signer: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number } = {},
   ): Promise<SubmitActionResult> {
-    const noncePrevious = this.nonceTail;
-    let releaseNonce!: () => void;
-    this.nonceTail = new Promise<void>((resolve) => {
-      releaseNonce = resolve;
+    if (signer.publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
+    const signerKey = toHex(signer.publicKey).toLowerCase();
+    const previous = this.signerTails.get(signerKey) ?? Promise.resolve();
+    let release!: () => void;
+    const lane = new Promise<void>((resolve) => {
+      release = resolve;
     });
-    const releaseNonceOnce = (() => {
-      let released = false;
-      return () => {
-        if (!released) {
-          released = true;
-          releaseNonce();
-        }
-      };
-    })();
-    let prepared: { request: Parameters<WorkRpc["submitTransaction"]>[0]; actionHash: string };
+    this.signerTails.set(signerKey, lane);
+    await previous;
     try {
-      prepared = await this.prepareAction(
+      const prepared = await this.prepareAction(
         actionName,
         input,
         signer,
         options,
-        noncePrevious,
-        releaseNonceOnce,
       );
-    } catch (error) {
-      releaseNonceOnce();
-      throw error;
+      let submitted: SubmitTransactionResult;
+      try {
+        submitted = await this.rpc.submitTransaction(prepared.request);
+      } catch (error) {
+        // Admission failure means the local reservation may have created a
+        // nonce gap.  Force the next action in this signer lane to resync.
+        this.nextNonces.delete(signerKey);
+        throw error;
+      }
+      this.actionHashes.set(submitted.transactionId.toLowerCase(), prepared.actionHash);
+      return { ...submitted, actionHash: prepared.actionHash };
+    } finally {
+      release();
+      if (this.signerTails.get(signerKey) === lane) this.signerTails.delete(signerKey);
     }
-    const submitPrevious = this.submitTail;
-    let releaseSubmit!: () => void;
-    this.submitTail = new Promise<void>((resolve) => {
-      releaseSubmit = resolve;
-    });
-    await submitPrevious;
-    const submission = this.rpc.submitTransaction(prepared.request);
-    // Release the next caller as soon as this request is handed to the
-    // transport, so all ordered requests can still share the batch window.
-    releaseSubmit();
-    const submitted = await submission;
-    this.actionHashes.set(submitted.transactionId.toLowerCase(), prepared.actionHash);
-    return { ...submitted, actionHash: prepared.actionHash };
   }
 
   private async prepareAction(
@@ -142,8 +130,6 @@ export class JamScriptClient {
     input: Record<string, CodecValue>,
     signer: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number },
-    noncePrevious: Promise<void>,
-    releaseNonce: () => void,
   ): Promise<{ request: Parameters<WorkRpc["submitTransaction"]>[0]; actionHash: string }> {
     await this.validateDeployment();
     const action = actionByName(this.deployment.abi, actionName);
@@ -156,25 +142,10 @@ export class JamScriptClient {
     }
     const initialContext = await this.rpc.finalizedContext();
     const signerKey = toHex(signer.publicKey).toLowerCase();
-    await noncePrevious;
-    let nonce: bigint;
-    try {
-      // All concurrent calls share the first chain nonce read. The nonce gate
-      // is registered synchronously by submitAction, so allocation order is
-      // invocation order even when finalized-state preparation completes in
-      // a different order.
-      let chainNonceLoad = this.chainNonceLoads.get(signerKey);
-      if (!chainNonceLoad) {
-        chainNonceLoad = this.readNonce(signer.publicKey, initialContext);
-        this.chainNonceLoads.set(signerKey, chainNonceLoad);
-      }
-      const chainNonce = await chainNonceLoad;
-      const nextNonce = this.nextNonces.get(signerKey) ?? chainNonce;
-      nonce = nextNonce < chainNonce ? chainNonce : nextNonce;
-      this.nextNonces.set(signerKey, nonce + 1n);
-    } finally {
-      releaseNonce();
-    }
+    const chainNonce = await this.readNonce(signer.publicKey, initialContext);
+    const localNonce = this.nextNonces.get(signerKey) ?? 0n;
+    const nonce = localNonce < chainNonce ? chainNonce : localNonce;
+    this.nextNonces.set(signerKey, nonce + 1n);
     const ttl = options.ttl ?? 64n;
     const validUntil = BigInt(initialContext.slot) + ttl;
     const unsigned: Omit<SignedActionV1, "signature"> = {
