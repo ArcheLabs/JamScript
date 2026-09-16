@@ -35,7 +35,7 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
-base64 = "0.22.1"
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 blake2b_simd = { version = "1.0.4", default-features = false }
 bounded-collections = { version = "0.2.4", default-features = false }
 jam-program-blob-common = { version = "=0.1.28", default-features = false, features = ["std", "polkavm"] }
