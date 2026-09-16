@@ -1464,6 +1464,8 @@ pub struct ExecutionContext<'a> {
     access_plan: Option<&'a StateAccessPlanV1>,
     external_state: Option<&'a mut dyn ExternalStateAccess>,
     sender: Option<[u8; 32]>,
+    owner: Option<ownership_core::Ownership>,
+    controller: Option<ownership_core::Ownership>,
     transition_valid_until: Option<u64>,
 }
 
@@ -1474,6 +1476,8 @@ impl<'a> ExecutionContext<'a> {
             access_plan: None,
             external_state: None,
             sender,
+            owner: None,
+            controller: None,
             transition_valid_until: None,
         }
     }
@@ -1488,6 +1492,8 @@ impl<'a> ExecutionContext<'a> {
             access_plan: Some(access_plan),
             external_state: None,
             sender,
+            owner: None,
+            controller: None,
             transition_valid_until: None,
         }
     }
@@ -1503,6 +1509,8 @@ impl<'a> ExecutionContext<'a> {
             access_plan: Some(access_plan),
             external_state: Some(external_state),
             sender,
+            owner: None,
+            controller: None,
             transition_valid_until: None,
         }
     }
@@ -1539,6 +1547,23 @@ impl<'a> ExecutionContext<'a> {
 
     pub fn sender(&self) -> Option<[u8; 32]> {
         self.sender
+    }
+
+    pub fn set_ownership(
+        &mut self,
+        owner: ownership_core::Ownership,
+        controller: ownership_core::Ownership,
+    ) {
+        self.owner = Some(owner);
+        self.controller = Some(controller);
+    }
+
+    pub fn owner(&self) -> Option<&ownership_core::Ownership> {
+        self.owner.as_ref()
+    }
+
+    pub fn controller(&self) -> Option<&ownership_core::Ownership> {
+        self.controller.as_ref()
     }
 
     pub fn constrain_valid_until(&mut self, valid_until: u64) {

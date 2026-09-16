@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 jamscript-crypto = { path = "../jamscript-crypto" }
 jamscript-protocol = { path = "../jamscript-protocol" }
+ownership-core = { path = "../ownership-core" }
 service-runtime-core = { path = "../service-runtime-core" }

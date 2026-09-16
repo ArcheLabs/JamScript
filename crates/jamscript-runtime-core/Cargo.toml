@@ -5,8 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64.workspace = true
 blake2b_simd.workspace = true
 jamscript-crypto = { path = "../jamscript-crypto", default-features = false }
+ownership-core = { path = "../ownership-core" }
 service-runtime-core = { path = "../service-runtime-core", default-features = false }
 
 [dev-dependencies]

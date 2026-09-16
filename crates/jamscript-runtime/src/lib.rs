@@ -1,12 +1,143 @@
 use jamscript_crypto::Address;
 use jamscript_protocol::{ProtocolError, VerifiedAction};
+use ownership_core::{Ownership, OwnershipKey};
 use service_runtime_core::application_key_v1;
 use std::collections::BTreeMap;
 
 pub const STATE_KEY_DOMAIN_V1: &[u8] = b"jamscript/state/v1";
 pub const RUNTIME_NONCE_NAMESPACE_V1: &[u8] = b"__jamscript/runtime/auth/nonces/";
+pub const CONTROL_CLAIM_NAMESPACE_V1: &[u8] = b"__jamscript/runtime/ownership/control/";
 
 pub type StateKey = Vec<u8>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlClaim {
+    pub subject: OwnershipKey,
+    pub controller: OwnershipKey,
+    pub version: u8,
+    pub active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlClaimError {
+    InvalidOwnership,
+    Unauthorized,
+    AlreadyExists,
+    NotFound,
+    AlreadyRevoked,
+    AlreadyInitialized,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ControlClaimState {
+    claims: BTreeMap<(OwnershipKey, OwnershipKey), ControlClaim>,
+    initialized: BTreeMap<OwnershipKey, bool>,
+}
+
+impl ControlClaimState {
+    pub fn is_initialized(&self, subject: &Ownership) -> bool {
+        subject
+            .key()
+            .ok()
+            .and_then(|key| self.initialized.get(&key).copied())
+            .unwrap_or(false)
+    }
+
+    pub fn bootstrap_controller(
+        &mut self,
+        subject: &Ownership,
+        controller: &Ownership,
+        effective_owner: &Ownership,
+    ) -> Result<(), ControlClaimError> {
+        let subject_key = subject
+            .key()
+            .map_err(|_| ControlClaimError::InvalidOwnership)?;
+        if self.initialized.get(&subject_key).copied().unwrap_or(false) {
+            return Err(ControlClaimError::AlreadyInitialized);
+        }
+        self.add_controller(subject, controller, effective_owner)?;
+        self.initialized.insert(subject_key, true);
+        Ok(())
+    }
+
+    pub fn is_active(&self, subject: &Ownership, controller: &Ownership) -> bool {
+        let Ok(subject) = subject.key() else {
+            return false;
+        };
+        let Ok(controller) = controller.key() else {
+            return false;
+        };
+        self.claims
+            .get(&(subject, controller))
+            .is_some_and(|claim| claim.active)
+    }
+
+    pub fn add_controller(
+        &mut self,
+        subject: &Ownership,
+        controller: &Ownership,
+        effective_owner: &Ownership,
+    ) -> Result<(), ControlClaimError> {
+        let subject_key = subject
+            .key()
+            .map_err(|_| ControlClaimError::InvalidOwnership)?;
+        let controller_key = controller
+            .key()
+            .map_err(|_| ControlClaimError::InvalidOwnership)?;
+        let effective_key = effective_owner
+            .key()
+            .map_err(|_| ControlClaimError::InvalidOwnership)?;
+        if effective_key != subject_key {
+            return Err(ControlClaimError::Unauthorized);
+        }
+        if self.claims.contains_key(&(subject_key, controller_key)) {
+            return Err(ControlClaimError::AlreadyExists);
+        }
+        self.claims.insert(
+            (subject_key, controller_key),
+            ControlClaim {
+                subject: subject_key,
+                controller: controller_key,
+                version: 1,
+                active: true,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn revoke_controller(
+        &mut self,
+        subject: &Ownership,
+        controller: &Ownership,
+        effective_owner: &Ownership,
+    ) -> Result<(), ControlClaimError> {
+        let subject_key = subject
+            .key()
+            .map_err(|_| ControlClaimError::InvalidOwnership)?;
+        let controller_key = controller
+            .key()
+            .map_err(|_| ControlClaimError::InvalidOwnership)?;
+        let effective_key = effective_owner
+            .key()
+            .map_err(|_| ControlClaimError::InvalidOwnership)?;
+        if effective_key != subject_key {
+            return Err(ControlClaimError::Unauthorized);
+        }
+        let claim = self
+            .claims
+            .get_mut(&(subject_key, controller_key))
+            .ok_or(ControlClaimError::NotFound)?;
+        if !claim.active {
+            return Err(ControlClaimError::AlreadyRevoked);
+        }
+        claim.active = false;
+        Ok(())
+    }
+
+    pub fn claims(&self) -> impl Iterator<Item = &ControlClaim> {
+        self.claims.values()
+    }
+}
 
 pub fn state_key(_service_id: u32, schema_id: &[u8], canonical_user_key: &[u8]) -> StateKey {
     application_key_v1(schema_id, canonical_user_key)
@@ -18,6 +149,8 @@ pub struct InMemoryRuntime {
     service_id: u32,
     state: BTreeMap<StateKey, Vec<u8>>,
     next_nonce: BTreeMap<Address, u64>,
+    ownership_nonces: BTreeMap<OwnershipKey, u64>,
+    control_claims: ControlClaimState,
 }
 
 impl InMemoryRuntime {
@@ -26,6 +159,8 @@ impl InMemoryRuntime {
             service_id,
             state: BTreeMap::new(),
             next_nonce: BTreeMap::new(),
+            ownership_nonces: BTreeMap::new(),
+            control_claims: ControlClaimState::default(),
         }
     }
 
@@ -35,6 +170,21 @@ impl InMemoryRuntime {
 
     pub fn next_nonce(&self, sender: &Address) -> u64 {
         self.next_nonce.get(sender).copied().unwrap_or(0)
+    }
+
+    pub fn next_ownership_nonce(&self, owner: &Ownership) -> Result<u64, ControlClaimError> {
+        let key = owner
+            .key()
+            .map_err(|_| ControlClaimError::InvalidOwnership)?;
+        Ok(self.ownership_nonces.get(&key).copied().unwrap_or(0))
+    }
+
+    pub fn control_claims(&self) -> &ControlClaimState {
+        &self.control_claims
+    }
+
+    pub fn control_claims_mut(&mut self) -> &mut ControlClaimState {
+        &mut self.control_claims
     }
 
     pub fn read(&self, schema_id: &[u8], key: &[u8]) -> Option<&[u8]> {
@@ -85,6 +235,53 @@ impl InMemoryRuntime {
                 ActionReceipt::applied(action)
             }
             Err(error_code) => ActionReceipt::failed(action, error_code),
+        }
+    }
+
+    pub fn apply_ownership_action<F>(
+        &mut self,
+        action: &jamscript_protocol::VerifiedOwnershipAction,
+        commit: F,
+    ) -> OwnershipActionReceipt
+    where
+        F: FnOnce(
+            &mut StateTransaction<'_>,
+            &jamscript_protocol::VerifiedOwnershipAction,
+        ) -> Result<(), u32>,
+    {
+        let owner_key = match action.owner.key() {
+            Ok(key) => key,
+            Err(_) => return OwnershipActionReceipt::rejected(action, 15),
+        };
+        let expected = self.ownership_nonces.get(&owner_key).copied().unwrap_or(0);
+        if action.nonce != expected {
+            return OwnershipActionReceipt::rejected(action, 17);
+        }
+        if expected == u64::MAX {
+            return OwnershipActionReceipt::rejected(action, RuntimeError::NonceExhausted.code());
+        }
+        let mut transaction = StateTransaction {
+            service_id: self.service_id,
+            base: &self.state,
+            writes: BTreeMap::new(),
+        };
+        let result = commit(&mut transaction, action);
+        self.ownership_nonces.insert(owner_key, expected + 1);
+        match result {
+            Ok(()) => {
+                for (key, value) in transaction.into_writes() {
+                    match value {
+                        Some(value) => {
+                            self.state.insert(key, value);
+                        }
+                        None => {
+                            self.state.remove(&key);
+                        }
+                    }
+                }
+                OwnershipActionReceipt::applied(action)
+            }
+            Err(code) => OwnershipActionReceipt::failed(action, code),
         }
     }
 
@@ -148,6 +345,49 @@ pub struct ActionReceipt {
     pub nonce: Option<u64>,
     pub status: ActionStatus,
     pub error_code: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnershipActionReceipt {
+    pub action_hash: [u8; 32],
+    pub owner: Ownership,
+    pub controller: Ownership,
+    pub nonce: u64,
+    pub status: ActionStatus,
+    pub error_code: Option<u32>,
+}
+
+impl OwnershipActionReceipt {
+    fn applied(action: &jamscript_protocol::VerifiedOwnershipAction) -> Self {
+        Self {
+            action_hash: action.action_hash,
+            owner: action.owner.clone(),
+            controller: action.controller.clone(),
+            nonce: action.nonce,
+            status: ActionStatus::Applied,
+            error_code: None,
+        }
+    }
+    fn failed(action: &jamscript_protocol::VerifiedOwnershipAction, error_code: u32) -> Self {
+        Self {
+            action_hash: action.action_hash,
+            owner: action.owner.clone(),
+            controller: action.controller.clone(),
+            nonce: action.nonce,
+            status: ActionStatus::Failed,
+            error_code: Some(error_code),
+        }
+    }
+    fn rejected(action: &jamscript_protocol::VerifiedOwnershipAction, error_code: u32) -> Self {
+        Self {
+            action_hash: action.action_hash,
+            owner: action.owner.clone(),
+            controller: action.controller.clone(),
+            nonce: action.nonce,
+            status: ActionStatus::Rejected,
+            error_code: Some(error_code),
+        }
+    }
 }
 
 impl ActionReceipt {
@@ -318,5 +558,36 @@ mod tests {
             state_key(1, b"scores", b"alice")
         );
         assert_ne!(state_key(1, b"a", b"bc"), state_key(1, b"ab", b"c"));
+    }
+
+    #[test]
+    fn control_claims_are_explicit_revocable_and_non_transitive() {
+        let subject =
+            Ownership::from_array(ownership_core::OwnershipKind::Ed25519Key, [1; 32]).unwrap();
+        let first =
+            Ownership::from_array(ownership_core::OwnershipKind::Ed25519Key, [2; 32]).unwrap();
+        let second =
+            Ownership::from_array(ownership_core::OwnershipKind::Ed25519Key, [3; 32]).unwrap();
+        let mut claims = ControlClaimState::default();
+        claims
+            .bootstrap_controller(&subject, &first, &subject)
+            .unwrap();
+        assert!(claims.is_initialized(&subject));
+        assert_eq!(
+            claims.bootstrap_controller(&subject, &second, &subject),
+            Err(ControlClaimError::AlreadyInitialized)
+        );
+        assert!(claims.is_active(&subject, &first));
+        assert!(!claims.is_active(&subject, &second));
+        assert_eq!(
+            claims.add_controller(&subject, &second, &first),
+            Err(ControlClaimError::Unauthorized)
+        );
+        claims.add_controller(&subject, &second, &subject).unwrap();
+        claims
+            .revoke_controller(&subject, &first, &subject)
+            .unwrap();
+        assert!(!claims.is_active(&subject, &first));
+        assert!(claims.is_active(&subject, &second));
     }
 }

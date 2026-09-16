@@ -2,7 +2,12 @@
 
 extern crate alloc;
 
-use jamscript_crypto::{blake2_256, verify_sr25519, Address};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use jamscript_crypto::{
+    blake2_256, verify_evm_ownership, verify_ownership, verify_polkadot_ownership, verify_sr25519,
+    Address,
+};
+pub use ownership_core::Ownership;
 use service_runtime_core::{application_key_v1, wallet_nonce_key_v1, ServiceKeyV1};
 
 pub const RUNTIME_VERSION: &str = "0.1.0";
@@ -12,6 +17,10 @@ pub const MAX_RESULT_BYTES: usize = 1_048_576;
 pub const ACTION_DOMAIN_V1: &[u8] = b"JAMSCRIPT_ACTION_V1";
 pub const STATE_KEY_DOMAIN_V1: &[u8] = b"jamscript/state/v1";
 pub const NONCE_SCHEMA_V1: &[u8] = b"__jamscript/runtime/auth/nonces/";
+pub const OWNERSHIP_NONCE_SCHEMA_V1: &[u8] = b"__jamscript/runtime/ownership/nonces/";
+pub const CONTROL_CLAIM_NAMESPACE_V1: &[u8] = b"__jamscript/runtime/ownership/control/";
+pub const ACTION_COMMITMENT_DOMAIN_V2: &[u8] = b"JAMSCRIPT_ACTION_V2";
+pub const MAX_AUTHORIZATION_PROOF_BYTES: usize = 65_536;
 pub const MANAGEMENT_DOMAIN_V1: &[u8] = b"jamscript/management/v1";
 pub const MANAGEMENT_VERSION_KEY: &[u8] = b"__jamscript/management/version";
 pub const MANAGEMENT_INITIALIZED_KEY: &[u8] = b"__jamscript/management/initialized";
@@ -279,6 +288,25 @@ pub enum RuntimeError {
     NonceMismatch = 10,
     UnsupportedSigner = 11,
     OutputTooLarge = 14,
+    InvalidOwnershipEncoding = 15,
+    InvalidOwnershipAuthorization = 16,
+    OwnershipNonceMismatch = 17,
+    ControlClaimNotFound = 18,
+    InvalidControlClaim = 19,
+    ControlClaimRevoked = 20,
+    ControlClaimAlreadyExists = 21,
+    ControlSubjectMismatch = 22,
+    ControllerMismatch = 23,
+    ControlAlreadyInitialized = 24,
+    PolkadotInvalidSignature = 25,
+    EvmInvalidSignature = 26,
+    EvmAddressMismatch = 27,
+    MatrixInvalidMasterProof = 28,
+    MatrixInvalidSelfSigningProof = 29,
+    MatrixInvalidDeviceProof = 30,
+    MatrixDeviceNotCrossSigned = 31,
+    MatrixBootstrapAlreadyCompleted = 32,
+    MatrixUnsupportedDeviceProfile = 33,
 }
 
 impl RuntimeError {
@@ -306,6 +334,33 @@ pub struct SignedActionV1View<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VerifiedAction<'a> {
     pub sender: Address,
+    pub action_hash: [u8; 32],
+    pub action_selector: [u8; 8],
+    pub nonce: u64,
+    pub valid_until: u64,
+    pub payload: &'a [u8],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedActionV2View<'a> {
+    pub version: u8,
+    pub network_domain: [u8; 32],
+    pub service_key: ServiceKeyV1,
+    pub action_selector: [u8; 8],
+    pub controller: Ownership,
+    pub act_as: Option<Ownership>,
+    pub nonce: u64,
+    pub valid_until: u64,
+    pub payload_hash: [u8; 32],
+    pub authorization_proof: &'a [u8],
+    pub payload: &'a [u8],
+    pub encoded: &'a [u8],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedOwnershipAction<'a> {
+    pub owner: Ownership,
+    pub controller: Ownership,
     pub action_hash: [u8; 32],
     pub action_selector: [u8; 8],
     pub nonce: u64,
@@ -362,6 +417,164 @@ pub fn decode_signed_action_v1(bytes: &[u8]) -> Result<SignedActionV1View<'_>, R
         payload,
         encoded: bytes,
     })
+}
+
+pub fn decode_signed_action_v2(bytes: &[u8]) -> Result<SignedActionV2View<'_>, RuntimeError> {
+    if bytes.len() > MAX_ACTION_BYTES {
+        return Err(RuntimeError::PayloadTooLarge);
+    }
+    let mut reader = Reader { bytes, offset: 0 };
+    let version = reader.u8()?;
+    if version != 2 {
+        return Err(RuntimeError::UnsupportedVersion);
+    }
+    let network_domain = reader.array::<32>()?;
+    let service_key = ServiceKeyV1::new(reader.array::<32>()?);
+    let action_selector = reader.array::<8>()?;
+    let controller_bytes = reader.bytes_u16()?;
+    let controller =
+        Ownership::decode(controller_bytes).map_err(|_| RuntimeError::InvalidOwnershipEncoding)?;
+    let act_as = match reader.u8()? {
+        0 => None,
+        1 => {
+            let bytes = reader.bytes_u16()?;
+            Some(Ownership::decode(bytes).map_err(|_| RuntimeError::InvalidOwnershipEncoding)?)
+        }
+        _ => return Err(RuntimeError::InvalidEnvelope),
+    };
+    let nonce = reader.u64()?;
+    let valid_until = reader.u64()?;
+    let payload_hash = reader.array::<32>()?;
+    let authorization_proof = reader.bytes_u32_limited(MAX_AUTHORIZATION_PROOF_BYTES)?;
+    let payload = reader.bytes_u32()?;
+    if reader.offset != bytes.len() {
+        return Err(RuntimeError::InvalidEnvelope);
+    }
+    Ok(SignedActionV2View {
+        version,
+        network_domain,
+        service_key,
+        action_selector,
+        controller,
+        act_as,
+        nonce,
+        valid_until,
+        payload_hash,
+        authorization_proof,
+        payload,
+        encoded: bytes,
+    })
+}
+
+pub fn decode_ownership(bytes: &[u8]) -> Result<Ownership, RuntimeError> {
+    if bytes.len() > 4096 {
+        return Err(RuntimeError::InvalidOwnershipEncoding);
+    }
+    Ownership::decode(bytes).map_err(|_| RuntimeError::InvalidOwnershipEncoding)
+}
+
+pub fn verify_signed_action_v2<'a>(
+    action: SignedActionV2View<'a>,
+    expected_network_domain: [u8; 32],
+    expected_service_key: ServiceKeyV1,
+    expected_action_selector: [u8; 8],
+    expected_nonce: Option<u64>,
+    active_control_claim: bool,
+) -> Result<VerifiedOwnershipAction<'a>, RuntimeError> {
+    if action.network_domain != expected_network_domain {
+        return Err(RuntimeError::WrongNetwork);
+    }
+    if action.service_key != expected_service_key {
+        return Err(RuntimeError::WrongService);
+    }
+    if action.action_selector != expected_action_selector {
+        return Err(RuntimeError::UnknownAction);
+    }
+    if blake2_256(action.payload) != action.payload_hash {
+        return Err(RuntimeError::PayloadHashMismatch);
+    }
+    if let Some(expected) = expected_nonce {
+        if action.nonce != expected {
+            return Err(RuntimeError::OwnershipNonceMismatch);
+        }
+    }
+    if action.act_as.is_some() && !active_control_claim {
+        return Err(RuntimeError::ControlClaimNotFound);
+    }
+    if action.authorization_proof.is_empty() {
+        return Err(RuntimeError::InvalidOwnershipAuthorization);
+    }
+    let mut commitment = alloc::vec::Vec::new();
+    commitment.extend_from_slice(ACTION_COMMITMENT_DOMAIN_V2);
+    commitment.extend_from_slice(&action.network_domain);
+    commitment.extend_from_slice(action.service_key.as_bytes());
+    commitment.extend_from_slice(&action.action_selector);
+    commitment.extend_from_slice(
+        &action
+            .controller
+            .encode()
+            .map_err(|_| RuntimeError::InvalidOwnershipEncoding)?,
+    );
+    match &action.act_as {
+        Some(owner) => {
+            commitment.push(1);
+            commitment.extend_from_slice(
+                &owner
+                    .encode()
+                    .map_err(|_| RuntimeError::InvalidOwnershipEncoding)?,
+            );
+        }
+        None => commitment.push(0),
+    }
+    commitment.extend_from_slice(&action.nonce.to_le_bytes());
+    commitment.extend_from_slice(&action.valid_until.to_le_bytes());
+    commitment.extend_from_slice(&action.payload_hash);
+    let commitment = blake2_256(&commitment);
+    let encoded = URL_SAFE_NO_PAD.encode(commitment);
+    let mut message = alloc::vec::Vec::with_capacity(22 + encoded.len());
+    message.extend_from_slice(b"JAMSCRIPT_ACTION_V2:");
+    message.extend_from_slice(encoded.as_bytes());
+    match action.controller.kind {
+        ownership_core::OwnershipKind::Secp256k1Keccak20 => verify_evm_ownership(
+            &action.controller,
+            action.authorization_proof,
+            &action.network_domain,
+            &commitment,
+        )
+        .map_err(map_ownership_auth_error)?,
+        ownership_core::OwnershipKind::MulticryptoAccount32 => {
+            verify_polkadot_ownership(&action.controller, action.authorization_proof, &message)
+                .map_err(map_ownership_auth_error)?
+        }
+        _ => verify_ownership(&action.controller, action.authorization_proof, &message)
+            .map_err(map_ownership_auth_error)?,
+    }
+    Ok(VerifiedOwnershipAction {
+        owner: action
+            .act_as
+            .clone()
+            .unwrap_or_else(|| action.controller.clone()),
+        controller: action.controller,
+        action_hash: blake2_256(action.encoded),
+        action_selector: action.action_selector,
+        nonce: action.nonce,
+        valid_until: action.valid_until,
+        payload: action.payload,
+    })
+}
+
+fn map_ownership_auth_error(error: jamscript_crypto::CryptoError) -> RuntimeError {
+    match error {
+        jamscript_crypto::CryptoError::EvmAddressMismatch => RuntimeError::EvmAddressMismatch,
+        jamscript_crypto::CryptoError::EvmHighS
+        | jamscript_crypto::CryptoError::InvalidEcdsaSignature
+        | jamscript_crypto::CryptoError::EcdsaRecoveryFailed => RuntimeError::EvmInvalidSignature,
+        jamscript_crypto::CryptoError::InvalidPolkadotAuthorization
+        | jamscript_crypto::CryptoError::PolkadotAddressMismatch => {
+            RuntimeError::PolkadotInvalidSignature
+        }
+        _ => RuntimeError::InvalidOwnershipAuthorization,
+    }
 }
 
 pub fn verify_signed_action_v1<'a>(
@@ -509,6 +722,39 @@ pub fn nonce_key(account: &Address) -> alloc::vec::Vec<u8> {
     wallet_nonce_key_v1(account)
 }
 
+pub fn ownership_nonce_key(owner: &Ownership) -> Result<alloc::vec::Vec<u8>, RuntimeError> {
+    let key = owner
+        .key()
+        .map_err(|_| RuntimeError::InvalidOwnershipEncoding)?;
+    let mut output = alloc::vec::Vec::with_capacity(2 + OWNERSHIP_NONCE_SCHEMA_V1.len() + 32);
+    output.push(service_runtime_core::RUNTIME_KEY_CLASS_V1);
+    output.push(service_runtime_core::WALLET_AUTH_MODULE_V1);
+    output.extend_from_slice(OWNERSHIP_NONCE_SCHEMA_V1);
+    output.extend_from_slice(&key);
+    Ok(output)
+}
+
+pub fn control_claim_key(
+    subject: &Ownership,
+    controller: &Ownership,
+) -> Result<alloc::vec::Vec<u8>, RuntimeError> {
+    let subject_key = subject
+        .key()
+        .map_err(|_| RuntimeError::InvalidOwnershipEncoding)?;
+    let controller_key = controller
+        .key()
+        .map_err(|_| RuntimeError::InvalidOwnershipEncoding)?;
+    let mut key = alloc::vec::Vec::with_capacity(
+        3 + CONTROL_CLAIM_NAMESPACE_V1.len() + subject_key.len() + controller_key.len(),
+    );
+    key.push(service_runtime_core::RUNTIME_KEY_CLASS_V1);
+    key.push(service_runtime_core::WALLET_AUTH_MODULE_V1);
+    key.extend_from_slice(CONTROL_CLAIM_NAMESPACE_V1);
+    key.extend_from_slice(&subject_key);
+    key.extend_from_slice(&controller_key);
+    Ok(key)
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -556,6 +802,23 @@ impl<'a> Reader<'a> {
 
     fn bytes_u8(&mut self) -> Result<&'a [u8], RuntimeError> {
         let length = self.u8()? as usize;
+        self.take(length)
+    }
+
+    fn bytes_u16(&mut self) -> Result<&'a [u8], RuntimeError> {
+        let length = u16::from_le_bytes(
+            self.take(2)?
+                .try_into()
+                .map_err(|_| RuntimeError::InvalidEnvelope)?,
+        ) as usize;
+        self.take(length)
+    }
+
+    fn bytes_u32_limited(&mut self, limit: usize) -> Result<&'a [u8], RuntimeError> {
+        let length = self.u32()? as usize;
+        if length > limit {
+            return Err(RuntimeError::PayloadTooLarge);
+        }
         self.take(length)
     }
 

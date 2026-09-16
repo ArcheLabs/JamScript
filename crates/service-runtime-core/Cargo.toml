@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 jamscript-crypto = { path = "../jamscript-crypto", default-features = false }
+ownership-core = { path = "../ownership-core", default-features = false }
 
 [dev-dependencies]
 hex = "0.4.3"
