@@ -4,6 +4,7 @@ import {
   JamScriptClient,
   RpcError,
   actionSelector,
+  decodeSignedActionV1,
   toHex,
 } from "../dist/index.js";
 
@@ -83,11 +84,11 @@ function managedCommitment(root) {
   return "0x88" + "0101" + root.slice(2);
 }
 
-function contextResult(context) {
-  return { packageHash: "0x" + "77".repeat(32), submissionHash: "0x" + "88".repeat(32), context };
+function transactionResult(transactionId = "0x" + "99".repeat(32)) {
+  return { transactionId, status: "queued", packageHash: null, itemIndex: null, actionIndex: 0 };
 }
 
-test("submitAction reads finalized nonce and signs exactly once across stale retry", async () => {
+test("submitAction signs once and submits a logical transaction", async () => {
   const calls = [];
   let contextReads = 0;
   let submissions = 0;
@@ -97,7 +98,7 @@ test("submitAction reads finalized nonce and signs exactly once across stale ret
       if (method === "chain_getBlockHash") return genesisHash;
       if (method === "minijam_getFinalizedContext") {
         contextReads += 1;
-        return contextReads === 1 ? initialContext : refreshedContext;
+        return initialContext;
       }
       if (method === "minijam_getServiceStorageAt") return null;
       if (method === "jamscript_getStateV1") {
@@ -106,10 +107,9 @@ test("submitAction reads finalized nonce and signs exactly once across stale ret
       if (method === "minijam_getManagedStateV1") {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null, proofBase64: ["AA=="] };
       }
-      if (method === "minijam_submitWorkV1") {
+      if (method === "minijam_submitTransactionV1") {
         submissions += 1;
-        if (submissions === 1) throw new RpcError("stale", -32010);
-        return contextResult(refreshedContext);
+        return transactionResult();
       }
       throw new Error("unexpected RPC method: " + method);
     },
@@ -127,11 +127,84 @@ test("submitAction reads finalized nonce and signs exactly once across stale ret
   const client = new JamScriptClient(deployment, transport);
   const result = await client.submitAction("submit", { score: 9n }, signer);
 
-  assert.equal(result.context.blockHash, refreshedContext.blockHash);
+  assert.match(result.transactionId, /^0x/);
   assert.equal(signatures, 1);
-  assert.equal(submissions, 2);
+  assert.equal(submissions, 1);
+  assert.equal(contextReads, 1);
   const nonceRead = calls.find((call) => call.method === "minijam_getServiceStorageAt");
   assert.equal(nonceRead.params[0], initialContext.blockHash);
+});
+
+function nonceAwareTransport({ failFirstSubmission = false, submissionDelayMs = 0 } = {}) {
+  const submissions = [];
+  let submissionCount = 0;
+  let activeSubmissions = 0;
+  let maxActiveSubmissions = 0;
+  return {
+    submissions,
+    get maxActiveSubmissions() { return maxActiveSubmissions; },
+    async call(method, params = []) {
+      if (method === "chain_getBlockHash") return genesisHash;
+      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "jamscript_getStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
+      if (method === "minijam_submitTransactionV1") {
+        submissions.push(params);
+        submissionCount += 1;
+        if (failFirstSubmission && submissionCount === 1) throw new RpcError("admission failed", -32001);
+        activeSubmissions += 1;
+        maxActiveSubmissions = Math.max(maxActiveSubmissions, activeSubmissions);
+        if (submissionDelayMs) await new Promise((resolve) => setTimeout(resolve, submissionDelayMs));
+        activeSubmissions -= 1;
+        return transactionResult("0x" + submissionCount.toString(16).padStart(2, "0").repeat(32));
+      }
+      throw new Error("unexpected RPC method: " + method);
+    },
+  };
+}
+
+test("client keeps a per-signer lane while different signers submit in parallel", async () => {
+  const transport = nonceAwareTransport({ submissionDelayMs: 25 });
+  const client = new JamScriptClient(deployment, transport);
+  const alice = {
+    publicKey: new Uint8Array(32).fill(1),
+    async signRaw() { return new Uint8Array(64).fill(1); },
+  };
+  const bob = {
+    publicKey: new Uint8Array(32).fill(2),
+    async signRaw() { return new Uint8Array(64).fill(2); },
+  };
+  await Promise.all([
+    client.submitAction("submit", { score: 1n }, alice),
+    client.submitAction("submit", { score: 3n }, alice),
+    client.submitAction("submit", { score: 2n }, bob),
+  ]);
+  assert.equal(transport.submissions.length, 3);
+  assert.equal(transport.maxActiveSubmissions, 2);
+  const nonces = transport.submissions.map((request) =>
+    decodeSignedActionV1(Uint8Array.from(Buffer.from(request.payloadBase64, "base64"))));
+  assert.deepEqual(
+    nonces.filter((action) => action.publicKey[0] === 1).map((action) => action.nonce),
+    [0n, 1n],
+  );
+  console.log("CLIENT_PER_SIGNER_LANE=PASS");
+  console.log("CLIENT_CROSS_SIGNER_PARALLEL=PASS");
+});
+
+test("client resynchronizes a signer nonce after admission failure", async () => {
+  const transport = nonceAwareTransport({ failFirstSubmission: true });
+  const client = new JamScriptClient(deployment, transport);
+  const signer = {
+    publicKey: new Uint8Array(32).fill(3),
+    async signRaw() { return new Uint8Array(64).fill(3); },
+  };
+  await assert.rejects(client.submitAction("submit", { score: 3n }, signer), /admission failed/);
+  await client.submitAction("submit", { score: 4n }, signer);
+  const second = decodeSignedActionV1(Uint8Array.from(Buffer.from(transport.submissions[1].payloadBase64, "base64")));
+  assert.equal(second.nonce, 0n);
+  console.log("CLIENT_ADMISSION_FAILURE_RESYNC=PASS");
 });
 
 test("query reads and decodes state at the finalized block", async () => {
@@ -198,14 +271,15 @@ test("waitForWork tolerates not-finalized package lookup and stops at Imported",
 test("waitForAction distinguishes an imported failed application receipt", async () => {
   const transport = {
     async call(method) {
-      if (method !== "minijam_getWorkStatusV1") throw new Error("unexpected RPC method");
+      if (method !== "minijam_getTransactionStatusV1") throw new Error("unexpected RPC method");
       return {
-        packageHash: "0x" + "77".repeat(32),
-        workId: 3,
+        transactionId: "0x" + "77".repeat(32),
         status: "imported",
         executionReceipt: "0x" + "99".repeat(32),
+        itemIndex: 0,
+        actionIndex: 0,
+        error: null,
         actionReceipts: [{ actionHash: "0x" + "aa".repeat(32), status: "failed", errorCode: 2 }],
-        context: initialContext,
       };
     },
   };
@@ -215,7 +289,8 @@ test("waitForAction distinguishes an imported failed application receipt", async
     "0x" + "aa".repeat(32),
     { intervalMs: 0, timeoutMs: 1000 },
   );
-  assert.equal(result.status, "imported");
+  assert.equal(result.status, "failed");
+  assert.equal(result.transactionStatus, "imported");
   assert.equal(result.actionReceipt.status, "failed");
   assert.equal(result.actionReceipt.errorCode, 2);
 });

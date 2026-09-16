@@ -11,7 +11,7 @@ import {
   toHex,
   type SignedActionV1,
 } from "./crypto.js";
-import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitWorkResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
@@ -34,8 +34,19 @@ export type JamScriptClientOptions = {
   stateVerification?: "trusted-backend" | "proof";
 };
 
+export type WaitForActionResult = Omit<TransactionStatusResult, "status"> & {
+  status: ActionReceipt["status"];
+  transactionStatus: TransactionStatusResult["status"];
+  actionHash: string;
+  errorCode: number | null;
+  actionReceipt: ActionReceipt;
+};
+
 export class JamScriptClient {
   private readonly rpc: WorkRpc;
+  private readonly actionHashes = new Map<string, string>();
+  private readonly nextNonces = new Map<string, bigint>();
+  private readonly signerTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly deployment: DeploymentDescriptor,
@@ -80,7 +91,46 @@ export class JamScriptClient {
     input: Record<string, CodecValue>,
     signer: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number } = {},
-  ): Promise<SubmitWorkResult> {
+  ): Promise<SubmitActionResult> {
+    if (signer.publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
+    const signerKey = toHex(signer.publicKey).toLowerCase();
+    const previous = this.signerTails.get(signerKey) ?? Promise.resolve();
+    let release!: () => void;
+    const lane = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.signerTails.set(signerKey, lane);
+    await previous;
+    try {
+      const prepared = await this.prepareAction(
+        actionName,
+        input,
+        signer,
+        options,
+      );
+      let submitted: SubmitTransactionResult;
+      try {
+        submitted = await this.rpc.submitTransaction(prepared.request);
+      } catch (error) {
+        // Admission failure means the local reservation may have created a
+        // nonce gap.  Force the next action in this signer lane to resync.
+        this.nextNonces.delete(signerKey);
+        throw error;
+      }
+      this.actionHashes.set(submitted.transactionId.toLowerCase(), prepared.actionHash);
+      return { ...submitted, actionHash: prepared.actionHash };
+    } finally {
+      release();
+      if (this.signerTails.get(signerKey) === lane) this.signerTails.delete(signerKey);
+    }
+  }
+
+  private async prepareAction(
+    actionName: string,
+    input: Record<string, CodecValue>,
+    signer: JamSigner,
+    options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number },
+  ): Promise<{ request: Parameters<WorkRpc["submitTransaction"]>[0]; actionHash: string }> {
     await this.validateDeployment();
     const action = actionByName(this.deployment.abi, actionName);
     if (action.auth !== "wallet") throw new Error("submitAction requires a wallet-authenticated action");
@@ -91,7 +141,11 @@ export class JamScriptClient {
       throw new Error("deployment ABI selector does not match the canonical selector");
     }
     const initialContext = await this.rpc.finalizedContext();
-    const nonce = await this.readNonce(signer.publicKey, initialContext);
+    const signerKey = toHex(signer.publicKey).toLowerCase();
+    const chainNonce = await this.readNonce(signer.publicKey, initialContext);
+    const localNonce = this.nextNonces.get(signerKey) ?? 0n;
+    const nonce = localNonce < chainNonce ? chainNonce : localNonce;
+    this.nextNonces.set(signerKey, nonce + 1n);
     const ttl = options.ttl ?? 64n;
     const validUntil = BigInt(initialContext.slot) + ttl;
     const unsigned: Omit<SignedActionV1, "signature"> = {
@@ -117,24 +171,7 @@ export class JamScriptClient {
       extrinsicsBase64: (options.extrinsics ?? []).map(toBase64),
     };
 
-    let context = initialContext;
-    const retries = options.staleRetries ?? 1;
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        const submitted = await this.rpc.submitWork({
-          ...requestBase,
-          context: {
-            blockHash: context.blockHash,
-            stateRoot: context.stateRoot,
-            slot: context.slot,
-          },
-        });
-        return { ...submitted, actionHash };
-      } catch (error) {
-        if (attempt >= retries || !isStaleContext(error)) throw error;
-        context = await this.rpc.finalizedContext();
-      }
-    }
+    return { request: requestBase, actionHash };
   }
 
   async queryLatest(queryName: string, key?: CodecValue): Promise<QueryResult> {
@@ -202,6 +239,28 @@ export class JamScriptClient {
     return this.rpc.workStatus(packageHash, this.deployment.serviceId);
   }
 
+  transactionStatus(transactionId: string): Promise<TransactionStatusResult> {
+    return this.rpc.transactionStatus(transactionId);
+  }
+
+  async waitForTransaction(
+    transactionId: string,
+    options: { intervalMs?: number; timeoutMs?: number } = {},
+  ): Promise<TransactionStatusResult> {
+    const intervalMs = options.intervalMs ?? 1_000;
+    const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+    for (;;) {
+      try {
+        const status = await this.transactionStatus(transactionId);
+        if (status.status === "imported" || status.status === "failed") return status;
+      } catch (error) {
+        if (!(error instanceof RpcError) || error.code !== -32013) throw error;
+      }
+      if (Date.now() >= deadline) throw new Error("timed out waiting for transaction");
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+
   async waitForWork(
     packageHash: string,
     options: { intervalMs?: number; timeoutMs?: number } = {},
@@ -224,23 +283,34 @@ export class JamScriptClient {
   }
 
   async waitForAction(
-    packageHash: string,
-    actionHash?: string,
-    options: { intervalMs?: number; timeoutMs?: number } = {},
-  ): Promise<WorkStatusResult & { actionReceipt: ActionReceipt }> {
-    const work = await this.waitForWork(packageHash, options);
-    if (work.status === "failed") {
-      throw new RpcError("Work failed before an action receipt was produced", -32040, work);
+    transactionId: string,
+    optionsOrActionHash: { intervalMs?: number; timeoutMs?: number } | string = {},
+    legacyOptions: { intervalMs?: number; timeoutMs?: number } = {},
+  ): Promise<WaitForActionResult> {
+    const options = typeof optionsOrActionHash === "string" ? legacyOptions : optionsOrActionHash;
+    const transaction = await this.waitForTransaction(transactionId, options);
+    if (transaction.status === "failed") {
+      throw new RpcError("transaction failed before an action receipt was produced", -32040, transaction);
     }
-    const expected = actionHash?.toLowerCase();
-    const receipts = work.actionReceipts ?? [];
-    const receipt = expected === undefined && receipts.length === 1
-      ? receipts[0]
-      : receipts.find((item) => item.actionHash.toLowerCase() === expected);
+    const expected = this.actionHashes.get(transactionId.toLowerCase())
+      ?? (typeof optionsOrActionHash === "string" ? optionsOrActionHash : undefined);
+    if (!expected) throw new Error("action hash is unavailable for this client instance");
+    const actionIndex = transaction.actionIndex;
+    const receipt = actionIndex === null ? undefined : transaction.actionReceipts?.[actionIndex];
     if (!receipt) {
-      throw new Error("canonical action receipt is missing from the imported Work result");
+      throw new Error("canonical action receipt is missing for the transaction action index");
     }
-    return { ...work, actionReceipt: receipt };
+    if (!sameHex(receipt.actionHash, expected)) {
+      throw new Error("transaction action index resolved to a different action hash");
+    }
+    return {
+      ...transaction,
+      status: receipt.status,
+      transactionStatus: transaction.status,
+      actionHash: receipt.actionHash,
+      errorCode: receipt.errorCode,
+      actionReceipt: receipt,
+    };
   }
 }
 
@@ -271,8 +341,4 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
 
 function sameHex(left: string, right: string): boolean {
   return left.toLowerCase().replace(/^0x/, "") === right.toLowerCase().replace(/^0x/, "");
-}
-
-function isStaleContext(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === -32010;
 }

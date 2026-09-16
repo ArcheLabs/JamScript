@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.mjs",
-    "test:network": "node tests/minijam-network.e2e.mjs"
+    "test:network": "node tests/minijam-network.e2e.mjs",
+    "test:transaction-closure": "node tests/minijam-transaction-closure.e2e.mjs"
   },
   "dependencies": {
     "@polkadot-api/substrate-bindings": "^0.21.0",

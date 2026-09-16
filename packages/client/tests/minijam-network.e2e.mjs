@@ -107,7 +107,7 @@ async function exerciseService(backend, service, seedValue, firstKey, secondKey,
     signer,
   );
   const seededResult = await client.waitForAction(
-    seededAction.packageHash,
+    seededAction.transactionId,
     seededAction.actionHash,
     { intervalMs: 500, timeoutMs: 120_000 },
   );
@@ -131,7 +131,7 @@ async function exerciseService(backend, service, seedValue, firstKey, secondKey,
 
   const advanceAction = await client.submitAction("advance", { key: firstKey }, signer);
   const advanceResult = await client.waitForAction(
-    advanceAction.packageHash,
+    advanceAction.transactionId,
     advanceAction.actionHash,
     { intervalMs: 500, timeoutMs: 120_000 },
   );
