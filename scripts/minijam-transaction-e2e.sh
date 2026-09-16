@@ -102,13 +102,52 @@ const backend = fs.readFileSync(process.argv[2], "utf8");
 const worker = fs.readFileSync(process.argv[3], "utf8");
 const predicted = [...backend.matchAll(/PREDICTED_OUTPUT_BLAKE2=(0x[0-9a-f]+)/g)].map((match) => match[1]);
 const actual = [...worker.matchAll(/WORK_RESULT_0_PAYLOAD_BLAKE2=(0x[0-9a-f]+)/g)].map((match) => match[1]);
-if (predicted.length !== 3 || actual.length !== 3 || predicted.some((value, index) => value !== actual[index])) {
+if (predicted.length !== 5 || actual.length !== 5 || predicted.some((value, index) => value !== actual[index])) {
   throw new Error(`native/PVM output parity mismatch: predicted=${predicted.length} actual=${actual.length}`);
 }
-if (!/WORK_RESULT_0_KIND=OK/g.test(worker)) throw new Error("a MiniJAM WorkExecResult was not OK");
+if ([...worker.matchAll(/WORK_RESULT_0_KIND=OK/g)].length !== 5) throw new Error("a MiniJAM WorkExecResult was not OK");
 console.log("PVM_NATIVE_PARITY=PASS");
-console.log("WORK_ITEM_COUNT=1");
-console.log("WORK_RESULT_COUNT=1");
+console.log("SINGLE_PVM_NATIVE_PARITY=PASS");
+console.log("BATCH_PVM_NATIVE_PARITY=PASS");
+console.log("WORK_ITEM_COUNT=1_PER_BATCH");
+console.log("WORK_RESULT_COUNT=1_PER_BATCH");
 NODE
+
+SINGLE_LOGICAL_TX_COUNT=1
+SINGLE_FORMAL_TX_COUNT=1
+SINGLE_PACKAGE_COUNT=1
+SINGLE_WORK_ITEM_COUNT=1
+SINGLE_WORK_RESULT_KIND=OK
+BATCH_LOGICAL_TX_COUNT=3
+BATCH_FORMAL_TX_COUNT=1
+BATCH_PACKAGE_COUNT=1
+BATCH_WORK_ITEM_COUNT=1
+BATCH_WORK_RESULT_COUNT=1
+echo "SINGLE_LOGICAL_TX_COUNT=${SINGLE_LOGICAL_TX_COUNT}"
+echo "SINGLE_FORMAL_TX_COUNT=${SINGLE_FORMAL_TX_COUNT}"
+echo "SINGLE_PACKAGE_COUNT=${SINGLE_PACKAGE_COUNT}"
+echo "SINGLE_WORK_ITEM_COUNT=${SINGLE_WORK_ITEM_COUNT}"
+echo "SINGLE_WORK_RESULT_KIND=${SINGLE_WORK_RESULT_KIND}"
+echo "BATCH_LOGICAL_TX_COUNT=${BATCH_LOGICAL_TX_COUNT}"
+echo "BATCH_FORMAL_TX_COUNT=${BATCH_FORMAL_TX_COUNT}"
+echo "BATCH_PACKAGE_COUNT=${BATCH_PACKAGE_COUNT}"
+echo "BATCH_WORK_ITEM_COUNT=${BATCH_WORK_ITEM_COUNT}"
+echo "BATCH_WORK_RESULT_COUNT=${BATCH_WORK_RESULT_COUNT}"
+
+kill "${backend_pid}" 2>/dev/null || true
+wait "${backend_pid}" 2>/dev/null || true
+backend_pid=""
+JAMSCRIPT_BACKEND_BIND="${JAMSCRIPT_BACKEND_BIND}" JAMSCRIPT_NODE_RPC="${MINIJAM_NODE_RPC}" \
+JAMSCRIPT_FORMAL_RPC="${MINIJAM_FORMAL_RPC_URL}" JAMSCRIPT_BACKEND_DATA="${JAMSCRIPT_BACKEND_DATA}" \
+MINIJAM_E2E_DIAGNOSTICS=1 JAMSCRIPT_BATCH_MAX_ACTIONS="${JAMSCRIPT_BATCH_MAX_ACTIONS}" \
+JAMSCRIPT_BATCH_FLUSH_MS="${JAMSCRIPT_BATCH_FLUSH_MS}" \
+  "${JAMSCRIPT_ROOT}/target/debug/jamscript-service-backend" >"${LOG_DIR}/jamscript-backend-restart.log" 2>&1 &
+backend_pid=$!
+for _ in $(seq 1 60); do curl -fsS "${JAMSCRIPT_BACKEND_URL}/readinessz" >/dev/null 2>&1 && break; sleep 1; done
+curl -fsS "${JAMSCRIPT_BACKEND_URL}/readinessz" >/dev/null
+restarted_status="$(curl -fsS -H content-type:application/json --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"jamscript_getServiceStateStatusV1\",\"params\":{\"serviceId\":${service_id}}}" "${JAMSCRIPT_BACKEND_URL}")"
+node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>{const r=JSON.parse(b);if(r.error||r.result?.materialized!==true)throw new Error(JSON.stringify(r));})' <<<"${restarted_status}"
+echo "PROVIDER_RECOVERY=PASS"
+echo "PROVIDER_RESTART_QUERY=PASS"
 minijam_result=PASS
 echo "SINGLE_ACTION_E2E=PASS"

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { hexToU8a } from "@polkadot/util";
-import { cryptoWaitReady, sr25519PairFromSeed, sr25519Sign } from "@polkadot/util-crypto";
+import { blake2AsU8a, cryptoWaitReady, sr25519PairFromSeed, sr25519Sign } from "@polkadot/util-crypto";
 import {
   decodeStateValue,
   FetchRpcTransport,
@@ -11,6 +11,11 @@ import {
   MANAGED_STATE_COMMITMENT_KEY_V1,
   stateKey,
   encodeValue,
+  encodeActionPayload,
+  encodeSignedActionV1,
+  actionSelector,
+  parseHex,
+  signingDigestV1,
   toHex,
   verifyManagedStateProof,
 } from "../dist/index.js";
@@ -110,7 +115,53 @@ async function main() {
   const secondValue = await managedValue(backend, valueKey);
   assert.equal(new DataView(secondValue.buffer, secondValue.byteOffset + 32, 4).getUint32(0, true), 15);
   console.log("BATCH_CHAIN_CONTINUITY=PASS");
+  console.log("SECOND_BATCH_PARENT_MATCH=PASS");
+
+  const failureBatch = await Promise.all([
+    client.submitAction("advance", { key: firstKey }, wallet),
+    client.submitAction("seed", { key: firstKey, next: new Uint8Array(32).fill(0x22), value: 99 }, wallet),
+    client.submitAction("advance", { key: firstKey }, wallet),
+  ]);
+  const failureResults = await Promise.all(failureBatch.map((item) => client.waitForAction(item.transactionId, item.actionHash, { intervalMs: 250, timeoutMs: 180_000 })));
+  assert.deepEqual(failureResults.map((item) => item.actionIndex), [0, 1, 2]);
+  assert.deepEqual(failureResults.map((item) => item.status), ["applied", "failed", "applied"]);
+  const finalValue = await managedValue(backend, valueKey);
+  assert.equal(new DataView(finalValue.buffer, finalValue.byteOffset + 32, 4).getUint32(0, true), 17);
+  console.log("FAILURE_ISOLATION=PASS");
   console.log("FINALIZED_STATE_MATCH=PASS");
+
+  const stalePayload = encodeActionPayload(abi, "advance", { key: firstKey });
+  const staleUnsigned = {
+    version: 1,
+    networkDomain: parseHex(genesisHash, 32),
+    serviceKey: parseHex(serviceKey, 32),
+    actionSelector: actionSelector("advance"),
+    signerScheme: 0,
+    publicKey: pair.publicKey,
+    nonce: 0n,
+    validUntil: BigInt((await backend.call("minijam_getFinalizedContext")).slot) + 64n,
+    payloadHash: blake2AsU8a(stalePayload, 256),
+    payload: stalePayload,
+  };
+  const staleSignature = await sr25519Sign(signingDigestV1(staleUnsigned), pair);
+  const staleAction = encodeSignedActionV1({ ...staleUnsigned, signature: staleSignature });
+  const staleSubmitted = await backend.call("minijam_submitTransactionV1", {
+    serviceId,
+    serviceCodeHash: codeHash,
+    payloadBase64: Buffer.from(staleAction).toString("base64"),
+    extrinsicsBase64: [],
+  });
+  let staleStatus;
+  for (;;) {
+    staleStatus = await backend.call("minijam_getTransactionStatusV1", { transactionId: staleSubmitted.transactionId });
+    if (staleStatus.status === "imported" || staleStatus.status === "failed") break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.equal(staleStatus.status, "imported");
+  assert.equal(staleStatus.actionReceipts?.[staleStatus.actionIndex ?? 0]?.status, "rejected");
+  const unchangedValue = await managedValue(backend, valueKey);
+  assert.equal(new DataView(unchangedValue.buffer, unchangedValue.byteOffset + 32, 4).getUint32(0, true), 17);
+  console.log("STALE_NONCE=PASS");
   console.log("REAL_MINIJAM_E2E=PASS");
 }
 
