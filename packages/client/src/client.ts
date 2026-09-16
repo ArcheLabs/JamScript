@@ -46,7 +46,7 @@ export class JamScriptClient {
   private readonly rpc: WorkRpc;
   private readonly actionHashes = new Map<string, string>();
   private readonly nextNonces = new Map<string, bigint>();
-  private submitTail: Promise<void> = Promise.resolve();
+  private readonly chainNonceLoads = new Map<string, Promise<bigint>>();
 
   constructor(
     private readonly deployment: DeploymentDescriptor,
@@ -92,28 +92,18 @@ export class JamScriptClient {
     signer: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number } = {},
   ): Promise<SubmitActionResult> {
-    // Promise.all callers must retain invocation order at the transaction
-    // ingress boundary. This also makes local nonce allocation deterministic
-    // for one client without changing the on-chain nonce protocol.
-    const previous = this.submitTail;
-    let release!: () => void;
-    this.submitTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await this.submitActionSerial(actionName, input, signer, options);
-    } finally {
-      release();
-    }
+    const prepared = await this.prepareAction(actionName, input, signer, options);
+    const submitted = await this.rpc.submitTransaction(prepared.request);
+    this.actionHashes.set(submitted.transactionId.toLowerCase(), prepared.actionHash);
+    return { ...submitted, actionHash: prepared.actionHash };
   }
 
-  private async submitActionSerial(
+  private async prepareAction(
     actionName: string,
     input: Record<string, CodecValue>,
     signer: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number },
-  ): Promise<SubmitActionResult> {
+  ): Promise<{ request: Parameters<WorkRpc["submitTransaction"]>[0]; actionHash: string }> {
     await this.validateDeployment();
     const action = actionByName(this.deployment.abi, actionName);
     if (action.auth !== "wallet") throw new Error("submitAction requires a wallet-authenticated action");
@@ -124,8 +114,17 @@ export class JamScriptClient {
       throw new Error("deployment ABI selector does not match the canonical selector");
     }
     const initialContext = await this.rpc.finalizedContext();
-    const chainNonce = await this.readNonce(signer.publicKey, initialContext);
     const signerKey = toHex(signer.publicKey).toLowerCase();
+    // All concurrent calls share the first chain nonce read. Promise
+    // continuations are resumed in registration order, so local nonce
+    // allocation remains deterministic while signed requests can enter the
+    // backend batching window concurrently.
+    let chainNonceLoad = this.chainNonceLoads.get(signerKey);
+    if (!chainNonceLoad) {
+      chainNonceLoad = this.readNonce(signer.publicKey, initialContext);
+      this.chainNonceLoads.set(signerKey, chainNonceLoad);
+    }
+    const chainNonce = await chainNonceLoad;
     const nonce = this.nextNonces.get(signerKey) ?? chainNonce;
     this.nextNonces.set(signerKey, (nonce < chainNonce ? chainNonce : nonce) + 1n);
     const ttl = options.ttl ?? 64n;
@@ -153,9 +152,7 @@ export class JamScriptClient {
       extrinsicsBase64: (options.extrinsics ?? []).map(toBase64),
     };
 
-    const submitted = await this.rpc.submitTransaction(requestBase);
-    this.actionHashes.set(submitted.transactionId.toLowerCase(), actionHash);
-    return { ...submitted, actionHash };
+    return { request: requestBase, actionHash };
   }
 
   async queryLatest(queryName: string, key?: CodecValue): Promise<QueryResult> {
