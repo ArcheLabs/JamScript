@@ -86,7 +86,7 @@ enum CommandKind {
         backend_rpc: Option<String>,
         #[arg(long, default_value = "dist")]
         artifact: PathBuf,
-        #[arg(long, default_value = "120s")]
+        #[arg(long, default_value = "180s")]
         timeout: String,
         #[arg(long)]
         json: bool,
