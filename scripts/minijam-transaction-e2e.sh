@@ -33,7 +33,7 @@ cleanup() {
   if [[ -n "${backend_pid}" ]]; then kill "${backend_pid}" 2>/dev/null || true; wait "${backend_pid}" 2>/dev/null || true; fi
   if [[ -x "${NATIVE_DOWN}" ]]; then MINIJAM_NATIVE_LOCAL_RUNTIME="${E2E_RUNTIME}/native" MINIJAM_LOCAL_PURGE="${JAMSCRIPT_E2E_PURGE:-0}" "${NATIVE_DOWN}" >/dev/null 2>&1 || true; fi
   if [[ -n "${clean_repro_worktree}" ]]; then
-    git -C "${MINIJAM_ROOT}" worktree remove --force "${clean_repro_worktree}" >/dev/null 2>&1 || true
+    git -C "${JAMSCRIPT_ROOT}" worktree remove --force "${clean_repro_worktree}" >/dev/null 2>&1 || true
   fi
   git -C "${MINIJAM_ROOT}" worktree remove --force "${MINIJAM_SOURCE_WORKTREE}" >/dev/null 2>&1 || true
   echo "CLEANUP=COMPLETE"
