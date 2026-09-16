@@ -1178,18 +1178,6 @@ pub trait ServiceRegistrationValidator: Send + Sync {
 pub trait BackendWorkGateway: Send + Sync {
     fn submit_work(&self, params: Value) -> Result<Value, BackendError>;
     fn work_status(&self, params: Value) -> Result<Value, BackendError>;
-
-    fn submit_transaction(&self, _params: Value) -> Result<Value, BackendError> {
-        Err(BackendError::Rpc(
-            "transaction gateway is not configured".into(),
-        ))
-    }
-
-    fn transaction_status(&self, _params: Value) -> Result<Value, BackendError> {
-        Err(BackendError::Rpc(
-            "transaction gateway is not configured".into(),
-        ))
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1231,18 +1219,6 @@ pub trait BackendNetwork: Send + Sync {
     ) -> Result<Option<Vec<u8>>, BackendError>;
     fn submit_work(&self, params: Value) -> Result<Value, BackendError>;
     fn work_status(&self, params: Value) -> Result<Value, BackendError>;
-
-    fn submit_transaction(&self, _params: Value) -> Result<Value, BackendError> {
-        Err(BackendError::Rpc(
-            "transaction gateway is not configured".into(),
-        ))
-    }
-
-    fn transaction_status(&self, _params: Value) -> Result<Value, BackendError> {
-        Err(BackendError::Rpc(
-            "transaction gateway is not configured".into(),
-        ))
-    }
 }
 
 pub struct MiniJamNetworkGateway<T> {
@@ -1272,7 +1248,6 @@ struct PendingAction {
 struct LogicalTransaction {
     service_id: u32,
     batch_id: Option<String>,
-    formal_transaction_id: Option<String>,
     package_hash: Option<StateRoot>,
     action_index: Option<usize>,
     error: Option<String>,
@@ -1282,7 +1257,6 @@ struct LogicalTransaction {
 struct InFlightBatch {
     service_id: u32,
     logical_transaction_ids: Vec<String>,
-    formal_transaction_id: Option<String>,
     package_hash: Option<StateRoot>,
     predicted_output: Option<RuntimeRefineOutputV1>,
     materialized: bool,
@@ -1448,7 +1422,6 @@ impl TransactionCoordinator {
             LogicalTransaction {
                 service_id,
                 batch_id: None,
-                formal_transaction_id: None,
                 package_hash: None,
                 action_index: None,
                 error: None,
@@ -1598,7 +1571,6 @@ impl TransactionCoordinator {
             InFlightBatch {
                 service_id,
                 logical_transaction_ids: logical_transaction_ids.clone(),
-                formal_transaction_id: None,
                 package_hash: None,
                 predicted_output: None,
                 materialized: false,
@@ -1620,35 +1592,25 @@ impl TransactionCoordinator {
             .and_then(|state| state.transactions.get(logical_id).cloned())
     }
 
-    fn batch(&self, batch_id: &str) -> Option<InFlightBatch> {
-        self.state
-            .lock()
-            .ok()
-            .and_then(|state| state.batches.get(batch_id).cloned())
-    }
-
     fn finish_batch(
         &self,
         batch_id: &str,
-        formal_transaction_id: String,
+        package_hash: StateRoot,
         prediction: RuntimeRefineOutputV1,
-        package_hash: Option<StateRoot>,
     ) {
         if let Ok(mut state) = self.state.lock() {
             let (service_id, transaction_ids) = state
                 .batches
                 .get_mut(batch_id)
                 .map(|batch| {
-                    batch.formal_transaction_id = Some(formal_transaction_id.clone());
                     batch.predicted_output = Some(prediction);
-                    batch.package_hash = package_hash;
+                    batch.package_hash = Some(package_hash);
                     (batch.service_id, batch.logical_transaction_ids.clone())
                 })
                 .unwrap_or_default();
             for transaction_id in transaction_ids {
                 if let Some(transaction) = state.transactions.get_mut(&transaction_id) {
-                    transaction.formal_transaction_id = Some(formal_transaction_id.clone());
-                    transaction.package_hash = package_hash;
+                    transaction.package_hash = Some(package_hash);
                 }
             }
             state.flushing.remove(&service_id);
@@ -1702,9 +1664,8 @@ impl TransactionCoordinator {
                         .map(|encoded| hash_hex(&service_runtime_core::blake2_256(&encoded)))
                         .unwrap_or_else(|_| "encode-error".into());
                     eprintln!(
-                        "BATCH_ID={} FORMAL_TRANSACTION_ID={} PACKAGE_HASH={} BATCH_PARENT_ROOT={} BATCH_NEW_ROOT={} PREDICTED_OUTPUT_BLAKE2={}",
+                        "BATCH_ID={} PACKAGE_HASH={} BATCH_PARENT_ROOT={} BATCH_NEW_ROOT={} PREDICTED_OUTPUT_BLAKE2={}",
                         batch_id,
-                        batch.formal_transaction_id.as_deref().unwrap_or(""),
                         hash_hex(&package_hash),
                         hash_hex(&prediction.parent_root),
                         hash_hex(&prediction.new_root),
@@ -1734,7 +1695,7 @@ impl BackendEngine {
         let action = BASE64
             .decode(required_str(&params, "payloadBase64")?)
             .map_err(|error| BackendError::Rpc(format!("invalid payloadBase64: {error}")))?;
-        self.submit_actions(state, params, vec![action], false)
+        self.submit_actions(state, params, vec![action])
             .map(|(result, _)| result)
     }
 
@@ -1743,7 +1704,6 @@ impl BackendEngine {
         state: &mut BackendState,
         params: Value,
         actions: Vec<Vec<u8>>,
-        as_transaction: bool,
     ) -> Result<(Value, RuntimeRefineOutputV1), BackendError> {
         let service_id = required_u32(&params, "serviceId")?;
         let code_hash = parse_hash(required_str(&params, "serviceCodeHash")?)?;
@@ -1905,47 +1865,23 @@ impl BackendEngine {
             "slot": context.slot,
         });
         forwarded["payloadBase64"] = Value::String(BASE64.encode(&encoded));
-        let result = if as_transaction {
-            // Formal's transaction ingress is deliberately generic and
-            // rejects adapter-only fields. Keep the authoritative context in
-            // the local planning path, but forward only the transaction wire
-            // shape to Formal.
-            self.network.submit_transaction(json!({
-                "serviceId": service_id,
-                "serviceCodeHash": hash_hex(&code_hash),
-                "payloadBase64": forwarded["payloadBase64"].clone(),
-                "extrinsicsBase64": forwarded["extrinsicsBase64"].clone(),
-            }))?
-        } else {
-            self.network.submit_work(forwarded)?
-        };
-        if !as_transaction {
-            let package_hash = result
-                .get("packageHash")
-                .and_then(Value::as_str)
-                .map(parse_hash)
-                .transpose()?
-                .ok_or_else(|| BackendError::Rpc("Formal response omitted packageHash".into()))?;
-            state.track_prediction(service_id, package_hash, prediction.clone())?;
-        }
-        let mut response = result;
-        if !as_transaction {
-            let package_hash = response
-                .get("packageHash")
-                .and_then(Value::as_str)
-                .map(parse_hash)
-                .transpose()?
-                .ok_or_else(|| BackendError::Rpc("Formal response omitted packageHash".into()))?;
-            if let Some(object) = response.as_object_mut() {
-                object.insert("packageHash".into(), Value::String(hash_hex(&package_hash)));
-                object.insert(
-                    "prediction".into(),
-                    json!({
-                        "parentRoot": hash_hex(&prediction.parent_root),
-                        "newRoot": hash_hex(&prediction.new_root),
-                    }),
-                );
-            }
+        let mut response = self.network.submit_work(forwarded)?;
+        let package_hash = response
+            .get("packageHash")
+            .and_then(Value::as_str)
+            .map(parse_hash)
+            .transpose()?
+            .ok_or_else(|| BackendError::Rpc("Formal response omitted packageHash".into()))?;
+        state.track_prediction(service_id, package_hash, prediction.clone())?;
+        if let Some(object) = response.as_object_mut() {
+            object.insert("packageHash".into(), Value::String(hash_hex(&package_hash)));
+            object.insert(
+                "prediction".into(),
+                json!({
+                    "parentRoot": hash_hex(&prediction.parent_root),
+                    "newRoot": hash_hex(&prediction.new_root),
+                }),
+            );
         }
         Ok((response, prediction))
     }
@@ -2291,30 +2227,6 @@ impl<T: JsonRpcTransport + Send + Sync> BackendNetwork for MiniJamNetworkGateway
                 }
             })
     }
-
-    fn submit_transaction(&self, params: Value) -> Result<Value, BackendError> {
-        self.transport
-            .call(
-                &self.formal_rpc,
-                "minijam_submitTransactionV1",
-                params,
-                self.timeout,
-                true,
-            )
-            .map_err(|error| BackendError::Rpc(error.message))
-    }
-
-    fn transaction_status(&self, params: Value) -> Result<Value, BackendError> {
-        self.transport
-            .call(
-                &self.formal_rpc,
-                "minijam_getTransactionStatusV1",
-                params,
-                self.timeout,
-                false,
-            )
-            .map_err(|error| BackendError::Rpc(error.message))
-    }
 }
 
 impl<T: JsonRpcTransport + Send + Sync> BackendWorkGateway for MiniJamNetworkGateway<T> {
@@ -2324,14 +2236,6 @@ impl<T: JsonRpcTransport + Send + Sync> BackendWorkGateway for MiniJamNetworkGat
 
     fn work_status(&self, params: Value) -> Result<Value, BackendError> {
         <Self as BackendNetwork>::work_status(self, params)
-    }
-
-    fn submit_transaction(&self, params: Value) -> Result<Value, BackendError> {
-        <Self as BackendNetwork>::submit_transaction(self, params)
-    }
-
-    fn transaction_status(&self, params: Value) -> Result<Value, BackendError> {
-        <Self as BackendNetwork>::transaction_status(self, params)
     }
 }
 
@@ -2446,8 +2350,8 @@ impl BackendRpcHandler {
             "jamscript_putArtifactV1" => self.put_artifact(params),
             "minijam_submitWorkV1" => self.submit_work(params),
             "minijam_getWorkStatusV1" => self.work_status(params),
-            "minijam_submitTransactionV1" => self.submit_transaction(params),
-            "minijam_getTransactionStatusV1" => self.transaction_status(params),
+            "jamscript_submitTransactionV1" => self.submit_transaction(params),
+            "jamscript_getTransactionStatusV1" => self.transaction_status(params),
             "minijam_getManagedStateV1" => self.get_managed_state(params),
             "jamscript_getStateV1" => self.get_state(params, false),
             "jamscript_getStateProofV1" => self.get_state(params, true),
@@ -2976,7 +2880,9 @@ impl BackendRpcHandler {
         let service_id = required_u32(&params, "serviceId")?;
         let service_code_hash = parse_hash(required_str(&params, "serviceCodeHash")?)?;
         if self.network.is_none() || self.pvm_loader.is_none() {
-            return self.work.submit_transaction(params);
+            return Err(BackendError::Rpc(
+                "transaction coordinator is not configured".into(),
+            ));
         }
         let needs_discovery = self
             .state
@@ -3018,7 +2924,6 @@ impl BackendRpcHandler {
             "packageHash": transaction.package_hash.map(|hash| hash_hex(&hash)),
             "itemIndex": Value::Null,
             "actionIndex": transaction.action_index,
-            "formalTransactionId": transaction.formal_transaction_id,
         }))
     }
 
@@ -3113,25 +3018,20 @@ impl BackendRpcHandler {
                     &mut state,
                     submit_params,
                     batch.actions,
-                    true,
                 )
             };
             match result {
                 Ok((response, prediction)) => {
-                    let formal_id = response
-                        .get("transactionId")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            BackendError::Rpc("Formal response omitted transactionId".into())
-                        })?
-                        .to_owned();
                     let package_hash = response
                         .get("packageHash")
                         .and_then(Value::as_str)
                         .map(parse_hash)
                         .transpose()?;
+                    let package_hash = package_hash.ok_or_else(|| {
+                        BackendError::Rpc("Formal response omitted packageHash".into())
+                    })?;
                     self.transactions
-                        .finish_batch(&batch_id, formal_id, prediction, package_hash);
+                        .finish_batch(&batch_id, package_hash, prediction);
                 }
                 Err(error) => self.transactions.fail_batch(&batch_id, error.to_string()),
             }
@@ -3152,126 +3052,122 @@ impl BackendRpcHandler {
                 "packageHash": transaction.package_hash.map(|hash| hash_hex(&hash)),
                 "itemIndex": Value::Null,
                 "actionIndex": transaction.action_index,
-                "formalTransactionId": transaction.formal_transaction_id,
                 "executionReceipt": Value::Null,
                 "error": error,
             }));
         }
-        let Some(formal_id) = transaction.formal_transaction_id.clone() else {
+        let Some(package_hash) = transaction.package_hash else {
             return Ok(json!({
                 "transactionId": logical_id,
                 "status": "queued",
                 "packageHash": Value::Null,
                 "itemIndex": Value::Null,
                 "actionIndex": transaction.action_index,
-                "formalTransactionId": Value::Null,
                 "executionReceipt": Value::Null,
                 "error": Value::Null,
             }));
         };
-        let (network, _loader) = match (&self.network, &self.pvm_loader) {
-            (Some(network), Some(loader)) => (Arc::clone(network), Arc::clone(loader)),
-            _ => {
-                return self
-                    .work
-                    .transaction_status(json!({"transactionId": formal_id}))
-            }
-        };
-        let mut result = network.transaction_status(json!({"transactionId": formal_id}))?;
-        let package_hash = result
-            .get("packageHash")
-            .and_then(Value::as_str)
-            .map(parse_hash)
-            .transpose()?;
-        if let Some(package_hash) = package_hash {
-            let batch_id = transaction
-                .batch_id
-                .as_deref()
-                .ok_or_else(|| BackendError::Rpc("transaction has no batch mapping".into()))?;
-            if let Some(batch) = self.transactions.batch(batch_id) {
+        let work_params = json!({
+            "serviceId": transaction.service_id,
+            "packageHash": hash_hex(&package_hash),
+        });
+        let result = if let (Some(network), Some(loader)) = (&self.network, &self.pvm_loader) {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
+            let key = WorkKey {
+                service_id: transaction.service_id,
+                package_hash,
+            };
+            let was_finalized = state.is_finalized(key);
+            let result = match BackendEngine::new(Arc::clone(network), Arc::clone(loader))
+                .status(&mut state, work_params.clone())
+            {
+                Ok(result) => result,
+                Err(BackendError::WorkNotFound) => {
+                    return Ok(json!({
+                        "transactionId": logical_id,
+                        "status": "packaged",
+                        "packageHash": hash_hex(&package_hash),
+                        "itemIndex": Value::Null,
+                        "actionIndex": transaction.action_index,
+                        "executionReceipt": Value::Null,
+                        "error": Value::Null,
+                    }))
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(batch_id) = transaction.batch_id.as_deref() {
                 self.transactions.emit_diagnostics(batch_id, package_hash);
-                if let Some(prediction) = batch.predicted_output {
-                    let mut state = self
-                        .state
-                        .lock()
-                        .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
-                    if state
-                        .prediction(transaction.service_id, package_hash)
-                        .is_none()
-                    {
-                        state.track_prediction(transaction.service_id, package_hash, prediction)?;
-                    }
-                    let status = result
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if status == "imported" {
-                        // Direct MiniJAM transaction status deliberately does
-                        // not expose the generic Work status method. Perform
-                        // the same canonical-root gate here using the
-                        // transaction's package mapping, without weakening
-                        // the existing parent/new-root safety check.
-                        let key = WorkKey {
-                            service_id: transaction.service_id,
-                            package_hash,
-                        };
-                        let context = network.finalized_context()?;
-                        let canonical = network
-                            .service_storage_at(
-                                &context,
-                                transaction.service_id,
-                                service_runtime_core::MANAGED_STATE_COMMITMENT_KEY_V1,
-                            )?
-                            .and_then(|bytes| {
-                                service_runtime_core::ManagedStateCommitmentV1::decode(&bytes).ok()
-                            })
-                            .map(|commitment| commitment.root);
-                        if let Some(root) = canonical {
-                            let output =
-                                state.prediction(key.service_id, key.package_hash).cloned();
-                            if let Some(output) = output.as_ref() {
-                                if root != output.parent_root && root != output.new_root {
-                                    state.pending.remove(&key);
-                                    return Err(BackendError::PredictionStale);
-                                }
-                            }
-                            state
-                                .finalized_contexts
-                                .insert(transaction.service_id, context);
-                            state.materialize_if_canonical(key, root)?;
-                            if output
-                                .as_ref()
-                                .is_some_and(|output| root == output.new_root)
-                            {
-                                if let Some(output) = output {
-                                    result["actionReceipts"] =
-                                        canonical_action_receipts(&output.receipts);
-                                }
-                            }
-                        }
-                        if state.is_finalized(key) {
-                            self.transactions.mark_materialized(batch_id);
-                        } else {
-                            result["status"] = Value::String("reported".into());
-                            result["actionReceipts"] = Value::Null;
-                        }
+                if state.is_finalized(key) {
+                    self.transactions.mark_materialized(batch_id);
+                }
+            }
+            if !was_finalized && state.is_finalized(key) && self.database.is_none() {
+                if let Some(store) = &self.persistence {
+                    let service_key = state.registry.resolve_key(transaction.service_id)?;
+                    store.persist_registry(&state.registry)?;
+                    if let Some(output) = state.prediction(transaction.service_id, package_hash) {
+                        state.append_recovery(
+                            store.recovery_path(),
+                            &RecoveryEnvelopeV1 {
+                                service_id: transaction.service_id,
+                                service_key,
+                                output: output.clone(),
+                            },
+                        )?;
                     }
                 }
             }
+            result
+        } else {
+            match self.work.work_status(work_params) {
+                Ok(result) => result,
+                Err(BackendError::WorkNotFound) => {
+                    return Ok(json!({
+                        "transactionId": logical_id,
+                        "status": "packaged",
+                        "packageHash": hash_hex(&package_hash),
+                        "itemIndex": Value::Null,
+                        "actionIndex": transaction.action_index,
+                        "executionReceipt": Value::Null,
+                        "error": Value::Null,
+                    }))
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let work_status = result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let status = match work_status {
+            "insufficient_workers" | "pending" => "packaged",
+            "awaiting_candidate" => "refining",
+            "voting" | "accepted" => "reported",
+            "imported" if result.get("actionReceipts").is_some_and(Value::is_array) => "imported",
+            "imported" => "reported",
+            "failed" => "failed",
+            _ => "reported",
+        };
+        let mut output = json!({
+            "transactionId": logical_id,
+            "status": status,
+            "packageHash": hash_hex(&package_hash),
+            "itemIndex": result.get("itemIndex").cloned().unwrap_or(Value::Null),
+            "actionIndex": transaction.action_index.map_or(Value::Null, Value::from),
+            "executionReceipt": result
+                .get("executionReceipt")
+                .cloned()
+                .or_else(|| result.get("receipt").cloned())
+                .unwrap_or(Value::Null),
+            "error": result.get("error").cloned().unwrap_or(Value::Null),
+        });
+        if let Some(receipts) = result.get("actionReceipts") {
+            output["actionReceipts"] = receipts.clone();
         }
-        result["transactionId"] = Value::String(logical_id);
-        result["packageHash"] =
-            package_hash.map_or(Value::Null, |hash| Value::String(hash_hex(&hash)));
-        result["itemIndex"] = result.get("itemIndex").cloned().unwrap_or(Value::Null);
-        result["actionIndex"] = transaction.action_index.map_or(Value::Null, Value::from);
-        result["formalTransactionId"] = Value::String(formal_id);
-        result["executionReceipt"] = result
-            .get("executionReceipt")
-            .cloned()
-            .or_else(|| result.get("receipt").cloned())
-            .unwrap_or(Value::Null);
-        result["error"] = result.get("error").cloned().unwrap_or(Value::Null);
-        Ok(result)
+        Ok(output)
     }
 
     fn work_status(&self, params: Value) -> Result<Value, BackendError> {
@@ -4335,14 +4231,10 @@ mod tests {
         assert_eq!(mapped.batch_id, Some(batch.batch_id.clone()));
         assert_eq!(mapped.action_index, Some(1));
 
-        coordinator.finish_batch(&batch.batch_id, "formal".into(), output(), Some([9; 32]));
+        coordinator.finish_batch(&batch.batch_id, [9; 32], output());
         assert_eq!(
-            coordinator
-                .transaction(&first)
-                .unwrap()
-                .formal_transaction_id
-                .as_deref(),
-            Some("formal")
+            coordinator.transaction(&first).unwrap().package_hash,
+            Some([9; 32])
         );
         assert_eq!(
             coordinator
@@ -4833,6 +4725,16 @@ mod tests {
         let invalid = handler.handle_json(b"not json");
         let invalid: Value = serde_json::from_slice(&invalid).unwrap();
         assert_eq!(invalid["error"]["code"], -32600);
+
+        for method in [
+            "minijam_submitTransactionV1",
+            "minijam_getTransactionStatusV1",
+        ] {
+            assert_eq!(
+                handler.handle(method, Value::Null),
+                Err(BackendError::Rpc(format!("method not found: {method}")))
+            );
+        }
     }
 
     #[test]

@@ -97,7 +97,6 @@ async function backendContext() {
 }
 
 function measured(submissions, statuses) {
-  const formalTransactionIds = [...new Set(statuses.map((item) => item.formalTransactionId).filter(Boolean))];
   const packageHashes = [...new Set(statuses.map((item) => item.packageHash).filter(Boolean))];
   const workItems = [...new Set(statuses
     .filter((item) => item.packageHash !== null && item.itemIndex !== null)
@@ -111,7 +110,6 @@ function measured(submissions, statuses) {
     .filter(Boolean);
   return {
     logicalTransactionIds: submissions.map((item) => item.transactionId),
-    formalTransactionIds,
     packageHashes,
     workItems,
     receipts,
@@ -158,7 +156,7 @@ async function main() {
   const outOfOrderPair = signer("0a").pair;
   const submitDirect = async (nonce) => {
     const action = await directSignedAction(abi, "advance", { key: firstKey }, outOfOrderPair, nonce);
-    const submitted = await backend.call("minijam_submitTransactionV1", {
+    const submitted = await backend.call("jamscript_submitTransactionV1", {
       serviceId,
       serviceCodeHash: codeHash,
       payloadBase64: action.payloadBase64,
@@ -232,7 +230,7 @@ async function main() {
   };
   const staleSignature = await sr25519Sign(signingDigestV1(staleUnsigned), pair);
   const staleAction = encodeSignedActionV1({ ...staleUnsigned, signature: staleSignature });
-  const staleSubmitted = await backend.call("minijam_submitTransactionV1", {
+  const staleSubmitted = await backend.call("jamscript_submitTransactionV1", {
     serviceId,
     serviceCodeHash: codeHash,
     payloadBase64: Buffer.from(staleAction).toString("base64"),
@@ -240,7 +238,7 @@ async function main() {
   });
   let staleStatus;
   for (;;) {
-    staleStatus = await backend.call("minijam_getTransactionStatusV1", { transactionId: staleSubmitted.transactionId });
+    staleStatus = await backend.call("jamscript_getTransactionStatusV1", { transactionId: staleSubmitted.transactionId });
     if (staleStatus.status === "imported" || staleStatus.status === "failed") break;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }

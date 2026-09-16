@@ -156,7 +156,6 @@ function assertMeasured(name, measured, expected) {
 }
 function batchStats(name, value, expectedLogical) {
   assertMeasured(`${name}_LOGICAL_TX_COUNT`, value.logicalTransactionIds.length, expectedLogical);
-  assertMeasured(`${name}_FORMAL_TX_COUNT`, value.formalTransactionIds.length, 1);
   assertMeasured(`${name}_PACKAGE_COUNT`, value.packageHashes.length, 1);
   assertMeasured(`${name}_WORK_ITEM_COUNT`, value.workItems.length, 1);
   assertMeasured(`${name}_RECEIPT_COUNT`, value.receipts.length, expectedLogical);

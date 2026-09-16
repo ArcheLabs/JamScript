@@ -2,7 +2,9 @@
 
 JamScript application semantics remain in generated services. The client
 derives the JamScript ABI, creates the opaque SignedActionV1 payload, and
-submits one formal Work request.
+submits one logical transaction to the JamScript Backend. The backend owns
+nonce scheduling, batching, and the mapping from the logical transaction to
+the resulting MiniJAM Work.
 
 ## Client package
 
@@ -16,10 +18,13 @@ SignedActionV1 signing digest. The digest contains the
 JAMSCRIPT_ACTION_V1 domain, while sr25519 verification uses the standard
 Substrate context.
 
-For production, compose the endpoints explicitly. Finalized chain reads stay
-on the MiniJAM node, Work submission and status tracking use the standalone
-formal RPC, and managed-state snapshots may be served by an independent state
-provider:
+For production, send a transaction-capable `JamScriptClient` to the JamScript
+Backend endpoint. The backend is the only endpoint that accepts
+`jamscript_submitTransactionV1` and `jamscript_getTransactionStatusV1`.
+If the application also performs low-level chain or Work reads, compose those
+endpoints explicitly. Finalized chain reads stay on the MiniJAM node, physical
+Work submission and status tracking use the standalone Formal RPC, and
+managed-state snapshots may be served by an independent state provider:
 
     const transport = new SplitRpcTransport(
       new FetchRpcTransport("https://node.example"),
@@ -31,7 +36,8 @@ provider:
 SplitRpcTransport routes chain_getBlockHash,
 minijam_getFinalizedContext, and minijam_getServiceStorageAt to the node,
 and routes only minijam_submitWorkV1 and minijam_getWorkStatusV1 to the
-formal RPC. It routes jamscript_getStateV1,
+formal RPC. It does not route logical transaction methods; those must use the
+Backend endpoint. It routes jamscript_getStateV1,
 jamscript_getStateProofV1, and minijam_getManagedStateV1 to the state
 provider.
 
@@ -81,4 +87,5 @@ production client path, waits for finalized Work, and verifies finalized
 Service state.
 
 The canonical E2E does not use the Playground lifecycle API or its legacy
-`/api/v1/*` endpoints. Work, State, and deployment endpoints remain separate.
+`/api/v1/*` endpoints. Logical transactions enter through the Backend;
+physical Work, State, and deployment endpoints remain separate.

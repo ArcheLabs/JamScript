@@ -107,7 +107,7 @@ test("submitAction signs once and submits a logical transaction", async () => {
       if (method === "minijam_getManagedStateV1") {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null, proofBase64: ["AA=="] };
       }
-      if (method === "minijam_submitTransactionV1") {
+      if (method === "jamscript_submitTransactionV1") {
         submissions += 1;
         return transactionResult();
       }
@@ -150,7 +150,7 @@ function nonceAwareTransport({ failFirstSubmission = false, submissionDelayMs = 
       if (method === "jamscript_getStateV1") {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
       }
-      if (method === "minijam_submitTransactionV1") {
+      if (method === "jamscript_submitTransactionV1") {
         submissions.push(params);
         submissionCount += 1;
         if (failFirstSubmission && submissionCount === 1) throw new RpcError("admission failed", -32001);
@@ -271,7 +271,7 @@ test("waitForWork tolerates not-finalized package lookup and stops at Imported",
 test("waitForAction distinguishes an imported failed application receipt", async () => {
   const transport = {
     async call(method) {
-      if (method !== "minijam_getTransactionStatusV1") throw new Error("unexpected RPC method");
+      if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method");
       return {
         transactionId: "0x" + "77".repeat(32),
         status: "imported",
