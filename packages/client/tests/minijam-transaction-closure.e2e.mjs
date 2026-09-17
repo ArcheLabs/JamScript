@@ -26,9 +26,10 @@ const serviceId = Number(process.env.JAMSCRIPT_E2E_SERVICE_ID);
 const serviceKey = process.env.JAMSCRIPT_E2E_SERVICE_KEY;
 const codeHash = process.env.JAMSCRIPT_E2E_CODE_HASH;
 const genesisHash = process.env.JAMSCRIPT_E2E_GENESIS_HASH;
+const networkDomain = process.env.JAMSCRIPT_E2E_NETWORK_DOMAIN ?? genesisHash;
 const resultPath = process.env.JAMSCRIPT_E2E_RESULT ?? path.join(artifacts ?? ".", "e2e-result.json");
 
-if (!artifacts || !Number.isInteger(serviceId) || !serviceKey || !codeHash || !genesisHash) {
+if (!artifacts || !Number.isInteger(serviceId) || !serviceKey || !codeHash || !genesisHash || !networkDomain) {
   throw new Error("transaction E2E deployment variables are incomplete");
 }
 
@@ -57,7 +58,7 @@ async function managedValue(backend, key) {
 }
 
 function deployment(abi) {
-  return { artifacts, genesisHash, serviceKey, serviceId, codeHash, abiVersion: 1, abi };
+  return { artifacts, genesisHash, networkDomain, serviceKey, serviceId, codeHash, abiVersion: 1, abi };
 }
 
 function signer(seed) {
@@ -72,7 +73,7 @@ async function directSignedAction(abi, actionName, input, pair, nonce) {
   const payload = encodeActionPayload(abi, actionName, input);
   const unsigned = {
     version: 1,
-    networkDomain: parseHex(genesisHash, 32),
+    networkDomain: parseHex(networkDomain, 32),
     serviceKey: parseHex(serviceKey, 32),
     actionSelector: actionSelector(actionName),
     signerScheme: 0,
@@ -97,7 +98,6 @@ async function backendContext() {
 }
 
 function measured(submissions, statuses) {
-  const formalTransactionIds = [...new Set(statuses.map((item) => item.formalTransactionId).filter(Boolean))];
   const packageHashes = [...new Set(statuses.map((item) => item.packageHash).filter(Boolean))];
   const workItems = [...new Set(statuses
     .filter((item) => item.packageHash !== null && item.itemIndex !== null)
@@ -111,7 +111,6 @@ function measured(submissions, statuses) {
     .filter(Boolean);
   return {
     logicalTransactionIds: submissions.map((item) => item.transactionId),
-    formalTransactionIds,
     packageHashes,
     workItems,
     receipts,
@@ -158,7 +157,7 @@ async function main() {
   const outOfOrderPair = signer("0a").pair;
   const submitDirect = async (nonce) => {
     const action = await directSignedAction(abi, "advance", { key: firstKey }, outOfOrderPair, nonce);
-    const submitted = await backend.call("minijam_submitTransactionV1", {
+    const submitted = await backend.call("jamscript_submitTransactionV1", {
       serviceId,
       serviceCodeHash: codeHash,
       payloadBase64: action.payloadBase64,
@@ -220,7 +219,7 @@ async function main() {
   const stalePayload = encodeActionPayload(abi, "advance", { key: firstKey });
   const staleUnsigned = {
     version: 1,
-    networkDomain: parseHex(genesisHash, 32),
+    networkDomain: parseHex(networkDomain, 32),
     serviceKey: parseHex(serviceKey, 32),
     actionSelector: actionSelector("advance"),
     signerScheme: 0,
@@ -232,7 +231,7 @@ async function main() {
   };
   const staleSignature = await sr25519Sign(signingDigestV1(staleUnsigned), pair);
   const staleAction = encodeSignedActionV1({ ...staleUnsigned, signature: staleSignature });
-  const staleSubmitted = await backend.call("minijam_submitTransactionV1", {
+  const staleSubmitted = await backend.call("jamscript_submitTransactionV1", {
     serviceId,
     serviceCodeHash: codeHash,
     payloadBase64: Buffer.from(staleAction).toString("base64"),
@@ -240,7 +239,7 @@ async function main() {
   });
   let staleStatus;
   for (;;) {
-    staleStatus = await backend.call("minijam_getTransactionStatusV1", { transactionId: staleSubmitted.transactionId });
+    staleStatus = await backend.call("jamscript_getTransactionStatusV1", { transactionId: staleSubmitted.transactionId });
     if (staleStatus.status === "imported" || staleStatus.status === "failed") break;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }

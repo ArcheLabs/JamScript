@@ -41,14 +41,6 @@ test("SplitRpcTransport sends node queries to node and Work methods to formal RP
     "work:minijam_getWorkStatusV1",
   );
   assert.equal(
-    await transport.call("minijam_submitTransactionV1", {}),
-    "work:minijam_submitTransactionV1",
-  );
-  assert.equal(
-    await transport.call("minijam_getTransactionStatusV1", { transactionId: "0x04" }),
-    "work:minijam_getTransactionStatusV1",
-  );
-  assert.equal(
     await transport.call("minijam_getManagedStateV1", { serviceId: 1000 }),
     "state:minijam_getManagedStateV1",
   );
@@ -66,8 +58,6 @@ test("SplitRpcTransport sends node queries to node and Work methods to formal RP
     [
       "minijam_submitWorkV1",
       "minijam_getWorkStatusV1",
-      "minijam_submitTransactionV1",
-      "minijam_getTransactionStatusV1",
     ],
   );
   assert.deepEqual(stateCalls.map(({ method }) => method), ["minijam_getManagedStateV1"]);

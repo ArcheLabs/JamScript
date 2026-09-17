@@ -15,6 +15,7 @@ const key = new Uint8Array(32).fill(1);
 const value = u64(42);
 const deployment = {
   genesisHash: "0x" + "11".repeat(32),
+  networkDomain: "0x" + "11".repeat(32),
   serviceKey: "0x" + "aa".repeat(32),
   serviceId: 1000,
   codeHash: "0x" + "22".repeat(32),

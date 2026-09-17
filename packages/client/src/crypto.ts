@@ -9,6 +9,25 @@ export const MANAGED_STATE_COMMITMENT_KEY_V1 = new TextEncoder().encode(
   ":jam-service-runtime:managed-state:v1",
 );
 export const MAX_ACTION_PAYLOAD_BYTES = 1_048_576;
+export const OWNERSHIP_VERSION_V1 = 1;
+export const MAX_OWNERSHIP_BYTES = 4096;
+export const OWNERSHIP_KEY_DOMAIN_V1 = new TextEncoder().encode("OWNERSHIP_ABSTRACTION_KEY_V1");
+
+export const OWNERSHIP_KIND = {
+  ED25519_KEY: 0,
+  SR25519_KEY: 1,
+  SECP256K1_KEY: 2,
+  SECP256K1_KECCAK20: 3,
+  MULTICRYPTO_ACCOUNT32: 4,
+} as const;
+
+export type OwnershipKind = typeof OWNERSHIP_KIND[keyof typeof OWNERSHIP_KIND];
+
+export type Ownership = {
+  version: 1;
+  kind: OwnershipKind;
+  public: Uint8Array;
+};
 
 export type ServiceKeyV1 = Uint8Array;
 
@@ -23,6 +42,20 @@ export type SignedActionV1 = {
   validUntil: bigint;
   payloadHash: Uint8Array;
   signature: Uint8Array;
+  payload: Uint8Array;
+};
+
+export type SignedActionV2 = {
+  version: 2;
+  networkDomain: Uint8Array;
+  serviceKey: ServiceKeyV1;
+  actionSelector: Uint8Array;
+  controller: Ownership;
+  actAs: Ownership | null;
+  nonce: bigint;
+  validUntil: bigint;
+  payloadHash: Uint8Array;
+  authorizationProof: Uint8Array;
   payload: Uint8Array;
 };
 
@@ -42,6 +75,10 @@ function u32(value: number): Uint8Array {
   return output;
 }
 
+function u16(value: number): Uint8Array {
+  return Uint8Array.of(value & 0xff, (value >>> 8) & 0xff);
+}
+
 function u64(value: bigint): Uint8Array {
   const output = new Uint8Array(8);
   new DataView(output.buffer).setBigUint64(0, value, true);
@@ -50,6 +87,43 @@ function u64(value: bigint): Uint8Array {
 
 function byte(value: number): Uint8Array {
   return Uint8Array.of(value);
+}
+
+function ownershipPublicLength(kind: OwnershipKind): number {
+  if (kind === OWNERSHIP_KIND.SECP256K1_KEY) return 33;
+  if (kind === OWNERSHIP_KIND.SECP256K1_KECCAK20) return 20;
+  return 32;
+}
+
+export function encodeOwnership(ownership: Ownership): Uint8Array {
+  if (ownership.version !== 1 || ownership.public.length !== ownershipPublicLength(ownership.kind)) {
+    throw new Error("invalid Ownership public value");
+  }
+  if (ownership.kind === OWNERSHIP_KIND.SECP256K1_KEY && ownership.public[0] !== 2 && ownership.public[0] !== 3) {
+    throw new Error("invalid compressed secp256k1 public key");
+  }
+  if (ownership.public.length > 0xffff || ownership.public.length + 4 > MAX_OWNERSHIP_BYTES) throw new Error("Ownership is too large");
+  return concat(byte(1), byte(ownership.kind), Uint8Array.of(ownership.public.length & 0xff, ownership.public.length >>> 8), ownership.public);
+}
+
+export function decodeOwnership(bytes: Uint8Array): Ownership {
+  if (bytes.length < 4 || bytes.length > MAX_OWNERSHIP_BYTES || bytes[0] !== 1) throw new Error("invalid Ownership encoding");
+  const kind = bytes[1] as OwnershipKind;
+  if (kind < 0 || kind > 4) throw new Error("unsupported Ownership kind");
+  const length = bytes[2] | (bytes[3] << 8);
+  if (length !== ownershipPublicLength(kind) || bytes.length !== 4 + length) throw new Error("invalid Ownership length");
+  if (kind === OWNERSHIP_KIND.SECP256K1_KEY && bytes[4] !== 2 && bytes[4] !== 3) {
+    throw new Error("invalid compressed secp256k1 public key");
+  }
+  return { version: 1, kind, public: bytes.slice(4) };
+}
+
+export function ownershipKey(ownership: Ownership): Uint8Array {
+  return blake2AsU8a(concat(OWNERSHIP_KEY_DOMAIN_V1, encodeOwnership(ownership)), 256);
+}
+
+export function ownershipNonceKey(ownership: Ownership): Uint8Array {
+  return concat(byte(RUNTIME_KEY_CLASS_V1), byte(WALLET_AUTH_MODULE_V1), new TextEncoder().encode("__jamscript/runtime/ownership/nonces/"), ownershipKey(ownership));
 }
 
 export function parseHex(value: string, expectedBytes?: number): Uint8Array {
@@ -166,4 +240,78 @@ export function decodeSignedActionV1(bytes: Uint8Array): SignedActionV1 {
     throw new Error("SignedActionV1 payload hash mismatch");
   }
   return { version: 1, networkDomain, serviceKey, actionSelector, signerScheme: 0, publicKey, nonce, validUntil, payloadHash, signature, payload };
+}
+
+export function actionCommitmentV2(action: Omit<SignedActionV2, "authorizationProof">): Uint8Array {
+  if (action.networkDomain.length !== 32 || action.serviceKey.length !== 32 || action.actionSelector.length !== 8) throw new Error("invalid SignedActionV2 fixed-width field");
+  const parts = [
+    new TextEncoder().encode("JAMSCRIPT_ACTION_V2"),
+    action.networkDomain,
+    action.serviceKey,
+    action.actionSelector,
+    encodeOwnership(action.controller),
+    byte(action.actAs === null ? 0 : 1),
+    ...(action.actAs === null ? [] : [encodeOwnership(action.actAs)]),
+    u64(action.nonce),
+    u64(action.validUntil),
+    action.payloadHash,
+  ];
+  return blake2AsU8a(concat(...parts), 256);
+}
+
+export function signingMessageV2(action: Omit<SignedActionV2, "authorizationProof">): Uint8Array {
+  const commitment = actionCommitmentV2(action);
+  const encoded = base64Url(commitment);
+  return new TextEncoder().encode("JAMSCRIPT_ACTION_V2:" + encoded);
+}
+
+function base64Url(bytes: Uint8Array): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let output = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const a = bytes[index];
+    const b = index + 1 < bytes.length ? bytes[index + 1] : 0;
+    const c = index + 2 < bytes.length ? bytes[index + 2] : 0;
+    output += alphabet[a >>> 2];
+    output += alphabet[((a & 3) << 4) | (b >>> 4)];
+    output += index + 1 < bytes.length ? alphabet[((b & 15) << 2) | (c >>> 6)] : "=";
+    output += index + 2 < bytes.length ? alphabet[c & 63] : "=";
+  }
+  return output.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+export function encodeSignedActionV2(action: SignedActionV2): Uint8Array {
+  if (action.version !== 2 || action.networkDomain.length !== 32 || action.serviceKey.length !== 32 || action.actionSelector.length !== 8) throw new Error("invalid SignedActionV2 fixed-width field");
+  const controller = encodeOwnership(action.controller);
+  const actAs = action.actAs === null ? null : encodeOwnership(action.actAs);
+  if (action.authorizationProof.length > 65536) throw new Error("SignedActionV2 authorization proof is too large");
+  if (action.payload.length > MAX_ACTION_PAYLOAD_BYTES) throw new Error("SignedActionV2 payload is too large");
+  return concat(
+    byte(2), action.networkDomain, action.serviceKey, action.actionSelector,
+    u16(controller.length), controller,
+    byte(actAs === null ? 0 : 1), ...(actAs === null ? [] : [u16(actAs.length), actAs]),
+    u64(action.nonce), u64(action.validUntil), action.payloadHash,
+    u32(action.authorizationProof.length), action.authorizationProof,
+    u32(action.payload.length), action.payload,
+  );
+}
+
+export function decodeSignedActionV2(bytes: Uint8Array): SignedActionV2 {
+  let offset = 0;
+  const take = (length: number): Uint8Array => { const end = offset + length; if (end > bytes.length) throw new Error("truncated SignedActionV2"); const value = bytes.slice(offset, end); offset = end; return value; };
+  const readU8 = (): number => take(1)[0];
+  const readU16 = (): number => { const value = take(2); return value[0] | (value[1] << 8); };
+  const readU32 = (): number => new DataView(take(4).buffer).getUint32(0, true);
+  const readU64 = (): bigint => new DataView(take(8).buffer).getBigUint64(0, true);
+  if (readU8() !== 2) throw new Error("unsupported SignedActionV2");
+  const networkDomain = take(32); const serviceKey = take(32); const actionSelector = take(8);
+  const controller = decodeOwnership(take(readU16()));
+  const flag = readU8();
+  const actAs = flag === 0 ? null : flag === 1 ? decodeOwnership(take(readU16())) : (() => { throw new Error("invalid SignedActionV2 actAs flag"); })();
+  const nonce = readU64(); const validUntil = readU64(); const payloadHash = take(32);
+  const proofLength = readU32(); if (proofLength > 65536) throw new Error("SignedActionV2 authorization proof is too large"); const authorizationProof = take(proofLength);
+  const payload = take(readU32());
+  if (offset !== bytes.length) throw new Error("trailing SignedActionV2 bytes");
+  if (toHex(blake2AsU8a(payload, 256)) !== toHex(payloadHash)) throw new Error("SignedActionV2 payload hash mismatch");
+  return { version: 2, networkDomain, serviceKey, actionSelector, controller, actAs, nonce, validUntil, payloadHash, authorizationProof, payload };
 }

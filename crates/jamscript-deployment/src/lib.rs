@@ -523,10 +523,26 @@ pub fn register_backend_service<T: JsonRpcTransport>(
     artifact: &ServiceArtifact,
     timeout: Duration,
 ) -> Result<serde_json::Value, DeploymentError> {
-    let registration = serde_json::json!({
+    register_backend_service_with_network_domain(
+        transport, endpoint, service_id, artifact, timeout, None,
+    )
+}
+
+pub fn register_backend_service_with_network_domain<T: JsonRpcTransport>(
+    transport: &T,
+    endpoint: &str,
+    service_id: u32,
+    artifact: &ServiceArtifact,
+    timeout: Duration,
+    network_domain: Option<&str>,
+) -> Result<serde_json::Value, DeploymentError> {
+    let mut registration = serde_json::json!({
         "serviceId": service_id,
         "expectedCodeHash": hash_hex(&artifact.code_hash),
     });
+    if let Some(network_domain) = network_domain {
+        registration["networkDomain"] = serde_json::Value::String(network_domain.to_owned());
+    }
     let result = match transport.call(
         endpoint,
         "jamscript_registerServiceV1",
@@ -567,15 +583,20 @@ pub fn register_backend_service<T: JsonRpcTransport>(
                         ),
                     )
                 })?;
+            let mut registration = serde_json::json!({
+                "serviceId": service_id,
+                "expectedCodeHash": hash_hex(&artifact.code_hash),
+                "artifactDigest": hash_hex(&digest),
+            });
+            if let Some(network_domain) = network_domain {
+                registration["networkDomain"] =
+                    serde_json::Value::String(network_domain.to_owned());
+            }
             transport
                 .call(
                     endpoint,
                     "jamscript_registerServiceV1",
-                    serde_json::json!({
-                        "serviceId": service_id,
-                        "expectedCodeHash": hash_hex(&artifact.code_hash),
-                        "artifactDigest": hash_hex(&digest),
-                    }),
+                    registration,
                     timeout,
                     true,
                 )
@@ -702,38 +723,54 @@ impl JsonRpcTransport for CurlJsonRpcTransport {
         })?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let marker = "\nJAMSCRIPT_HTTP_STATUS:";
-        let (body, status) = stdout.rsplit_once(marker).ok_or_else(|| {
-            DeploymentError::new(
-                if mutating {
-                    ErrorCode::DeploymentOutcomeUnknown
-                } else {
-                    ErrorCode::NetworkUnreachable
-                },
-                format!(
-                    "{} did not return an HTTP status from {}: {}",
+        let (body, status) = match stdout.rsplit_once(marker) {
+            Some((body, status)) => (body, status.trim().parse::<u16>().unwrap_or(0)),
+            None => {
+                return Err(curl_transport_error(
                     method,
-                    redact_url(endpoint),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            )
-        })?;
-        let status = status.trim().parse::<u16>().unwrap_or(0);
+                    endpoint,
+                    output.status.code(),
+                    None,
+                    stdout.as_bytes(),
+                    &output.stderr,
+                    mutating,
+                ));
+            }
+        };
+
+        // A curl exit status is transport evidence, even when curl managed to
+        // print an HTTP marker. In particular, a mutating request may already
+        // have reached the server before the response connection failed.
+        if !output.status.success() {
+            return Err(curl_transport_error(
+                method,
+                endpoint,
+                output.status.code(),
+                Some(status),
+                body.as_bytes(),
+                &output.stderr,
+                mutating,
+            ));
+        }
         if status == 0 {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let connection_failure = stderr.contains("Could not resolve")
-                || stderr.contains("Failed to connect")
-                || stderr.contains("Connection refused")
-                || stderr.contains("Could not connect");
+            return Err(curl_transport_error(
+                method,
+                endpoint,
+                output.status.code(),
+                Some(status),
+                body.as_bytes(),
+                &output.stderr,
+                mutating,
+            ));
+        }
+        if status >= 400 {
             return Err(DeploymentError::new(
-                if mutating && !connection_failure {
-                    ErrorCode::DeploymentOutcomeUnknown
+                if mutating {
+                    ErrorCode::DeploymentRejected
                 } else {
                     ErrorCode::NetworkUnreachable
                 },
-                format!(
-                    "{method}: {}",
-                    stderr.trim().replace(endpoint, &redact_url(endpoint))
-                ),
+                format_http_error(method, endpoint, status, body.as_bytes(), &output.stderr),
             ));
         }
         let parsed: serde_json::Value = serde_json::from_str(body.trim()).map_err(|error| {
@@ -744,22 +781,85 @@ impl JsonRpcTransport for CurlJsonRpcTransport {
                     ErrorCode::RpcInvalidResponse
                 },
                 format!(
-                    "invalid JSON-RPC response from {}: {error}",
-                    redact_url(endpoint)
+                    "invalid JSON-RPC response from {}: {error}; response_body_bytes={}; response_body_preview={}",
+                    redact_url(endpoint),
+                    body.len(),
+                    response_preview(body.as_bytes()),
                 ),
             )
         })?;
-        if status >= 400 {
-            return Err(DeploymentError::new(
-                if mutating {
-                    ErrorCode::DeploymentRejected
-                } else {
-                    ErrorCode::NetworkUnreachable
-                },
-                format!("HTTP {status} from {}", redact_url(endpoint)),
-            ));
-        }
         parse_json_rpc_response(parsed, method, mutating)
+    }
+}
+
+const RESPONSE_PREVIEW_LIMIT: usize = 512;
+
+fn curl_transport_error(
+    method: &str,
+    endpoint: &str,
+    exit_code: Option<i32>,
+    status: Option<u16>,
+    body: &[u8],
+    stderr: &[u8],
+    mutating: bool,
+) -> DeploymentError {
+    let stderr = String::from_utf8_lossy(stderr);
+    let connection_failure = status.unwrap_or(0) == 0
+        && (stderr.contains("Could not resolve")
+            || stderr.contains("Failed to connect")
+            || stderr.contains("Connection refused")
+            || stderr.contains("Could not connect"));
+    let code = if mutating && !connection_failure {
+        ErrorCode::DeploymentOutcomeUnknown
+    } else {
+        ErrorCode::NetworkUnreachable
+    };
+    let exit = exit_code
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "signal/unknown".into());
+    let status = status
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    DeploymentError::new(
+        code,
+        format!(
+            "{method}: curl_exit_code={exit}; http_status={status}; response_body_bytes={}; response_body_preview={}; stderr={}",
+            body.len(),
+            response_preview(body),
+            stderr.trim().replace(endpoint, &redact_url(endpoint)),
+        ),
+    )
+}
+
+fn format_http_error(
+    method: &str,
+    endpoint: &str,
+    status: u16,
+    body: &[u8],
+    stderr: &[u8],
+) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    format!(
+        "{method}: HTTP {status} from {}; response_body_bytes={}; response_body_preview={}; stderr={}",
+        redact_url(endpoint),
+        body.len(),
+        response_preview(body),
+        stderr.trim().replace(endpoint, &redact_url(endpoint)),
+    )
+}
+
+fn response_preview(body: &[u8]) -> String {
+    if body.is_empty() {
+        return "<empty>".into();
+    }
+    let truncated = body.len() > RESPONSE_PREVIEW_LIMIT;
+    let preview = String::from_utf8_lossy(&body[..body.len().min(RESPONSE_PREVIEW_LIMIT)])
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    if truncated {
+        format!("{preview}…")
+    } else {
+        preview.into()
     }
 }
 
@@ -816,6 +916,8 @@ pub struct NetworkIdentity {
     pub kind: NetworkKind,
     #[serde(rename = "genesisHash", skip_serializing_if = "Option::is_none")]
     pub genesis_hash: Option<String>,
+    #[serde(rename = "networkDomain", skip_serializing_if = "Option::is_none")]
+    pub network_domain: Option<String>,
     #[serde(skip)]
     pub verification: IdentityVerification,
 }
@@ -974,6 +1076,7 @@ impl<T: JsonRpcTransport> DeploymentBackend for MiniJamDeploymentBackend<T> {
                 name: network.name.clone(),
                 kind: network.kind.clone(),
                 genesis_hash: network.genesis_hash.clone(),
+                network_domain: network.genesis_hash.clone(),
                 verification: if network.genesis_pinned {
                     IdentityVerification::Verified
                 } else {
@@ -1542,6 +1645,39 @@ mod tests {
             redact_url("https://user:secret@example.org/?token=abc#fragment"),
             "https://example.org/"
         );
+    }
+
+    #[test]
+    fn curl_transport_failure_preserves_mutating_unknown_outcome() {
+        let error = curl_transport_error(
+            "minijam_createServiceV1",
+            "http://deployment.test",
+            Some(28),
+            Some(200),
+            b"{\"partial\":",
+            b"Operation timed out",
+            true,
+        );
+        assert_eq!(error.code, ErrorCode::DeploymentOutcomeUnknown);
+        assert!(error.message.contains("curl_exit_code=28"));
+        assert!(error.message.contains("http_status=200"));
+        assert!(error.message.contains("response_body_bytes=11"));
+        assert!(error.message.contains("Operation timed out"));
+    }
+
+    #[test]
+    fn http_error_is_reported_before_json_parsing() {
+        let message = format_http_error(
+            "minijam_createServiceV1",
+            "http://deployment.test",
+            500,
+            b"",
+            b"upstream failed",
+        );
+        assert!(message.contains("HTTP 500"));
+        assert!(message.contains("response_body_bytes=0"));
+        assert!(message.contains("response_body_preview=<empty>"));
+        assert!(message.contains("upstream failed"));
     }
 
     fn write_artifact_fixture(directory: &Path) {

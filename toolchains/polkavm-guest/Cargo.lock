@@ -303,7 +303,22 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
+ "pkcs8",
  "signature",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "serde",
+ "sha2",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -590,8 +605,13 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "jamscript-crypto"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blake2b_simd",
+ "ed25519-dalek",
+ "k256",
+ "ownership-core",
  "schnorrkel",
+ "sha3",
  "thiserror",
 ]
 
@@ -599,8 +619,10 @@ dependencies = [
 name = "jamscript-runtime-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blake2b_simd",
  "jamscript-crypto",
+ "ownership-core",
  "service-runtime-core",
 ]
 
@@ -742,6 +764,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "ownership-core"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "thiserror",
 ]
 
 [[package]]
@@ -1076,6 +1106,7 @@ name = "service-runtime-core"
 version = "0.1.0"
 dependencies = [
  "jamscript-crypto",
+ "ownership-core",
 ]
 
 [[package]]

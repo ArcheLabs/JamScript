@@ -6,9 +6,12 @@ license.workspace = true
 
 [dependencies]
 jamscript-crypto = { path = "../jamscript-crypto" }
+ownership-core = { path = "../ownership-core" }
+base64.workspace = true
 jamscript-ir = { path = "../jamscript-ir" }
 service-runtime-core = { path = "../service-runtime-core" }
 thiserror.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 schnorrkel.workspace = true

@@ -299,7 +299,6 @@ prepare_project() {
     -e "s/\"serviceKey\": \"0x[0-9a-fA-F]*\"/\"serviceKey\": \"${service_key}\"/" \
     -e "s/\"instanceId\": \"0x[0-9a-fA-F]*\"/\"instanceId\": \"${instance_id}\"/" \
     -e "s/\"name\": \"dynamic-state-scriptc\"/\"name\": \"${package_name}\"/" \
-    -e "s/^genesis_hash = .*/genesis_hash = \"${genesis_hash}\"/" \
     "${project}/jamscript.toml" "${project}/.jamscript/service.json"
   cat >> "${project}/jamscript.toml" <<EOF
 

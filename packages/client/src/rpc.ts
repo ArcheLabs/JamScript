@@ -42,7 +42,6 @@ export type SubmitTransactionResult = {
   packageHash?: string | null;
   itemIndex?: number | null;
   actionIndex?: number | null;
-  formalTransactionId?: string | null;
 };
 
 export type SubmitActionResult = SubmitTransactionResult & {
@@ -55,7 +54,6 @@ export type TransactionStatusResult = {
   packageHash: string | null;
   itemIndex: number | null;
   actionIndex: number | null;
-  formalTransactionId: string | null;
   executionReceipt: string | null;
   error: string | null;
   actionReceipts?: ActionReceipt[];
@@ -120,8 +118,6 @@ export interface RpcTransport {
 const FORMAL_WORK_METHODS = new Set([
   "minijam_submitWorkV1",
   "minijam_getWorkStatusV1",
-  "minijam_submitTransactionV1",
-  "minijam_getTransactionStatusV1",
 ]);
 
 const STATE_PROVIDER_METHODS = new Set([
@@ -200,10 +196,10 @@ export function asWorkRpc(transport: RpcTransport): WorkRpc {
         serviceId === undefined ? { packageHash } : { packageHash, serviceId },
       ),
     submitTransaction: (request) =>
-      transport.call("minijam_submitTransactionV1", request),
+      transport.call("jamscript_submitTransactionV1", request),
     transactionStatus: async (transactionId) => {
       const result = await transport.call<TransactionStatusResult & { receipt?: string | null }>(
-        "minijam_getTransactionStatusV1",
+        "jamscript_getTransactionStatusV1",
         { transactionId },
       );
       return {
@@ -211,7 +207,6 @@ export function asWorkRpc(transport: RpcTransport): WorkRpc {
         packageHash: result.packageHash ?? null,
         itemIndex: result.itemIndex ?? null,
         actionIndex: result.actionIndex ?? null,
-        formalTransactionId: result.formalTransactionId ?? null,
         executionReceipt: result.executionReceipt ?? result.receipt ?? null,
         error: result.error ?? null,
       };

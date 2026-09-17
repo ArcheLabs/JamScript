@@ -3,6 +3,15 @@ export interface JamSigner {
   signRaw(message: Uint8Array): Promise<Uint8Array>;
 }
 
+export type JamScriptOwnershipSignRequest = Omit<import("./crypto.js").SignedActionV2, "authorizationProof"> & {
+  message: Uint8Array;
+};
+
+export interface OwnershipSigner {
+  getController(): Promise<import("./crypto.js").Ownership>;
+  signJamScriptAction(request: JamScriptOwnershipSignRequest): Promise<Uint8Array>;
+}
+
 export type InjectedSigner = {
   signRaw(input: {
     address: string;

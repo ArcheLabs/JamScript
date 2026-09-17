@@ -1,10 +1,11 @@
 use service_runtime_core::{
-    ExecutionContext, ExternalStateAccess, ExternalStateWitnessV1, ManagedStateAccess,
-    ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV1, ServiceApplication,
-    ServiceKeyV1, StateAccessError, StateAccessPlanV1, StateDiffV1, StateQueryResponseV1,
-    StateRecoveryV1, StateRoot, EMPTY_STATE_ROOT_V1, MANAGED_STATE_COMMITMENT_KEY_V1,
+    ExecutionContext, ExecutionEnvironmentV1, ExternalStateAccess, ExternalStateWitnessV1,
+    ManagedStateAccess, ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV1,
+    ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1, StateDiffV1,
+    StateQueryResponseV1, StateRecoveryV1, StateRoot, EMPTY_STATE_ROOT_V1,
+    MANAGED_STATE_COMMITMENT_KEY_V1,
 };
-use service_runtime_guest::refine;
+use service_runtime_guest::refine_with_environment;
 use service_runtime_state::{FullState, StateError, StateTransaction};
 use sp_trie::StorageProof;
 use std::collections::BTreeMap;
@@ -171,6 +172,7 @@ pub trait MaterializedServiceStateProvider: ServiceStateProvider {
 pub struct AuthenticatedWorkBuilder<'a, Source, Provider> {
     source: &'a mut Source,
     provider: &'a Provider,
+    environment: ExecutionEnvironmentV1,
 }
 
 impl<'a, Source, Provider> AuthenticatedWorkBuilder<'a, Source, Provider>
@@ -179,7 +181,25 @@ where
     Provider: ServiceStateProvider,
 {
     pub fn new(source: &'a mut Source, provider: &'a Provider) -> Self {
-        Self { source, provider }
+        Self {
+            source,
+            provider,
+            environment: ExecutionEnvironmentV1 {
+                network_domain: [0; 32],
+            },
+        }
+    }
+
+    pub fn with_environment(
+        source: &'a mut Source,
+        provider: &'a Provider,
+        environment: ExecutionEnvironmentV1,
+    ) -> Self {
+        Self {
+            source,
+            provider,
+            environment,
+        }
     }
 
     pub fn build_actions<Application>(
@@ -294,6 +314,7 @@ where
                 &plan,
                 &actions,
                 Some(&mut planning_external),
+                self.environment,
             )
             .map_err(WorkBuilderError::Application)?;
             match result {
@@ -333,7 +354,8 @@ where
             actions,
         };
         let predicted_output =
-            refine(application, &refine_input).map_err(|_| WorkBuilderError::Verification)?;
+            refine_with_environment(application, &refine_input, self.environment)
+                .map_err(|_| WorkBuilderError::Verification)?;
         Ok(BuiltManagedWork {
             context,
             service,
@@ -355,6 +377,19 @@ fn initial_runtime_keys(actions: &[Vec<u8>]) -> Vec<Vec<u8>> {
                 account.copy_from_slice(signed.public_key);
                 keys.push(service_runtime_core::wallet_nonce_key_v1(&account));
             }
+        } else if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v2(action) {
+            if let Ok(key) = jamscript_runtime_core::ownership_nonce_key(
+                signed.act_as.as_ref().unwrap_or(&signed.controller),
+            ) {
+                keys.push(key);
+            }
+            if let Some(subject) = signed.act_as.as_ref() {
+                if let Ok(key) =
+                    jamscript_runtime_core::control_claim_key(subject, &signed.controller)
+                {
+                    keys.push(key);
+                }
+            }
         }
     }
     keys.sort();
@@ -373,6 +408,7 @@ fn planning_execute<Application>(
     plan: &StateAccessPlanV1,
     actions: &[Vec<u8>],
     mut external: Option<&mut dyn ExternalStateAccess>,
+    environment: ExecutionEnvironmentV1,
 ) -> Result<PlanningOutcome, StateAccessError>
 where
     Application: ServiceApplication,
@@ -384,14 +420,19 @@ where
             match external.as_deref_mut() {
                 Some(external) => {
                     let mut context = ExecutionContext::with_access_plan_and_external_state(
-                        state, None, plan, external,
+                        state,
+                        None,
+                        plan,
+                        external,
+                        environment,
                     );
                     application
                         .execute(&mut context, action)
                         .map_err(Into::into)
                 }
                 None => {
-                    let mut context = ExecutionContext::with_access_plan(state, None, plan);
+                    let mut context =
+                        ExecutionContext::with_access_plan(state, None, plan, environment);
                     application
                         .execute(&mut context, action)
                         .map_err(Into::into)
