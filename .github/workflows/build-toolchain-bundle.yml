@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - codex/toolchain-distribution-v1
     paths:
       - '.github/workflows/build-toolchain-bundle.yml'
       - '.github/workflows/promote-macos-llvm-lock.yml'
