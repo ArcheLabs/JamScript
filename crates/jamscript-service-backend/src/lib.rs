@@ -204,6 +204,8 @@ struct PersistedServiceRecord {
     artifact_format: String,
     manifest_digest: Option<String>,
     registered_at: Option<u64>,
+    #[serde(default)]
+    network_domain: Option<String>,
 }
 
 impl DiskBackendStore {
@@ -254,6 +256,11 @@ impl DiskBackendStore {
                         .map(parse_hash)
                         .transpose()?,
                     registered_at: record.registered_at,
+                    network_domain: record
+                        .network_domain
+                        .as_deref()
+                        .map(parse_hash)
+                        .transpose()?,
                 },
             })?;
         }
@@ -276,6 +283,7 @@ impl DiskBackendStore {
                     .manifest_digest
                     .map(|hash| hash_hex(&hash)),
                 registered_at: record.deployment.registered_at,
+                network_domain: record.deployment.network_domain.map(|hash| hash_hex(&hash)),
             })
             .collect::<Vec<_>>();
         let bytes = serde_json::to_vec_pretty(&records)
@@ -592,6 +600,7 @@ fn encode_service_record(record: &ServiceRecord) -> Result<Vec<u8>, BackendError
             .manifest_digest
             .map(|hash| hash_hex(&hash)),
         registered_at: record.deployment.registered_at,
+        network_domain: record.deployment.network_domain.map(|hash| hash_hex(&hash)),
     })
     .map_err(|error| BackendError::Database(error.to_string()))
 }
@@ -618,6 +627,11 @@ fn decode_service_record(bytes: &[u8]) -> Result<ServiceRecord, BackendError> {
                 .map(parse_hash)
                 .transpose()?,
             registered_at: record.registered_at,
+            network_domain: record
+                .network_domain
+                .as_deref()
+                .map(parse_hash)
+                .transpose()?,
         },
     })
 }
@@ -626,6 +640,7 @@ fn decode_service_record(bytes: &[u8]) -> Result<ServiceRecord, BackendError> {
 pub struct DeploymentMetadata {
     pub manifest_digest: Option<StateRoot>,
     pub registered_at: Option<u64>,
+    pub network_domain: Option<StateRoot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -845,12 +860,20 @@ impl PvmApplication {
     }
 
     pub fn metadata(&self) -> Result<BackendMetadataV1, BackendError> {
-        let bytes = self.invoke("jamscript_backend_metadata_v1", &[])?;
+        let bytes = self.invoke("jamscript_backend_metadata_v1", &[], [0; 32])?;
         BackendMetadataV1::decode(&bytes).map_err(BackendError::Wire)
     }
 
     pub fn plan_encoded(&self, input: &[u8]) -> Result<Vec<u8>, BackendError> {
-        self.invoke("jamscript_plan_v1", input)
+        self.plan_encoded_with_network_domain(input, [0; 32])
+    }
+
+    pub fn plan_encoded_with_network_domain(
+        &self,
+        input: &[u8],
+        network_domain: StateRoot,
+    ) -> Result<Vec<u8>, BackendError> {
+        self.invoke("jamscript_plan_v1", input, network_domain)
     }
 
     pub fn plan_with_keys(
@@ -884,13 +907,29 @@ impl PvmApplication {
         managed_state: service_runtime_core::ManagedStateWitnessV1,
         external_state: Vec<service_runtime_core::ExternalStateWitnessV1>,
     ) -> Result<PlannerResult, BackendError> {
+        self.plan_with_external_witness_and_network_domain(
+            actions,
+            managed_state,
+            external_state,
+            [0; 32],
+        )
+    }
+
+    pub fn plan_with_external_witness_and_network_domain(
+        &self,
+        actions: &[Vec<u8>],
+        managed_state: service_runtime_core::ManagedStateWitnessV1,
+        external_state: Vec<service_runtime_core::ExternalStateWitnessV1>,
+        network_domain: StateRoot,
+    ) -> Result<PlannerResult, BackendError> {
         let input = RuntimeRefineInputV1 {
             version: RuntimeRefineInputV1::VERSION,
             managed_state,
             external_state,
             actions: actions.to_vec(),
         };
-        let output = self.plan_encoded(&input.encode().map_err(BackendError::Wire)?)?;
+        let encoded = input.encode().map_err(BackendError::Wire)?;
+        let output = self.plan_encoded_with_network_domain(&encoded, network_domain)?;
         if let Ok((service_id, key)) =
             service_runtime_core::decode_planner_need_external_state(&output)
         {
@@ -912,11 +951,24 @@ impl PvmApplication {
     }
 
     pub fn refine_encoded(&self, input: &[u8]) -> Result<RuntimeRefineOutputV1, BackendError> {
-        let bytes = self.invoke("minijam_refine", input)?;
+        self.refine_encoded_with_network_domain(input, [0; 32])
+    }
+
+    pub fn refine_encoded_with_network_domain(
+        &self,
+        input: &[u8],
+        network_domain: StateRoot,
+    ) -> Result<RuntimeRefineOutputV1, BackendError> {
+        let bytes = self.invoke("minijam_refine", input, network_domain)?;
         RuntimeRefineOutputV1::decode(&bytes).map_err(BackendError::Wire)
     }
 
-    fn invoke(&self, export: &str, payload: &[u8]) -> Result<Vec<u8>, BackendError> {
+    fn invoke(
+        &self,
+        export: &str,
+        payload: &[u8],
+        network_domain: StateRoot,
+    ) -> Result<Vec<u8>, BackendError> {
         let mut config = PvmConfig::new();
         config.set_backend(Some(BackendKind::Interpreter));
         let engine = Engine::new(&config).map_err(|error| BackendError::Pvm(error.to_string()))?;
@@ -949,6 +1001,27 @@ impl PvmApplication {
                     }
                     caller.instance.set_reg(Reg::A0, remaining.len() as u64);
                 }
+                Ok(())
+            })
+            .map_err(|error| BackendError::Pvm(error.to_string()))?;
+        let network_domain_for_host = network_domain;
+        linker
+            .define_untyped("minijam_network_domain", move |caller| {
+                let output = caller.instance.reg(Reg::A0) as u32;
+                let capacity = caller.instance.reg(Reg::A1) as usize;
+                let output_size = caller.instance.reg(Reg::A2) as u32;
+                if capacity < network_domain_for_host.len() {
+                    caller.instance.set_reg(Reg::A0, u64::MAX);
+                    return Ok(());
+                }
+                caller
+                    .instance
+                    .write_memory(output, &network_domain_for_host)?;
+                caller.instance.write_memory(
+                    output_size,
+                    &(network_domain_for_host.len() as u64).to_le_bytes(),
+                )?;
+                caller.instance.set_reg(Reg::A0, 0);
                 Ok(())
             })
             .map_err(|error| BackendError::Pvm(error.to_string()))?;
@@ -1117,6 +1190,7 @@ pub enum BackendError {
     ServiceCorrupt(u32),
     Pvm(String),
     CodeHashMismatch,
+    WrongNetwork,
     InvalidMetadata,
     StaleContext,
     PredictionStale,
@@ -1199,6 +1273,9 @@ pub struct ChainServiceInfoV1 {
 /// finality, preimages, storage, and work submission in one auditable layer.
 pub trait BackendNetwork: Send + Sync {
     fn genesis_hash(&self) -> Result<StateRoot, BackendError>;
+    fn network_domain(&self) -> Result<StateRoot, BackendError> {
+        self.genesis_hash()
+    }
     fn finalized_context(&self) -> Result<FinalizedContextV1, BackendError>;
     fn service_info(
         &self,
@@ -1715,6 +1792,7 @@ impl BackendEngine {
             return Err(BackendError::CodeHashMismatch);
         }
         let context = self.network.finalized_context()?;
+        let network_domain = self.network.network_domain()?;
         if let Some(request_context) = params.get("context").and_then(Value::as_object) {
             let requested_block = request_context
                 .get("blockHash")
@@ -1745,6 +1823,9 @@ impl BackendEngine {
         let mut keys = Vec::new();
         for action in &actions {
             if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v1(action) {
+                if signed.network_domain != network_domain {
+                    return Err(BackendError::WrongNetwork);
+                }
                 if signed.public_key.len() == 32 {
                     let mut sender = [0u8; 32];
                     sender.copy_from_slice(signed.public_key);
@@ -1754,6 +1835,9 @@ impl BackendEngine {
                     }
                 }
             } else if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v2(action) {
+                if signed.network_domain != network_domain {
+                    return Err(BackendError::WrongNetwork);
+                }
                 let owner = signed.act_as.as_ref().unwrap_or(&signed.controller);
                 if let Ok(nonce_key) = jamscript_runtime_core::ownership_nonce_key(owner) {
                     if !keys.contains(&nonce_key) {
@@ -1795,8 +1879,12 @@ impl BackendEngine {
                 .map_err(BackendError::Provider)?;
             let external_witnesses =
                 build_external_witnesses(state, self.network.as_ref(), &context, &external_keys)?;
-            let planned =
-                pvm.plan_with_external_witness(&actions, witness, external_witnesses.clone())?;
+            let planned = pvm.plan_with_external_witness_and_network_domain(
+                &actions,
+                witness,
+                external_witnesses.clone(),
+                network_domain,
+            )?;
             let mut changed = false;
             for key in planned.local_access_keys {
                 if !keys.contains(&key) {
@@ -1833,7 +1921,7 @@ impl BackendEngine {
         };
         let action_count = input.actions.len();
         let encoded = input.encode().map_err(BackendError::Wire)?;
-        let prediction = pvm.refine_encoded(&encoded)?;
+        let prediction = pvm.refine_encoded_with_network_domain(&encoded, network_domain)?;
         if prediction.receipts.len() != action_count {
             return Err(BackendError::Rpc(format!(
                 "PVM returned {} action receipts for {} actions",
@@ -2511,6 +2599,13 @@ impl BackendRpcHandler {
             ));
         }
         let record = parse_service_record(&params)?;
+        if let Some(expected_domain) = record.deployment.network_domain {
+            if let Some(network) = &self.network {
+                if expected_domain != network.network_domain()? {
+                    return Err(BackendError::WrongNetwork);
+                }
+            }
+        }
         if let Some(validator) = &self.registration_validator {
             validator.validate(&record)?;
         }
@@ -2556,6 +2651,7 @@ impl BackendRpcHandler {
             .as_ref()
             .ok_or_else(|| BackendError::Rpc("network gateway is not configured".into()))?;
         let context = network.finalized_context()?;
+        let network_domain = network.network_domain()?;
         let chain = network
             .service_info(&context, service_id)?
             .ok_or(BackendError::UnknownService)?;
@@ -2626,7 +2722,10 @@ impl BackendRpcHandler {
             code_hash: chain.code_hash,
             abi_version: metadata.abi_version,
             application_artifact: artifact,
-            deployment: DeploymentMetadata::default(),
+            deployment: DeploymentMetadata {
+                network_domain: Some(network_domain),
+                ..DeploymentMetadata::default()
+            },
         };
         let planner = loader
             .load(&record.application_artifact)
@@ -3548,6 +3647,7 @@ fn service_json(record: &ServiceRecord) -> Result<Value, BackendError> {
             "format": ArtifactFormat::WIRE_NAME,
             "digest": hash_hex(&record.application_artifact.digest),
         },
+        "networkDomain": record.deployment.network_domain.map(|hash| hash_hex(&hash)),
     }))
 }
 
@@ -3588,6 +3688,11 @@ fn parse_service_record(params: &Value) -> Result<ServiceRecord, BackendError> {
                 .map(parse_hash)
                 .transpose()?,
             registered_at: params.get("registeredAt").and_then(Value::as_u64),
+            network_domain: params
+                .get("networkDomain")
+                .and_then(Value::as_str)
+                .map(parse_hash)
+                .transpose()?,
         },
     })
 }
@@ -3711,6 +3816,10 @@ fn rpc_error(error: &BackendError) -> Value {
             (-32033, "backend data directory is already in use".into())
         }
         BackendError::StaleContext => (-32010, "stale finalized context".into()),
+        BackendError::WrongNetwork => (
+            -32003,
+            "WrongNetwork: signed action network domain does not match the connected chain".into(),
+        ),
         BackendError::PredictionStale => (
             -32042,
             "canonical managed-state root disagrees with the predicted transition".into(),

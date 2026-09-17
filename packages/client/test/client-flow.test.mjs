@@ -28,6 +28,7 @@ const refreshedContext = {
 };
 const deployment = {
   genesisHash,
+  networkDomain: genesisHash,
   serviceKey,
   serviceId: 1000,
   codeHash,

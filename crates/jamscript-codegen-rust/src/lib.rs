@@ -13,29 +13,28 @@ pub enum ManagementPolicyConfig {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PortableServiceContext {
+pub struct ArtifactBuildContext {
     pub service_key: [u8; 32],
-    /// Stable per-deployment identity, distinct from the numeric chain id.
+    /// Stable project/application identity, distinct from the numeric chain id.
     pub service_instance_id: [u8; 32],
     pub management_policy: ManagementPolicyConfig,
-    pub genesis_hash: [u8; 32],
     pub diagnostic: bool,
 }
 
 pub fn generate_no_std_rust(ir: &ServiceIr) -> Result<String, String> {
-    generate_no_std_rust_with_context(ir, PortableServiceContext::default())
+    generate_no_std_rust_with_context(ir, ArtifactBuildContext::default())
 }
 
 pub fn generate_no_std_rust_with_context(
     ir: &ServiceIr,
-    context: PortableServiceContext,
+    context: ArtifactBuildContext,
 ) -> Result<String, String> {
     generate_no_std_rust_with_backend(ir, context, false)
 }
 
 pub fn generate_no_std_rust_with_scriptc_context(
     ir: &ServiceIr,
-    context: PortableServiceContext,
+    context: ArtifactBuildContext,
 ) -> Result<String, String> {
     if ir.actions.is_empty()
         || ir
@@ -50,7 +49,7 @@ pub fn generate_no_std_rust_with_scriptc_context(
 
 fn generate_no_std_rust_with_backend(
     ir: &ServiceIr,
-    context: PortableServiceContext,
+    context: ArtifactBuildContext,
     scriptc: bool,
 ) -> Result<String, String> {
     let application_source = if scriptc {
@@ -185,6 +184,7 @@ fn output_for(planning: bool) -> RefineOutput {{
                 RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size: encoded.len() }}
             }}
             Err(service_runtime_guest::GuestError::InvalidInput) => error_output(1),
+            Err(service_runtime_guest::GuestError::Environment) => error_output(2),
             Err(service_runtime_guest::GuestError::State) => error_output(2),
             Err(service_runtime_guest::GuestError::Application) => error_output(3),
         }};
@@ -201,6 +201,7 @@ fn output_for(planning: bool) -> RefineOutput {{
             return RefineOutput {{ data: unsafe {{ OUTPUT.as_ptr() }}, size: encoded.len() }};
         }}
         Err(service_runtime_guest::GuestError::InvalidInput) => return error_output(1),
+        Err(service_runtime_guest::GuestError::Environment) => return error_output(2),
         Err(service_runtime_guest::GuestError::State) => return error_output(2),
         Err(service_runtime_guest::GuestError::Application) => return error_output(3),
         Err(service_runtime_guest::GuestError::NeedState(_)) => return error_output(2),
@@ -356,7 +357,7 @@ fn decode_accumulate_init_input(input: &[u8]) -> Result<(u64, u64, u64), ()> {{
 
 pub fn generate_builder_application_rust(
     ir: &ServiceIr,
-    mut context: PortableServiceContext,
+    mut context: ArtifactBuildContext,
 ) -> Result<String, String> {
     context.diagnostic = false;
     let scriptc = !ir.actions.is_empty()
@@ -377,7 +378,7 @@ pub fn generate_builder_application_rust(
 
 fn generate_scriptc_application_rust(
     ir: &ServiceIr,
-    context: PortableServiceContext,
+    context: ArtifactBuildContext,
 ) -> Result<String, String> {
     if ir.actions.is_empty() {
         return Err("IR contains no action".to_string());
@@ -451,7 +452,7 @@ fn generate_scriptc_application_rust(
         match signed.action_selector {{ {known_selectors} _ => return Err(StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::UnknownAction.code())), }}
         let selected_selector = signed.action_selector;
         let verified = jamscript_runtime_core::verify_signed_action_v1(
-            signed, NETWORK_DOMAIN, SERVICE_KEY, selected_selector,
+            signed, context.network_domain(), SERVICE_KEY, selected_selector,
         ).map_err(|error| StateAccessError::Rejected(error.code()))?;
         let sender = verified.sender;
         let nonce_key = jamscript_runtime_core::nonce_key(&sender);
@@ -480,8 +481,6 @@ fn generate_scriptc_application_rust(
 use service_runtime_core::{{ScriptActionResultV1, ServiceApplication, ServiceKeyV1, StateAccessError}};
 
 const SERVICE_KEY: ServiceKeyV1 = ServiceKeyV1::new({service_key});
-const NETWORK_DOMAIN: [u8; 32] = {network_domain};
-
 unsafe extern "C" {{
     fn jamscript_scriptc_service_init();
 {declarations}
@@ -556,13 +555,12 @@ impl ServiceApplication for GeneratedApplication {{
 pub use generated_application_impl::GeneratedApplication;
 "##,
         service_key = byte_array_literal(&context.service_key),
-        network_domain = byte_array_literal(&context.genesis_hash),
     ))
 }
 
 fn generate_application_rust_with_context(
     ir: &ServiceIr,
-    context: PortableServiceContext,
+    context: ArtifactBuildContext,
     scriptc_symbol: Option<&str>,
 ) -> Result<String, String> {
     let action = ir
@@ -628,7 +626,6 @@ use service_runtime_core::{{ServiceApplication, ServiceKeyV1, StateAccessError}}
 const SERVICE_KEY: ServiceKeyV1 = ServiceKeyV1::new({service_key});
 const SERVICE_INSTANCE_ID: [u8; 32] = {service_instance_id};
 const GENESIS_MANAGEMENT_POLICY: jamscript_runtime_core::ManagementPolicyV1 = {management_policy};
-const NETWORK_DOMAIN: [u8; 32] = {genesis_hash};
 const ACTION_SELECTOR: [u8; 8] = {selector};
 
 unsafe extern "C" {{
@@ -670,7 +667,6 @@ pub use generated_application_impl::GeneratedApplication;
         service_key = byte_array_literal(&context.service_key),
         service_instance_id = byte_array_literal(&context.service_instance_id),
         management_policy = management_policy_literal(context.management_policy),
-        genesis_hash = byte_array_literal(&context.genesis_hash),
         selector = byte_array_literal(&selector),
         decoder = decoder,
         application_body = application_body,
@@ -810,7 +806,7 @@ fn application_body(
             "let signed = jamscript_runtime_core::decode_signed_action_v1(raw_action).map_err(|_| StateAccessError::Backend)?;",
             &marker("application-auth-decoded"),
             &marker("application-auth-verifying"),
-            "let verified = jamscript_runtime_core::verify_signed_action_v1(signed, NETWORK_DOMAIN, SERVICE_KEY, ACTION_SELECTOR).map_err(|_| StateAccessError::Backend)?;",
+            "let verified = jamscript_runtime_core::verify_signed_action_v1(signed, context.network_domain(), SERVICE_KEY, ACTION_SELECTOR).map_err(|_| StateAccessError::Backend)?;",
             &marker("application-auth-verified"),
             "let sender = verified.sender;",
             "let nonce_key = jamscript_runtime_core::nonce_key(&sender);",
@@ -834,7 +830,7 @@ fn application_body(
             "let expected_nonce = match nonce_bytes.as_slice() { [] => 0u64, bytes if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?), _ => return Err(StateAccessError::Backend) };",
             "let claim_key = if let Some(owner) = signed.act_as.as_ref() { Some(jamscript_runtime_core::control_claim_key(owner, &signed.controller).map_err(|_| StateAccessError::Backend)?) } else { None };",
             "let active_control_claim = match claim_key.as_ref() { Some(key) => matches!(context.state().get(key)?.as_deref(), Some([1])), None => false };",
-            "let verified = jamscript_runtime_core::verify_signed_action_v2(signed, NETWORK_DOMAIN, SERVICE_KEY, ACTION_SELECTOR, Some(expected_nonce), active_control_claim).map_err(|_| StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::InvalidOwnershipAuthorization.code()))?;",
+            "let verified = jamscript_runtime_core::verify_signed_action_v2(signed, context.network_domain(), SERVICE_KEY, ACTION_SELECTOR, Some(expected_nonce), active_control_claim).map_err(|_| StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::InvalidOwnershipAuthorization.code()))?;",
             "context.set_ownership(verified.owner.clone(), verified.controller.clone());",
             "context.constrain_valid_until(verified.valid_until);",
             "let next_nonce = expected_nonce.checked_add(1).ok_or(StateAccessError::Backend)?;",
@@ -973,13 +969,15 @@ mod tests {
             native_imports: Vec::new(),
         };
         let source =
-            generate_no_std_rust_with_scriptc_context(&ir, PortableServiceContext::default())
+            generate_no_std_rust_with_scriptc_context(&ir, ArtifactBuildContext::default())
                 .unwrap();
         assert!(source.contains("RuntimeRefineInputV1::decode"));
         assert!(source.contains("refine_owned"));
         assert!(source.contains("jamscript_scriptc_create_entry_v1"));
         assert!(source.contains("jamscript_scriptc_update_entry_v1"));
         assert!(source.contains("ScriptActionResultV1::NeedState"));
+        assert!(source.contains("context.network_domain()"));
+        assert!(!source.contains("NETWORK_DOMAIN"));
         assert!(!source.contains("ACTION_SELECTOR"));
     }
     #[test]
@@ -1018,6 +1016,8 @@ mod tests {
         assert!(source.contains("reader.offset != input.len()"));
         assert!(source.contains("0x8000_0000u32 | native_status"));
         assert!(source.contains("output.receipts.len() == 1"));
+        assert!(source.contains("context.network_domain()"));
+        assert!(!source.contains("NETWORK_DOMAIN"));
         assert!(source.contains("return error_output(error_code)"));
     }
 
@@ -1084,11 +1084,10 @@ mod tests {
                 }],
             },
         ];
-        let context = PortableServiceContext {
+        let context = ArtifactBuildContext {
             service_key: [7; 32],
             service_instance_id: [6; 32],
             management_policy: ManagementPolicyConfig::Key { account: [4; 32] },
-            genesis_hash: [8; 32],
             diagnostic: false,
         };
         for ir in services {
@@ -1259,11 +1258,10 @@ mod tests {
         };
         let source = generate_no_std_rust_with_context(
             &ir,
-            PortableServiceContext {
+            ArtifactBuildContext {
                 service_key: [1; 32],
                 service_instance_id: [3; 32],
                 management_policy: ManagementPolicyConfig::Immutable,
-                genesis_hash: [2; 32],
                 diagnostic: true,
             },
         )

@@ -1,12 +1,12 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use jamscript_codegen_rust::{
-    generate_builder_application_rust, ManagementPolicyConfig, PortableServiceContext,
+    generate_builder_application_rust, ArtifactBuildContext, ManagementPolicyConfig,
 };
 use jamscript_deployment::{
-    load_service_artifact, redact_url, register_backend_service, resolve_network,
-    validate_networks, CurlJsonRpcTransport, DeploymentConfig, DeploymentEngine, JsonRpcTransport,
-    NetworkConfig, NetworkOverrides,
+    load_service_artifact, redact_url, register_backend_service_with_network_domain,
+    resolve_network, validate_networks, CurlJsonRpcTransport, DeploymentConfig, DeploymentEngine,
+    JsonRpcTransport, NetworkConfig, NetworkOverrides,
 };
 use jamscript_ir::abi_for_language;
 use jamscript_parser::{parse_service_v02, parse_service_v03};
@@ -169,7 +169,6 @@ struct DeployOptions {
 struct Manifest {
     package: Package,
     compiler: Option<CompilerConfig>,
-    target: Option<Target>,
     native: Option<BTreeMap<String, NativeConfig>>,
     management: Option<ManagementConfig>,
     networks: Option<BTreeMap<String, NetworkConfig>>,
@@ -212,18 +211,6 @@ struct Package {
     entry: String,
     language: String,
 }
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Target {
-    jam: Option<JamConfig>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct JamConfig {
-    /// Optional deployment domain used by the runtime signing context.
-    genesis_hash: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeConfig {
@@ -785,12 +772,13 @@ fn deploy(options: DeployOptions) -> Result<()> {
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let backend_registration = if let Some(endpoint) = backend_rpc {
         Some(
-            match register_backend_service(
+            match register_backend_service_with_network_domain(
                 &CurlJsonRpcTransport,
                 &endpoint,
                 result.service_id,
                 &service_artifact,
                 timeout,
+                result.network.network_domain.as_deref(),
             ) {
                 Ok(value) => serde_json::json!({"status": "PASS", "result": value}),
                 Err(error) => serde_json::json!({"status": "FAILED", "error": error.to_string()}),
@@ -808,6 +796,7 @@ fn deploy(options: DeployOptions) -> Result<()> {
                     "name": result.network.name,
                     "kind": result.network.kind,
                     "genesisHash": result.network.genesis_hash,
+                    "networkDomain": result.network.network_domain,
                     "identity": format!("{:?}", result.network.verification).to_ascii_lowercase(),
                 },
                 "serviceId": result.service_id,
@@ -1042,21 +1031,12 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         }
         Some(manager.resolve()?)
     };
-    let jam = manifest
-        .target
-        .as_ref()
-        .and_then(|target| target.jam.as_ref());
     let (service_key, service_instance_id) = load_service_identity(path)?;
     let management_policy = resolve_management_policy(manifest.management.as_ref(), &service_key)?;
-    let context = PortableServiceContext {
+    let context = ArtifactBuildContext {
         service_key: service_key.into_bytes(),
         service_instance_id,
         management_policy,
-        genesis_hash: jam
-            .and_then(|target| target.genesis_hash.as_deref())
-            .map(parse_hash)
-            .transpose()?
-            .unwrap_or([0; 32]),
         diagnostic: std::env::var_os("JAMSCRIPT_DIAGNOSTIC_GUEST").is_some(),
     };
     fs::create_dir_all(output)?;

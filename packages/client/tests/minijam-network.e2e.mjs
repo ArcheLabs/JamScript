@@ -21,6 +21,7 @@ import {
 
 const backendEndpoint = process.env.JAMSCRIPT_E2E_BACKEND_URL ?? "http://127.0.0.1:8091";
 const genesisHash = process.env.JAMSCRIPT_E2E_GENESIS_HASH;
+const networkDomain = process.env.JAMSCRIPT_E2E_NETWORK_DOMAIN ?? genesisHash;
 const artifactsA = process.env.JAMSCRIPT_E2E_ARTIFACTS;
 const serviceIdA = Number(process.env.JAMSCRIPT_E2E_SERVICE_ID);
 const serviceKeyA = process.env.JAMSCRIPT_E2E_SERVICE_KEY;
@@ -30,7 +31,7 @@ const serviceIdB = Number(process.env.JAMSCRIPT_E2E_SERVICE_ID_B);
 const serviceKeyB = process.env.JAMSCRIPT_E2E_SERVICE_KEY_B;
 const codeHashB = process.env.JAMSCRIPT_E2E_CODE_HASH_B;
 
-if (!artifactsA || !Number.isInteger(serviceIdA) || !serviceKeyA || !codeHashA || !genesisHash) {
+if (!artifactsA || !Number.isInteger(serviceIdA) || !serviceKeyA || !codeHashA || !genesisHash || !networkDomain) {
   throw new Error(
     "JAMSCRIPT_E2E_ARTIFACTS, JAMSCRIPT_E2E_SERVICE_ID, " +
       "JAMSCRIPT_E2E_SERVICE_KEY, JAMSCRIPT_E2E_CODE_HASH and " +
@@ -82,6 +83,7 @@ function deployment(artifacts, serviceId, serviceKey, codeHash, abi) {
   return {
     artifacts,
     genesisHash,
+    networkDomain,
     serviceKey,
     serviceId,
     codeHash,

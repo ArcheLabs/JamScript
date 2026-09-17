@@ -96,7 +96,6 @@ curl -fsS "${JAMSCRIPT_BACKEND_URL}/readinessz" >/dev/null
 genesis_hash="$(curl -fsS -H content-type:application/json --data '{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[0]}' "${MINIJAM_NODE_RPC}" | node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>{const r=JSON.parse(b);if(r.error)throw new Error(JSON.stringify(r.error));process.stdout.write(r.result)})')"
 rm -rf "${PROJECT}"
 cp -R "${JAMSCRIPT_ROOT}/examples/dynamic-state-scriptc" "${PROJECT}"
-sed -i "s/^genesis_hash = .*/genesis_hash = \"${genesis_hash}\"/" "${PROJECT}/jamscript.toml"
 cat >>"${PROJECT}/jamscript.toml" <<EOF
 
 [networks.local]

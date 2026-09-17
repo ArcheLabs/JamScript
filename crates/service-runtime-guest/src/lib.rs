@@ -7,11 +7,40 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use service_runtime_core::StateDiffV1;
 use service_runtime_core::{
-    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ExternalStateAccess,
-    ExternalStateDependencyV1, ManagedStateAccess, RuntimeRefineInputV1, RuntimeRefineOutputV1,
-    ServiceApplication, StateAccessError,
+    blake2_256, ActionReceiptV1, ActionStatusV1, ExecutionContext, ExecutionEnvironmentV1,
+    ExternalStateAccess, ExternalStateDependencyV1, ManagedStateAccess, RuntimeRefineInputV1,
+    RuntimeRefineOutputV1, ServiceApplication, StateAccessError,
 };
 use service_runtime_state::ProofState;
+
+#[cfg(target_env = "polkavm")]
+unsafe extern "C" {
+    fn minijam_network_domain(output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
+}
+
+pub fn network_domain() -> Result<[u8; 32], GuestError> {
+    #[cfg(target_env = "polkavm")]
+    {
+        let mut output = [0u8; 32];
+        let mut output_size = 0usize;
+        let status =
+            unsafe { minijam_network_domain(output.as_mut_ptr(), output.len(), &mut output_size) };
+        if status == 0 && output_size == output.len() {
+            return Ok(output);
+        }
+        return Err(GuestError::Environment);
+    }
+    #[cfg(not(target_env = "polkavm"))]
+    {
+        Err(GuestError::Environment)
+    }
+}
+
+fn host_execution_environment() -> Result<ExecutionEnvironmentV1, GuestError> {
+    Ok(ExecutionEnvironmentV1 {
+        network_domain: network_domain()?,
+    })
+}
 
 /// Fixed production arena budget for one guest invocation.
 pub const GUEST_HEAP_LIMIT: usize = 256 * 1024;
@@ -499,6 +528,7 @@ mod allocator_tests {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GuestError {
     InvalidInput,
+    Environment,
     State,
     Application,
     NeedState(Vec<u8>),
@@ -587,8 +617,26 @@ where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
 {
+    refine_with_environment(
+        application,
+        input,
+        ExecutionEnvironmentV1 {
+            network_domain: [0; 32],
+        },
+    )
+}
+
+pub fn refine_with_environment<A>(
+    application: &A,
+    input: &RuntimeRefineInputV1,
+    environment: ExecutionEnvironmentV1,
+) -> Result<RuntimeRefineOutputV1, GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
     let (parent_root, new_root, receipts, diff, transition_valid_until, dependencies) =
-        refine_internal(application, input)?;
+        refine_internal(application, input, environment)?;
     RuntimeRefineOutputV1::from_diff_with_dependencies_and_validity(
         parent_root,
         new_root,
@@ -608,12 +656,14 @@ where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
 {
-    refine(application, &input)
+    let environment = host_execution_environment()?;
+    refine_with_environment(application, &input, environment)
 }
 
 fn refine_internal<A>(
     application: &A,
     input: &RuntimeRefineInputV1,
+    environment: ExecutionEnvironmentV1,
 ) -> Result<RefineTransition, GuestError>
 where
     A: ServiceApplication,
@@ -645,6 +695,7 @@ where
                 None,
                 &input.managed_state.access_plan,
                 &mut external,
+                environment,
             );
             let result = application
                 .execute(&mut context, action)
@@ -730,7 +781,14 @@ where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
 {
-    plan_owned_internal(application, input, None)
+    plan_owned_internal(
+        application,
+        input,
+        None,
+        ExecutionEnvironmentV1 {
+            network_domain: [0; 32],
+        },
+    )
 }
 
 pub fn plan_owned_with_external<A>(
@@ -741,14 +799,28 @@ where
     A: ServiceApplication,
     A::Error: Into<StateAccessError>,
 {
+    let environment = host_execution_environment()?;
+    plan_owned_with_environment(application, input, environment)
+}
+
+pub fn plan_owned_with_environment<A>(
+    application: &A,
+    input: RuntimeRefineInputV1,
+    environment: ExecutionEnvironmentV1,
+) -> Result<(), GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+{
     let mut external = PlanningExternalProofStates::new(&input.external_state)?;
-    plan_owned_internal(application, input, Some(&mut external))
+    plan_owned_internal(application, input, Some(&mut external), environment)
 }
 
 fn plan_owned_internal<A>(
     application: &A,
     input: RuntimeRefineInputV1,
     mut external: Option<&mut PlanningExternalProofStates>,
+    environment: ExecutionEnvironmentV1,
 ) -> Result<(), GuestError>
 where
     A: ServiceApplication,
@@ -772,6 +844,7 @@ where
                     None,
                     &input.managed_state.access_plan,
                     external,
+                    environment,
                 );
                 application
                     .execute(&mut context, action)
@@ -782,6 +855,7 @@ where
                     &mut state,
                     None,
                     &input.managed_state.access_plan,
+                    environment,
                 );
                 application
                     .execute(&mut context, action)
@@ -928,8 +1002,23 @@ where
     A::Error: Into<StateAccessError>,
     O: RefineObserver,
 {
+    let environment = host_execution_environment()?;
+    refine_owned_with_environment_and_observer(application, input, observer, environment)
+}
+
+fn refine_owned_with_environment_and_observer<A, O>(
+    application: &A,
+    input: RuntimeRefineInputV1,
+    observer: &mut O,
+    environment: ExecutionEnvironmentV1,
+) -> Result<RuntimeRefineOutputV1, GuestError>
+where
+    A: ServiceApplication,
+    A::Error: Into<StateAccessError>,
+    O: RefineObserver,
+{
     let (parent_root, new_root, receipts, diff, transition_valid_until, dependencies) =
-        refine_internal_owned_with_observer(application, input, observer)?;
+        refine_internal_owned_with_observer(application, input, observer, environment)?;
     RuntimeRefineOutputV1::from_diff_with_dependencies_and_validity(
         parent_root,
         new_root,
@@ -945,6 +1034,7 @@ fn refine_internal_owned_with_observer<A, O>(
     application: &A,
     input: RuntimeRefineInputV1,
     observer: &mut O,
+    environment: ExecutionEnvironmentV1,
 ) -> Result<RefineTransition, GuestError>
 where
     A: ServiceApplication,
@@ -977,6 +1067,7 @@ where
                 None,
                 &input.managed_state.access_plan,
                 &mut external,
+                environment,
             );
             let result = application
                 .execute(&mut context, action)

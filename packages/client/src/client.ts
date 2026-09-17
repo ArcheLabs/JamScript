@@ -158,7 +158,7 @@ export class JamScriptClient {
       if (typeof chainNonce !== "bigint") throw new Error("ownership nonce storage is not u64");
       const unsigned: Omit<SignedActionV2, "authorizationProof"> = {
         version: 2,
-        networkDomain: parseHex(this.deployment.genesisHash, 32),
+        networkDomain: parseHex(this.deployment.networkDomain, 32),
         serviceKey: parseHex(this.deployment.serviceKey, 32),
         actionSelector: selector,
         controller,
@@ -212,7 +212,7 @@ export class JamScriptClient {
     const validUntil = BigInt(initialContext.slot) + ttl;
     const unsigned: Omit<SignedActionV1, "signature"> = {
       version: 1,
-      networkDomain: parseHex(this.deployment.genesisHash, 32),
+        networkDomain: parseHex(this.deployment.networkDomain, 32),
       serviceKey: parseHex(this.deployment.serviceKey, 32),
       actionSelector: selector,
       signerScheme: 0,

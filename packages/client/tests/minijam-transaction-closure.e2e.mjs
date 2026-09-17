@@ -26,9 +26,10 @@ const serviceId = Number(process.env.JAMSCRIPT_E2E_SERVICE_ID);
 const serviceKey = process.env.JAMSCRIPT_E2E_SERVICE_KEY;
 const codeHash = process.env.JAMSCRIPT_E2E_CODE_HASH;
 const genesisHash = process.env.JAMSCRIPT_E2E_GENESIS_HASH;
+const networkDomain = process.env.JAMSCRIPT_E2E_NETWORK_DOMAIN ?? genesisHash;
 const resultPath = process.env.JAMSCRIPT_E2E_RESULT ?? path.join(artifacts ?? ".", "e2e-result.json");
 
-if (!artifacts || !Number.isInteger(serviceId) || !serviceKey || !codeHash || !genesisHash) {
+if (!artifacts || !Number.isInteger(serviceId) || !serviceKey || !codeHash || !genesisHash || !networkDomain) {
   throw new Error("transaction E2E deployment variables are incomplete");
 }
 
@@ -57,7 +58,7 @@ async function managedValue(backend, key) {
 }
 
 function deployment(abi) {
-  return { artifacts, genesisHash, serviceKey, serviceId, codeHash, abiVersion: 1, abi };
+  return { artifacts, genesisHash, networkDomain, serviceKey, serviceId, codeHash, abiVersion: 1, abi };
 }
 
 function signer(seed) {
@@ -72,7 +73,7 @@ async function directSignedAction(abi, actionName, input, pair, nonce) {
   const payload = encodeActionPayload(abi, actionName, input);
   const unsigned = {
     version: 1,
-    networkDomain: parseHex(genesisHash, 32),
+    networkDomain: parseHex(networkDomain, 32),
     serviceKey: parseHex(serviceKey, 32),
     actionSelector: actionSelector(actionName),
     signerScheme: 0,
@@ -218,7 +219,7 @@ async function main() {
   const stalePayload = encodeActionPayload(abi, "advance", { key: firstKey });
   const staleUnsigned = {
     version: 1,
-    networkDomain: parseHex(genesisHash, 32),
+    networkDomain: parseHex(networkDomain, 32),
     serviceKey: parseHex(serviceKey, 32),
     actionSelector: actionSelector("advance"),
     signerScheme: 0,

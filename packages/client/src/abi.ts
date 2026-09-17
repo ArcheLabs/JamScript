@@ -45,6 +45,7 @@ export type JamScriptAbi = {
 
 export type DeploymentDescriptor = {
   genesisHash: string;
+  networkDomain: string;
   serviceKey: string;
   serviceId: number;
   codeHash: string;

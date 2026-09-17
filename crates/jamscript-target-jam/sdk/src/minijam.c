@@ -179,6 +179,15 @@ minijam_status minijam_storage_write(const void *key, size_t key_size,
   return result == 1 ? MINIJAM_HOST_ERROR : MINIJAM_OK;
 }
 
+minijam_status minijam_network_domain(uint8_t *output, size_t capacity,
+                                      size_t *output_size) {
+  if (!output || !output_size || capacity < 32) return MINIJAM_HOST_ERROR;
+  uint64_t result = minijam_host_call6(
+      MINIJAM_HOST_NETWORK_DOMAIN, (uintptr_t)output, capacity,
+      (uintptr_t)output_size, 0, 0, 0);
+  return result == 0 ? MINIJAM_OK : MINIJAM_HOST_ERROR;
+}
+
 minijam_status minijam_storage_delete(const void *key, size_t key_size) {
   return minijam_storage_write(key, key_size, 0, 0);
 }

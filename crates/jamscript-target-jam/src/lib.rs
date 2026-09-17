@@ -3,7 +3,7 @@ use jam_program_blob_common::ProgramBlob;
 use jamscript_backend_scriptc::{ScriptcArtifact, ScriptcBuildMetadata, ScriptcCompiler};
 use jamscript_codegen_rust::{
     generate_builder_application_rust, generate_no_std_rust_with_scriptc_context,
-    ManagementPolicyConfig, PortableServiceContext,
+    ArtifactBuildContext, ManagementPolicyConfig,
 };
 use jamscript_deployment::{DEFAULT_MIN_ITEM_GAS, DEFAULT_MIN_MEMO_GAS};
 use jamscript_ir::{abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
@@ -210,7 +210,7 @@ impl JamTarget {
         &self,
         project_root: &Path,
         ir: &ServiceIr,
-        context: PortableServiceContext,
+        context: ArtifactBuildContext,
         output_dir: &Path,
         native_modules: &[NativeModule],
     ) -> Result<BuildMetadata> {
@@ -238,7 +238,7 @@ impl JamTarget {
         &self,
         project_root: &Path,
         ir: &ServiceIr,
-        context: PortableServiceContext,
+        context: ArtifactBuildContext,
         output_dir: &Path,
         native_modules: &[NativeModule],
         scriptc: ScriptcArtifact,
@@ -540,7 +540,7 @@ pub fn link_elf_to_jam(elf: &Path, blob: &Path, polkavm: &Path) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 fn build_metadata(
-    context: PortableServiceContext,
+    context: ArtifactBuildContext,
     source_hash: String,
     abi_hash: String,
     code_hash: String,

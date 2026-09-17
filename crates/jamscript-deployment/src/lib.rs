@@ -523,10 +523,26 @@ pub fn register_backend_service<T: JsonRpcTransport>(
     artifact: &ServiceArtifact,
     timeout: Duration,
 ) -> Result<serde_json::Value, DeploymentError> {
-    let registration = serde_json::json!({
+    register_backend_service_with_network_domain(
+        transport, endpoint, service_id, artifact, timeout, None,
+    )
+}
+
+pub fn register_backend_service_with_network_domain<T: JsonRpcTransport>(
+    transport: &T,
+    endpoint: &str,
+    service_id: u32,
+    artifact: &ServiceArtifact,
+    timeout: Duration,
+    network_domain: Option<&str>,
+) -> Result<serde_json::Value, DeploymentError> {
+    let mut registration = serde_json::json!({
         "serviceId": service_id,
         "expectedCodeHash": hash_hex(&artifact.code_hash),
     });
+    if let Some(network_domain) = network_domain {
+        registration["networkDomain"] = serde_json::Value::String(network_domain.to_owned());
+    }
     let result = match transport.call(
         endpoint,
         "jamscript_registerServiceV1",
@@ -567,15 +583,20 @@ pub fn register_backend_service<T: JsonRpcTransport>(
                         ),
                     )
                 })?;
+            let mut registration = serde_json::json!({
+                "serviceId": service_id,
+                "expectedCodeHash": hash_hex(&artifact.code_hash),
+                "artifactDigest": hash_hex(&digest),
+            });
+            if let Some(network_domain) = network_domain {
+                registration["networkDomain"] =
+                    serde_json::Value::String(network_domain.to_owned());
+            }
             transport
                 .call(
                     endpoint,
                     "jamscript_registerServiceV1",
-                    serde_json::json!({
-                        "serviceId": service_id,
-                        "expectedCodeHash": hash_hex(&artifact.code_hash),
-                        "artifactDigest": hash_hex(&digest),
-                    }),
+                    registration,
                     timeout,
                     true,
                 )
@@ -895,6 +916,8 @@ pub struct NetworkIdentity {
     pub kind: NetworkKind,
     #[serde(rename = "genesisHash", skip_serializing_if = "Option::is_none")]
     pub genesis_hash: Option<String>,
+    #[serde(rename = "networkDomain", skip_serializing_if = "Option::is_none")]
+    pub network_domain: Option<String>,
     #[serde(skip)]
     pub verification: IdentityVerification,
 }
@@ -1053,6 +1076,7 @@ impl<T: JsonRpcTransport> DeploymentBackend for MiniJamDeploymentBackend<T> {
                 name: network.name.clone(),
                 kind: network.kind.clone(),
                 genesis_hash: network.genesis_hash.clone(),
+                network_domain: network.genesis_hash.clone(),
                 verification: if network.genesis_pinned {
                     IdentityVerification::Verified
                 } else {

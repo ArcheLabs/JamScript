@@ -1459,6 +1459,15 @@ pub trait ExternalStateAccess {
     fn get(&mut self, service_id: u32, key: &[u8]) -> Result<Option<Vec<u8>>, StateAccessError>;
 }
 
+/// Values supplied by the execution host for one PVM invocation.
+///
+/// This is deliberately separate from artifact build configuration: a
+/// service binary must remain identical when deployed to another network.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecutionEnvironmentV1 {
+    pub network_domain: [u8; 32],
+}
+
 pub struct ExecutionContext<'a> {
     state: &'a mut dyn ManagedStateAccess,
     access_plan: Option<&'a StateAccessPlanV1>,
@@ -1466,11 +1475,16 @@ pub struct ExecutionContext<'a> {
     sender: Option<[u8; 32]>,
     owner: Option<ownership_core::Ownership>,
     controller: Option<ownership_core::Ownership>,
+    environment: ExecutionEnvironmentV1,
     transition_valid_until: Option<u64>,
 }
 
 impl<'a> ExecutionContext<'a> {
-    pub fn new(state: &'a mut dyn ManagedStateAccess, sender: Option<[u8; 32]>) -> Self {
+    pub fn new(
+        state: &'a mut dyn ManagedStateAccess,
+        sender: Option<[u8; 32]>,
+        environment: ExecutionEnvironmentV1,
+    ) -> Self {
         Self {
             state,
             access_plan: None,
@@ -1478,6 +1492,7 @@ impl<'a> ExecutionContext<'a> {
             sender,
             owner: None,
             controller: None,
+            environment,
             transition_valid_until: None,
         }
     }
@@ -1486,6 +1501,7 @@ impl<'a> ExecutionContext<'a> {
         state: &'a mut dyn ManagedStateAccess,
         sender: Option<[u8; 32]>,
         access_plan: &'a StateAccessPlanV1,
+        environment: ExecutionEnvironmentV1,
     ) -> Self {
         Self {
             state,
@@ -1494,6 +1510,7 @@ impl<'a> ExecutionContext<'a> {
             sender,
             owner: None,
             controller: None,
+            environment,
             transition_valid_until: None,
         }
     }
@@ -1503,6 +1520,7 @@ impl<'a> ExecutionContext<'a> {
         sender: Option<[u8; 32]>,
         access_plan: &'a StateAccessPlanV1,
         external_state: &'a mut dyn ExternalStateAccess,
+        environment: ExecutionEnvironmentV1,
     ) -> Self {
         Self {
             state,
@@ -1511,6 +1529,7 @@ impl<'a> ExecutionContext<'a> {
             sender,
             owner: None,
             controller: None,
+            environment,
             transition_valid_until: None,
         }
     }
@@ -1547,6 +1566,10 @@ impl<'a> ExecutionContext<'a> {
 
     pub fn sender(&self) -> Option<[u8; 32]> {
         self.sender
+    }
+
+    pub fn network_domain(&self) -> [u8; 32] {
+        self.environment.network_domain
     }
 
     pub fn set_ownership(
