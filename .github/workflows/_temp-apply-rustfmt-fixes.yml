@@ -1,0 +1,62 @@
+name: Temporary rustfmt cleanup
+
+on:
+  push:
+    branches:
+      - codex/ci-workflow-consolidation-20260917
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ci-workflow-consolidation-20260917
+          fetch-depth: 0
+
+      - name: Apply exact rustfmt output
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("crates/jamscript-service-backend/src/lib.rs")
+          text = path.read_text()
+
+          old_gap = "    batches: BTreeMap<String, InFlightBatch>,\n}\n\n\nstruct BatchToSubmit {"
+          new_gap = "    batches: BTreeMap<String, InFlightBatch>,\n}\n\nstruct BatchToSubmit {"
+          if text.count(old_gap) != 1:
+              raise SystemExit(f"unexpected extra-gap count: {text.count(old_gap)}")
+          text = text.replace(old_gap, new_gap, 1)
+
+          old_assert = '''assert!(
+                      coordinator
+                          .take_ready_batch(7, &BTreeMap::new())
+                          .unwrap()
+                          .is_none()
+                  );'''
+          new_assert = '''assert!(coordinator
+                      .take_ready_batch(7, &BTreeMap::new())
+                      .unwrap()
+                      .is_none());'''
+          count = text.count(old_assert)
+          if count != 3:
+              raise SystemExit(f"unexpected multiline assert count: {count}")
+          text = text.replace(old_assert, new_assert)
+
+          path.write_text(text)
+          PY
+
+          rm -f .github/workflows/_temp-apply-rustfmt-fixes.yml
+
+          git diff --check
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/jamscript-service-backend/src/lib.rs .github/workflows/_temp-apply-rustfmt-fixes.yml
+          git commit -m "style(backend): match rustfmt output"
+          git push origin HEAD:codex/ci-workflow-consolidation-20260917
