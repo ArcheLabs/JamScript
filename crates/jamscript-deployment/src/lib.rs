@@ -859,7 +859,7 @@ fn response_preview(body: &[u8]) -> String {
     if truncated {
         format!("{preview}…")
     } else {
-        preview.into()
+        preview
     }
 }
 
