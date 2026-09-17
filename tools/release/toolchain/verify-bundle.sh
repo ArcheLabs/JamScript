@@ -45,7 +45,8 @@ fi
 CACHE_DIR="${EXTRACT_DIR}/manager-cache"
 mkdir -p "${CACHE_DIR}"
 INSTALLED_ROOT="$(cargo run --quiet --locked \
-  --manifest-path "${ROOT}/tools/release/toolchain/Cargo.toml" -- \
+  --manifest-path "${ROOT}/tools/release/toolchain/Cargo.toml" \
+  --bin jamscript-toolchain-release-helper -- \
   "${ARCHIVE}" "${CACHE_DIR}" "${ROOT}/toolchains/distribution-v1.toml")"
 test -d "${INSTALLED_ROOT}"
 python3 "${ROOT}/tools/release/toolchain/verify-bundle.py" \
