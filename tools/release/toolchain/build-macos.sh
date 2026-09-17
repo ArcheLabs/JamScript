@@ -76,14 +76,14 @@ case "${LLVM_RESOURCE_DIR}" in
 esac
 
 mkdir -p "${STAGE}/runtime/crates"
-for crate in jamscript-crypto jamscript-runtime-core service-runtime-core service-runtime-state service-runtime-guest; do
+for crate in jamscript-crypto jamscript-runtime-core ownership-core service-runtime-core service-runtime-state service-runtime-guest; do
   copy_tree "${ROOT}/crates/${crate}" "runtime/crates/${crate}"
 done
 cp -L "${ROOT}/Cargo.lock" "${STAGE}/runtime/Cargo.lock"
 cat > "${STAGE}/runtime/Cargo.toml" <<'EOF'
 [workspace]
 resolver = "2"
-members = ["crates/jamscript-crypto", "crates/jamscript-runtime-core", "crates/service-runtime-core", "crates/service-runtime-state", "crates/service-runtime-guest"]
+members = ["crates/jamscript-crypto", "crates/jamscript-runtime-core", "crates/ownership-core", "crates/service-runtime-core", "crates/service-runtime-state", "crates/service-runtime-guest"]
 
 [workspace.package]
 version = "0.1.0"
@@ -91,8 +91,12 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 blake2b_simd = { version = "1.0.4", default-features = false }
+ed25519-dalek = { version = "2.1.1", default-features = false, features = ["alloc"] }
+k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
 polkavm-derive = "=0.30.0"
+sha3 = { version = "0.10.9", default-features = false }
 schnorrkel = { version = "0.11.5", default-features = false }
 thiserror = { version = "2.0.17", default-features = false }
 EOF
