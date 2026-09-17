@@ -15,3 +15,8 @@ thiserror.workspace = true
 [dev-dependencies]
 ed25519-dalek.workspace = true
 schnorrkel.workspace = true
+
+# SignedAction constructors intentionally mirror the protocol envelope fields.
+# Keeping this lint local avoids a public API reshuffle solely for Clippy.
+[lints.clippy]
+too_many_arguments = "allow"
