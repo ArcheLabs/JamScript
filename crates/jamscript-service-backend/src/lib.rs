@@ -1340,6 +1340,7 @@ struct InFlightBatch {
     diagnostics_emitted: bool,
 }
 
+#[derive(Default)]
 struct TransactionCoordinatorState {
     next_sequences: BTreeMap<u32, u64>,
     next_arrival_sequence: u64,
@@ -1350,22 +1351,6 @@ struct TransactionCoordinatorState {
     in_flight: BTreeMap<u32, String>,
     transactions: BTreeMap<String, LogicalTransaction>,
     batches: BTreeMap<String, InFlightBatch>,
-}
-
-impl Default for TransactionCoordinatorState {
-    fn default() -> Self {
-        Self {
-            next_sequences: BTreeMap::new(),
-            next_arrival_sequence: 0,
-            next_batch_id: 0,
-            queued: BTreeMap::new(),
-            flush_deadlines: BTreeMap::new(),
-            flushing: BTreeSet::new(),
-            in_flight: BTreeMap::new(),
-            transactions: BTreeMap::new(),
-            batches: BTreeMap::new(),
-        }
-    }
 }
 
 struct BatchToSubmit {
@@ -4329,13 +4314,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(batch.actions, vec![vec![1], vec![2], vec![3]]);
-        assert_eq!(
-            coordinator
-                .take_ready_batch(7, &BTreeMap::new())
-                .unwrap()
-                .is_none(),
-            true
-        );
+        assert!(coordinator
+            .take_ready_batch(7, &BTreeMap::new())
+            .unwrap()
+            .is_none());
         let mapped = coordinator.transaction(&second).unwrap();
         assert_eq!(mapped.batch_id, Some(batch.batch_id.clone()));
         assert_eq!(mapped.action_index, Some(1));
@@ -4345,21 +4327,15 @@ mod tests {
             coordinator.transaction(&first).unwrap().package_hash,
             Some([9; 32])
         );
-        assert_eq!(
-            coordinator
-                .take_ready_batch(7, &BTreeMap::new())
-                .unwrap()
-                .is_none(),
-            true
-        );
+        assert!(coordinator
+            .take_ready_batch(7, &BTreeMap::new())
+            .unwrap()
+            .is_none());
         coordinator.mark_materialized(&batch.batch_id);
-        assert_eq!(
-            coordinator
-                .take_ready_batch(7, &BTreeMap::new())
-                .unwrap()
-                .is_none(),
-            true
-        );
+        assert!(coordinator
+            .take_ready_batch(7, &BTreeMap::new())
+            .unwrap()
+            .is_none());
 
         let fourth = coordinator.enqueue(7, vec![4], json!({})).unwrap();
         let next = coordinator.take_ready_batch(7, &BTreeMap::new()).unwrap();

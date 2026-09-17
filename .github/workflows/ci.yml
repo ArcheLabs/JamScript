@@ -18,28 +18,39 @@ jobs:
       - run: ./scripts/test-installer.sh
 
   toolchain-distribution:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-05-02
+      - name: Install distribution check tools
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: ./scripts/check-toolchain-distribution.sh
 
   stage1-boundary:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/check-stage1-boundary.sh
 
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-05-02
           components: rust-src, rustfmt, clippy
+      - name: Install workspace native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libclang-dev \
+            llvm-dev \
+            pkg-config
       - run: cargo fetch --locked
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --locked
@@ -47,7 +58,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   contributor-cold-guest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -57,10 +68,30 @@ jobs:
         with:
           toolchain: nightly-2026-05-02
           components: rust-src
+      - name: Install contributor build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y curl xz-utils
+      - name: Install locked ScriptC packages
+        working-directory: toolchains/scriptc
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Bootstrap locked LLVM for contributor JAM target
+        shell: bash
+        run: |
+          set -euo pipefail
+          llvm_out="${RUNNER_TEMP}/jamscript-llvm"
+          ./tools/release/toolchain/bootstrap-llvm-linux.sh "${llvm_out}"
+          set -a
+          source "${llvm_out}/llvm.env"
+          set +a
+          ./tools/release/toolchain/verify-llvm-linux.sh "${LLVM_ROOT}"
+          cat "${llvm_out}/llvm.env" >> "${GITHUB_ENV}"
+          echo "${LLVM_ROOT}/bin" >> "${GITHUB_PATH}"
+          if [[ -x "${LLVM_ROOT}/bin/llvm-readelf" ]]; then
+            echo "JAMSCRIPT_READELF=${LLVM_ROOT}/bin/llvm-readelf" >> "${GITHUB_ENV}"
+          fi
       - run: ./scripts/test-contributor-cold-guest.sh
 
   typescript-client:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

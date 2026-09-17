@@ -3,6 +3,9 @@ name = "jamscript-toolchain-release-helper"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# Keep the installation verifier as the package default even though this
+# crate also ships auxiliary binaries such as `compress-zstd`.
+default-run = "jamscript-toolchain-release-helper"
 
 [workspace]
 

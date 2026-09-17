@@ -42,10 +42,13 @@ fi
 # This helper calls ToolchainManager::install with a temporary candidate
 # manifest. The manager checks the archive SHA/size and performs the safe
 # tar.zst extraction itself; this is deliberately not a second shell unpacker.
+# Select the intended binary explicitly because this helper crate also ships
+# auxiliary binaries (for example `compress-zstd`).
 CACHE_DIR="${EXTRACT_DIR}/manager-cache"
 mkdir -p "${CACHE_DIR}"
 INSTALLED_ROOT="$(cargo run --quiet --locked \
-  --manifest-path "${ROOT}/tools/release/toolchain/Cargo.toml" -- \
+  --manifest-path "${ROOT}/tools/release/toolchain/Cargo.toml" \
+  --bin jamscript-toolchain-release-helper -- \
   "${ARCHIVE}" "${CACHE_DIR}" "${ROOT}/toolchains/distribution-v1.toml")"
 test -d "${INSTALLED_ROOT}"
 python3 "${ROOT}/tools/release/toolchain/verify-bundle.py" \

@@ -536,7 +536,7 @@ pub fn abi_for_language(ir: &ServiceIr, language_version: &str) -> Result<Abi, A
             Ok(AbiAction {
                 name: action.name.clone(),
                 selector: selector_hex(action_selector(&action.name)),
-                auth: auth.into(),
+                auth,
                 input: action
                     .input
                     .iter()
