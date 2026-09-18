@@ -154,7 +154,7 @@ import { action, publicAction, u64 } from "jam";
 export const hello = action({
   auth: publicAction(),
   input: { value: u64 },
-  execute(_ctx, input) { return input.value + 1n; },
+  execute(_ctx, _input) {},
 });
 EOF
   cat >"${fixture_dir}/jamscript.toml" <<'EOF'
@@ -190,7 +190,7 @@ fi
 
 host_tools="${work_dir}/host-tools"
 mkdir -p "${host_tools}"
-host_tool_names=(awk bash basename cat cmp cp dirname find grep mkdir mktemp rm sed sh tar tee tr uname zstd)
+host_tool_names=(awk bash basename cat cmp cp dirname env find grep mkdir mktemp rm sed sh tar tee tr uname zstd)
 if [[ "${target}" == "macos-arm64" ]]; then host_tool_names+=(xcrun); fi
 if [[ "${target}" == "macos-arm64" ]]; then host_tool_names+=(file otool); fi
 if command -v sha256sum >/dev/null 2>&1; then host_tool_names+=(sha256sum); else host_tool_names+=(shasum); fi
