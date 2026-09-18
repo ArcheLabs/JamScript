@@ -3,6 +3,7 @@ set -euo pipefail
 
 python3 tools/release/toolchain/test-llvm-lock.py
 python3 tools/release/toolchain/test-deterministic-archive.py
+./scripts/check-host-build-env.sh
 python3 scripts/check-ci-trigger-policy.py
 python3 scripts/check-release-pipeline-policy.py
 python3 tools/release/test-write-release-manifest.py

@@ -114,9 +114,46 @@ jobs:
         run: |
           set -euo pipefail
           ./tools/release/${{ matrix.setup }} "${RUNNER_TEMP}/host.env"
-          cat "${RUNNER_TEMP}/host.env" >> "${GITHUB_ENV}"
-          source "${RUNNER_TEMP}/host.env"
+          grep -q '^LLVM_CONFIG_PATH=' "${RUNNER_TEMP}/host.env"
+          grep -q '^LIBCLANG_PATH=' "${RUNNER_TEMP}/host.env"
+          ! grep -q '^DYLD_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
+          ! grep -q '^DYLD_FALLBACK_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
+          ! grep -q '^LD_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
           ./scripts/release/check-release-source.sh --platform "${{ matrix.platform }}"
+      - name: Verify host environment isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${DYLD_LIBRARY_PATH:-}"
+          test -z "${DYLD_FALLBACK_LIBRARY_PATH:-}"
+          test -z "${LD_LIBRARY_PATH:-}"
+          node --version
+          git --version
+          cargo --version
+          echo "GLOBAL_LD_LIBRARY_PATH=ABSENT"
+          echo "GLOBAL_DYLD_LIBRARY_PATH=ABSENT"
+          echo "GLOBAL_DYLD_FALLBACK_LIBRARY_PATH=ABSENT"
+          echo "NODE_AFTER_HOST_SETUP=PASS"
+          echo "GIT_AFTER_HOST_SETUP=PASS"
+          echo "HOST_ENVIRONMENT_ISOLATION=PASS"
+      - name: Verify macOS system tools remain uncontaminated
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${DYLD_LIBRARY_PATH:-}"
+          test -z "${DYLD_FALLBACK_LIBRARY_PATH:-}"
+          node --version
+          git --version
+          for system_tool in node git; do
+            if otool -L "$(command -v "${system_tool}")" | grep -qi 'jamscript-llvm\|LLVM-20.1.8'; then
+              echo "SYSTEM_${system_tool}_LLVM_CONTAMINATION=FAIL" >&2
+              exit 1
+            fi
+          done
+          echo "MACOS_GLOBAL_DYLD_OVERRIDE=ABSENT"
+          echo "SYSTEM_NODE_NOT_CONTAMINATED=PASS"
+          echo "SYSTEM_GIT_NOT_CONTAMINATED=PASS"
       - name: Install the pinned ScriptC packages
         working-directory: toolchains/scriptc
         run: npm ci --ignore-scripts --no-audit --no-fund
@@ -124,6 +161,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          set -a
+          source "${RUNNER_TEMP}/host.env"
+          set +a
+          export RUSTFLAGS="${RUSTFLAGS:-} ${JAMSCRIPT_HOST_RPATH_FLAG}"
           for suffix in a b; do
             out="${RUNNER_TEMP}/toolchain-${suffix}"
             mkdir -p "${out}"
@@ -200,13 +241,49 @@ jobs:
         run: |
           set -euo pipefail
           ./tools/release/${{ matrix.setup }} "${RUNNER_TEMP}/host.env"
-          cat "${RUNNER_TEMP}/host.env" >> "${GITHUB_ENV}"
-          source "${RUNNER_TEMP}/host.env"
+          grep -q '^LLVM_CONFIG_PATH=' "${RUNNER_TEMP}/host.env"
+          grep -q '^LIBCLANG_PATH=' "${RUNNER_TEMP}/host.env"
+          ! grep -q '^DYLD_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
+          ! grep -q '^DYLD_FALLBACK_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
+          ! grep -q '^LD_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
           ./scripts/release/check-release-source.sh --platform "${{ matrix.platform }}"
+      - name: Verify host environment isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${DYLD_LIBRARY_PATH:-}"
+          test -z "${DYLD_FALLBACK_LIBRARY_PATH:-}"
+          test -z "${LD_LIBRARY_PATH:-}"
+          node --version
+          git --version
+          cargo --version
+          echo "HOST_ENVIRONMENT_ISOLATION=PASS"
+      - name: Verify macOS system tools remain uncontaminated
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${DYLD_LIBRARY_PATH:-}"
+          test -z "${DYLD_FALLBACK_LIBRARY_PATH:-}"
+          node --version
+          git --version
+          for system_tool in node git; do
+            if otool -L "$(command -v "${system_tool}")" | grep -qi 'jamscript-llvm\|LLVM-20.1.8'; then
+              echo "SYSTEM_${system_tool}_LLVM_CONTAMINATION=FAIL" >&2
+              exit 1
+            fi
+          done
+          echo "MACOS_GLOBAL_DYLD_OVERRIDE=ABSENT"
+          echo "SYSTEM_NODE_NOT_CONTAMINATED=PASS"
+          echo "SYSTEM_GIT_NOT_CONTAMINATED=PASS"
       - name: Build the native CLI and backend once
         shell: bash
         run: |
           set -euo pipefail
+          set -a
+          source "${RUNNER_TEMP}/host.env"
+          set +a
+          export RUSTFLAGS="${RUSTFLAGS:-} ${JAMSCRIPT_HOST_RPATH_FLAG}"
           source_copy="${RUNNER_TEMP}/release-source"
           mkdir -p "${source_copy}"
           git archive --format=tar "${SOURCE_SHA}" | tar -xf - -C "${source_copy}"
