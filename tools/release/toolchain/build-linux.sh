@@ -201,16 +201,17 @@ python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
   --jam-blob-encoder-version "$(sed -n 's/^jam_blob_encoder_version = "\(.*\)"/\1/p' "${ROOT}/toolchains/distribution-v1.toml")" \
   --scriptc-revision "$(sed -n 's/^commit=//p' "${ROOT}/toolchains/scriptc/REVISION")"
 
-find "${STAGE}" -type f -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
-find "${STAGE}" -type d -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
 ARCHIVE="${OUT}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
 if command -v zstd >/dev/null 2>&1; then
-  (cd "${STAGE}" && tar --sort=name --numeric-owner --owner=0 --group=0 --mtime="@${SOURCE_DATE_EPOCH}" --zstd -cf "${ARCHIVE}" .)
+  python3 "${ROOT}/tools/release/toolchain/create-deterministic-archive.py" \
+    --root "${STAGE}" --source-date-epoch "${SOURCE_DATE_EPOCH}" | \
+    zstd -q -T1 -19 -o "${ARCHIVE}"
 else
   # The producer may run on a minimal development host without the zstd CLI.
   # The archive remains the same tar.zst format and the managed CLI decodes it
   # through its Rust implementation.
-  (cd "${STAGE}" && tar --sort=name --numeric-owner --owner=0 --group=0 --mtime="@${SOURCE_DATE_EPOCH}" -cf - .) | \
+  python3 "${ROOT}/tools/release/toolchain/create-deterministic-archive.py" \
+    --root "${STAGE}" --source-date-epoch "${SOURCE_DATE_EPOCH}" | \
     CARGO_TARGET_DIR="${OUT}/.cargo-target" "${CARGO_BIN}" run --quiet --locked \
       --manifest-path "${ROOT}/tools/release/toolchain/Cargo.toml" \
       --bin compress-zstd -- "${ARCHIVE}"
