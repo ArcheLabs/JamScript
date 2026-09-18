@@ -22,6 +22,12 @@ if rg -n --glob '*.sh' -- '--sort=name|--numeric-owner|--owner=|--group=|--mtime
 fi
 echo "PORTABLE_RELEASE_ARCHIVES=PASS"
 
+if rg -n -- 'stat -c|stat -f' .github/workflows/release.yml; then
+  echo "PORTABLE_RELEASE_METADATA=FAIL platform-specific stat remains in release workflow" >&2
+  exit 1
+fi
+echo "PORTABLE_RELEASE_METADATA=PASS"
+
 # The compiler and release gates must remain self-contained. The manually
 # triggered MiniJAM compatibility workflow is intentionally outside this set.
 for workflow in ci.yml release.yml; do
