@@ -1,68 +1,48 @@
 #!/usr/bin/env python3
+"""Check the repository's four-workflow CI/release trigger contract."""
+
 import re
 from pathlib import Path
+from typing import List
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD_WORKFLOW = ROOT / ".github/workflows/build-toolchain-bundle.yml"
-RELEASE_WORKFLOW = ROOT / ".github/workflows/release-candidate.yml"
-
-EXPECTED_PATHS = {
-    ".github/workflows/build-toolchain-bundle.yml",
-    ".github/workflows/promote-macos-llvm-lock.yml",
-    ".github/workflows/release-candidate.yml",
-    ".github/workflows/release-preflight.yml",
-    "Cargo.lock",
-    "Cargo.toml",
-    "rust-toolchain.toml",
-    "crates/**",
-    "scripts/check-release-pipeline-policy.py",
-    "scripts/release/**",
-    "scripts/check-toolchain-distribution.sh",
-    "toolchains/**",
-    "tools/release/**",
+WORKFLOWS = ROOT / ".github/workflows"
+EXPECTED = {
+    "ci.yml",
+    "release.yml",
+    "minijam-network-e2e.yml",
+    "toolchain-maintenance.yml",
 }
 
 
-def trigger_block(path):
+actual = {path.name for path in WORKFLOWS.glob("*.yml")}
+if actual != EXPECTED:
+    raise SystemExit(f"ACTIVE_WORKFLOW_COUNT=FAIL expected={sorted(EXPECTED)} actual={sorted(actual)}")
+
+
+def trigger_events(path: Path) -> List[str]:
     text = path.read_text(encoding="utf-8")
     match = re.search(r"(?ms)^on:\n(.*?)(?=^\S|\Z)", text)
     if not match:
         raise SystemExit(f"workflow has no top-level on block: {path}")
-    return match.group(1)
+    return re.findall(r"(?m)^  ([A-Za-z_][A-Za-z0-9_-]*):", match.group(1))
 
 
-def event_paths(trigger, event):
-    match = re.search(rf"(?ms)^  {re.escape(event)}:\n(.*?)(?=^  \S|\Z)", trigger)
-    if not match:
-        raise SystemExit(f"workflow trigger is missing {event}")
-    section = match.group(1)
-    paths = re.search(r"(?ms)^    paths:\n(.*?)(?=^    \S|\Z)", section)
-    if not paths:
-        raise SystemExit(f"{event} trigger has no paths filter")
-    return {
-        value
-        for value in re.findall(r"^      - '([^']+)'$", paths.group(1), re.MULTILINE)
-    }
+if trigger_events(WORKFLOWS / "ci.yml") != ["push", "pull_request"]:
+    raise SystemExit("ci.yml must run on push and pull_request")
+if trigger_events(WORKFLOWS / "release.yml") != ["workflow_dispatch"]:
+    raise SystemExit("release.yml must be manual-only")
+if trigger_events(WORKFLOWS / "minijam-network-e2e.yml") != ["workflow_dispatch"]:
+    raise SystemExit("minijam-network-e2e.yml must remain manual-only")
+if trigger_events(WORKFLOWS / "toolchain-maintenance.yml") != ["workflow_dispatch"]:
+    raise SystemExit("toolchain-maintenance.yml must be manual-only")
 
+release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+if "inputs:\n      version:" not in release:
+    raise SystemExit("release.yml must accept only a version input")
+if re.search(r"(?m)^    (?:push|pull_request|schedule):", release):
+    raise SystemExit("release.yml has an unexpected automatic trigger")
 
-build_trigger = trigger_block(BUILD_WORKFLOW)
-if "  workflow_dispatch:\n" not in build_trigger:
-    raise SystemExit("toolchain bundle workflow must keep workflow_dispatch")
-push_paths = event_paths(build_trigger, "push")
-pull_request_paths = event_paths(build_trigger, "pull_request")
-if push_paths != EXPECTED_PATHS or pull_request_paths != EXPECTED_PATHS:
-    raise SystemExit(
-        "toolchain bundle push/pull_request paths do not match the policy: "
-        f"push={sorted(push_paths)} pull_request={sorted(pull_request_paths)}"
-    )
-
-release_trigger = trigger_block(RELEASE_WORKFLOW)
-if re.search(r"(?m)^    paths:", release_trigger):
-    raise SystemExit("release-candidate workflow must not use a path filter")
-if '      - "v0.1.0-rc.*"' not in release_trigger:
-    raise SystemExit("release-candidate workflow lost the RC tag trigger")
-if '      - "v0.1.0"' not in release_trigger:
-    raise SystemExit("release-candidate workflow lost the stable tag trigger")
-
+print("ACTIVE_WORKFLOW_COUNT=4")
 print("CI_TRIGGER_POLICY=PASS")

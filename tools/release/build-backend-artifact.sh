@@ -5,7 +5,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 OUT="${1:?usage: build-backend-artifact.sh OUTPUT VERSION}"
 VERSION="${2:?usage: build-backend-artifact.sh OUTPUT VERSION}"
 TARGET="${JAMSCRIPT_BACKEND_TARGET:-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)}"
-ARCHIVE="jamscript-backend-${VERSION}-${TARGET}.tar.gz"
+ARCHIVE="jamscript-service-backend-${VERSION}-${TARGET}.tar.gz"
 STAGE="${OUT}/stage"
 
 rm -rf -- "${STAGE}"

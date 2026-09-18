@@ -105,3 +105,46 @@ jobs:
         run: npm run build
       - working-directory: packages/client
         run: npm test
+
+  release-producer-smoke:
+    name: Release producer smoke (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            setup: setup-host-build-env-linux.sh
+          - platform: macos-arm64
+            os: macos-15
+            setup: setup-host-build-env-macos.sh
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: toolchains/scriptc/NODE_VERSION
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src
+      - name: Set up the exact host build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/${{ matrix.setup }} "${RUNNER_TEMP}/host.env"
+          cat "${RUNNER_TEMP}/host.env" >> "${GITHUB_ENV}"
+          source "${RUNNER_TEMP}/host.env"
+          ./scripts/release/check-release-source.sh --platform "${{ matrix.platform }}"
+      - name: Build the CLI and backend producer artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="v${{ github.run_number }}.0.0-rc.1"
+          cargo build --release --locked --bin jams
+          test -x target/release/jams
+          JAMSCRIPT_BACKEND_TARGET="${{ matrix.platform }}" \
+            ./tools/release/build-backend-artifact.sh "${RUNNER_TEMP}/backend" "${version}"
+          test -f "${RUNNER_TEMP}/backend/jamscript-service-backend-${version}-${{ matrix.platform }}.tar.gz"
+          echo "RELEASE_PRODUCER_SMOKE=${{ matrix.platform }}:PASS"

@@ -95,11 +95,11 @@ The native producer flow is:
 5. Build two independent archives and compare their bytes.
 6. Pass both native clean-consumer kill tests before publication.
 
-The candidate workflow is
-[`build-toolchain-bundle.yml`](../.github/workflows/build-toolchain-bundle.yml).
-It has separate Linux and macOS producers, checks exact source identity and
-native architecture, validates the managed bundle, and uploads short-lived
-engineering evidence. An Actions artifact is not a public distribution URL.
+The release workflow is
+[`release.yml`](../.github/workflows/release.yml). It has separate native
+Linux and macOS producers, checks exact source identity and native
+architecture, validates A/B reproducibility, and uploads only the validated A
+bundle as release input. An Actions artifact is not a public distribution URL.
 
 ## Native ABI and SDK boundary
 
@@ -120,12 +120,12 @@ The bundle contains only the JamScript-owned JAM target SDK under
 
 ## Published bytes and consumer validation
 
-The tag workflow
-[`release-candidate.yml`](../.github/workflows/release-candidate.yml) builds
-both CLI archives and both managed bundles from the exact tag commit. It
+The manual release workflow
+[`release.yml`](../.github/workflows/release.yml) builds both CLI archives,
+backend archives, and both managed bundles from the exact dispatch commit. It
 assembles one `release-manifest.json` with two supported target entries and an
 explicit unsupported Windows entry, plus target-specific toolchain manifests,
-metadata, and a complete `SHA256SUMS` index.
+metadata, backend hashes, and a complete `SHA256SUMS` index.
 
 The workflow has one publication job. Before it can run, native Linux and
 native macOS clean-consumer jobs download the exact assembled bytes and run

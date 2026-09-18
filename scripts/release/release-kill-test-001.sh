@@ -222,9 +222,9 @@ unset JAMSCRIPT_MINIJAM_SDK JAMSCRIPT_CLANG JAMSCRIPT_LLVM_ROOT JAMSCRIPT_LLVM_A
 "${install}/jams" toolchain install
 "${install}/jams" toolchain verify
 grep -q "${JAMSCRIPT_TOOLCHAIN_HOME}" <("${install}/jams" toolchain path)
-test -x "${install}/jamscript-service-backend"
+test ! -e "${install}/jamscript-service-backend"
 echo "K7_TOOLCHAIN_VERIFY=PASS"
-echo "K8_BACKEND=PASS"
+echo "K8_CLI_BACKEND_BOUNDARY=PASS"
 
 apple_sdk_status="not-applicable"
 if [[ "${target}" == "macos-arm64" ]]; then

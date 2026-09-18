@@ -19,7 +19,7 @@ outside the compiler target boundary.
 | `crates/jamscript-cli/src/main.rs` | JamScript | CLI target selection and build orchestration | A | `jamscript-target-jam` | Default build uses `JamTarget`; remove SDK discovery and `JAMSCRIPT_MINIJAM_SDK` from compiler path |
 | `crates/jamscript-toolchain/src/lib.rs` | JamScript | Managed bundle layout and provenance | A/B | JamScript toolchain manager | Rename installed target path and metadata to `targets/jam`; remove MiniJAM revision from compiler identity |
 | `tools/release/toolchain/build-linux.sh` | JamScript | Reproducible compiler distribution producer | A/B | JamScript release tooling | Build the in-tree JAM target and vendor only its dependencies |
-| `.github/workflows/build-toolchain-bundle.yml` | JamScript | Hosted bundle gate | A | JamScript CI | Remove MiniJAM checkout; keep exact LLVM, A/B, and offline smoke gates |
+| `.github/workflows/release.yml` | JamScript | Hosted bundle gate | A | JamScript CI | Keep exact LLVM, A/B, and offline smoke gates |
 | `tools/minijam-e2e/*`, `scripts/minijam-network-e2e.sh`, `packages/client/*` | JamScript integration | MiniJAM RPC/network and Jambda-facing execution tests | C | Optional MiniJAM integration | Keep separate; never make these compiler/build dependencies |
 | `toolchains/minijam.lock` | JamScript | MiniJAM checkout pin used by compiler distribution and integration | C/obsolete for compiler | Optional integration workflow | Retain only until integration workflow no longer needs it, then remove with evidence |
 | `docs/minijam-*.md` | JamScript docs | Downstream protocol/integration history and compatibility record | C | Integration documentation | Keep and clarify that MiniJAM is a consumer, not the JAM compiler target |

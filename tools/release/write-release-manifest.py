@@ -35,6 +35,7 @@ parser.add_argument("--cli", required=True, type=Path, action="append")
 parser.add_argument("--toolchain", required=True, type=Path, action="append")
 parser.add_argument("--toolchain-manifest", required=True, type=Path, action="append")
 parser.add_argument("--bundle-metadata", required=True, type=Path, action="append")
+parser.add_argument("--backend", required=True, type=Path, action="append")
 parser.add_argument("--unsupported-target", action="append", default=[])
 args = parser.parse_args()
 
@@ -46,7 +47,7 @@ if not args.release_version.startswith("v"):
 if len(args.source_commit) != 40 or any(character not in "0123456789abcdefABCDEF" for character in args.source_commit):
     raise SystemExit("source commit must be a full hexadecimal git SHA")
 
-fields = (args.target, args.cli, args.toolchain, args.toolchain_manifest, args.bundle_metadata)
+fields = (args.target, args.cli, args.toolchain, args.toolchain_manifest, args.bundle_metadata, args.backend)
 if len({len(field) for field in fields}) != 1:
     raise SystemExit("each supported target needs a CLI, toolchain, manifest, and metadata")
 if len(set(args.target)) != len(args.target):
@@ -55,7 +56,7 @@ if len(set(args.target)) != len(args.target):
 release_url = f"https://github.com/{args.repository}/releases/download/{args.release_version}"
 targets = []
 common = None
-for target, cli_path, bundle_path, manifest_path, metadata_path in zip(*fields):
+for target, cli_path, bundle_path, manifest_path, metadata_path, backend_path in zip(*fields):
     toolchain = json.loads(manifest_path.read_text(encoding="utf-8"))
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     if toolchain.get("toolchainId") != "scriptc-m2-v1":
@@ -89,6 +90,7 @@ for target, cli_path, bundle_path, manifest_path, metadata_path in zip(*fields):
             "triple": target,
             "supported": True,
             "cli": asset(cli_path, "jamscript-cli", release_url),
+            "backend": asset(backend_path, "jamscript-service-backend", release_url),
             "toolchain": asset(bundle_path, "managed-toolchain", release_url),
             "toolchainManifest": asset(manifest_path, "toolchain-manifest", release_url),
             "toolchainMetadata": asset(metadata_path, "toolchain-metadata", release_url),
@@ -118,7 +120,7 @@ manifest = {
     "checksums": {"algorithm": "sha256", "asset": "SHA256SUMS"},
     "provenance": {
         "builder": "GitHub Actions",
-        "workflow": "release-candidate.yml",
+        "workflow": "release.yml",
         "sourceCommit": args.source_commit.lower(),
     },
 }

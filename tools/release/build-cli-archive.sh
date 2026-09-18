@@ -18,14 +18,12 @@ stage="${OUT}/cli-stage"
 rm -rf "${target_dir}" "${stage}"
 mkdir -p "${stage}"
 (cd "${SOURCE_ROOT}" && CARGO_TARGET_DIR="${target_dir}" cargo build --release --locked \
-  --bin jams --bin jamscript-service-backend)
+  --bin jams)
 test -x "${target_dir}/release/jams"
-test -x "${target_dir}/release/jamscript-service-backend"
 test ! -e "${target_dir}/release/jamscript"
+test ! -e "${target_dir}/release/jamscript-service-backend"
 cp -L "${target_dir}/release/jams" "${stage}/jams"
 chmod 0755 "${stage}/jams"
-cp -L "${target_dir}/release/jamscript-service-backend" "${stage}/jamscript-service-backend"
-chmod 0755 "${stage}/jamscript-service-backend"
 cp -L "${SOURCE_ROOT}/LICENSE" "${stage}/LICENSE"
 cp -L "${SOURCE_ROOT}/README.md" "${stage}/README.md"
 # The CLI bootstrap archive intentionally uses gzip: both stock GNU tar and
@@ -33,9 +31,12 @@ cp -L "${SOURCE_ROOT}/README.md" "${stage}/README.md"
 (cd "${stage}" && tar -czf "${OUT}/${archive}" .)
 archive_entries="$(tar -tzf "${OUT}/${archive}")"
 printf '%s\n' "${archive_entries}" | sed 's#^\./##' | grep -qx 'jams'
-printf '%s\n' "${archive_entries}" | sed 's#^\./##' | grep -qx 'jamscript-service-backend'
 if printf '%s\n' "${archive_entries}" | sed 's#^\./##' | grep -qx 'jamscript'; then
   echo "legacy jamscript executable unexpectedly present" >&2
+  exit 1
+fi
+if printf '%s\n' "${archive_entries}" | sed 's#^\./##' | grep -Eq '(^|/)jamscript-service-backend$'; then
+  echo "backend executable must be published by build-backend-artifact.sh, not the CLI archive" >&2
   exit 1
 fi
 if command -v sha256sum >/dev/null 2>&1; then

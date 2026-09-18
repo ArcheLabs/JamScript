@@ -1,0 +1,652 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: v0.1.0-rc.3 or v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  TZ: UTC
+  LANG: C
+  LC_ALL: C
+  JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING: "1"
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Checkout the dispatch source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          submodules: false
+      - name: Validate main source identity and release version
+        id: identity
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF_NAME}" = main
+          source_sha="$(git rev-parse HEAD)"
+          test "${source_sha}" = "${GITHUB_SHA}"
+          ./tools/release/validate-release-version.sh "${VERSION}"
+          tag_sha="$(git ls-remote origin "refs/tags/${VERSION}^{}" | awk 'NR == 1 { print $1 }')"
+          if [[ -z "${tag_sha}" ]]; then
+            tag_sha="$(git ls-remote origin "refs/tags/${VERSION}" | awk 'NR == 1 { print $1 }')"
+          fi
+          if [[ -n "${tag_sha}" ]]; then
+            test "${tag_sha}" = "${source_sha}" || {
+              echo "release tag already points at a different source: ${VERSION}" >&2
+              exit 1
+            }
+            echo "RELEASE_TAG=EXISTING_EXACT"
+          else
+            echo "RELEASE_TAG=AVAILABLE"
+          fi
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            echo "RELEASE_OBJECT=EXISTING"
+          else
+            echo "RELEASE_OBJECT=AVAILABLE"
+          fi
+          {
+            echo "source_sha=${source_sha}"
+            echo "version=${VERSION}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "SOURCE_SHA=${source_sha}"
+          echo "RELEASE_VERSION=${VERSION}"
+
+  build-toolchain:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            setup: setup-host-build-env-linux.sh
+            build: build-linux.sh
+            archive: jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst
+          - platform: macos-arm64
+            os: macos-15
+            setup: setup-host-build-env-macos.sh
+            build: build-macos.sh
+            archive: jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 1
+          submodules: false
+      - name: Verify source identity
+        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: toolchains/scriptc/NODE_VERSION
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src
+      - name: Set up the exact locked host toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/${{ matrix.setup }} "${RUNNER_TEMP}/host.env"
+          cat "${RUNNER_TEMP}/host.env" >> "${GITHUB_ENV}"
+          source "${RUNNER_TEMP}/host.env"
+          ./scripts/release/check-release-source.sh --platform "${{ matrix.platform }}"
+      - name: Install the pinned ScriptC packages
+        working-directory: toolchains/scriptc
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build and verify toolchain A and B
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suffix in a b; do
+            out="${RUNNER_TEMP}/toolchain-${suffix}"
+            mkdir -p "${out}"
+            SCRIPTC_NODE="$(command -v node)" \
+              ./tools/release/toolchain/${{ matrix.build }} "${out}"
+            bundle="${out}/${{ matrix.archive }}"
+            ./tools/release/toolchain/verify-bundle.sh "${bundle}" \
+              "${RUNNER_TEMP}/verify-${suffix}" "${RUNNER_TEMP}/root-${suffix}.txt"
+            ./scripts/release/compiler-builtins-regression.sh \
+              "$(<"${RUNNER_TEMP}/root-${suffix}.txt")"
+          done
+          cmp -s \
+            "${RUNNER_TEMP}/toolchain-a/${{ matrix.archive }}" \
+            "${RUNNER_TEMP}/toolchain-b/${{ matrix.archive }}"
+          if [[ "${{ matrix.platform }}" == linux-x86_64 ]]; then
+            cp "${RUNNER_TEMP}/toolchain-a/toolchain-manifest.json" \
+              "${RUNNER_TEMP}/toolchain-a/toolchain-manifest-linux-x86_64.json"
+            cp "${RUNNER_TEMP}/toolchain-a/bundle-metadata.json" \
+              "${RUNNER_TEMP}/toolchain-a/bundle-metadata-linux-x86_64.json"
+            rm "${RUNNER_TEMP}/toolchain-a/toolchain-manifest.json" \
+              "${RUNNER_TEMP}/toolchain-a/bundle-metadata.json"
+          fi
+          echo "TOOLCHAIN_AB_REPRODUCIBILITY=${{ matrix.platform }}:PASS"
+      - name: Upload only the validated A producer bytes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-input-toolchain-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/toolchain-a/${{ matrix.archive }}
+            ${{ runner.temp }}/toolchain-a/toolchain-manifest*.json
+            ${{ runner.temp }}/toolchain-a/bundle-metadata*.json
+          if-no-files-found: error
+          retention-days: 7
+
+  build-native:
+    needs: [validate, build-toolchain]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            setup: setup-host-build-env-linux.sh
+          - platform: macos-arm64
+            os: macos-15
+            setup: setup-host-build-env-macos.sh
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 1
+          submodules: false
+      - name: Verify source identity
+        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: toolchains/scriptc/NODE_VERSION
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-input-toolchain-*
+          path: ${{ runner.temp }}/inputs
+          merge-multiple: true
+      - name: Set up the exact locked host toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/${{ matrix.setup }} "${RUNNER_TEMP}/host.env"
+          cat "${RUNNER_TEMP}/host.env" >> "${GITHUB_ENV}"
+          source "${RUNNER_TEMP}/host.env"
+          ./scripts/release/check-release-source.sh --platform "${{ matrix.platform }}"
+      - name: Build the native CLI and backend once
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_copy="${RUNNER_TEMP}/release-source"
+          mkdir -p "${source_copy}"
+          git archive --format=tar "${SOURCE_SHA}" | tar -xf - -C "${source_copy}"
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}"
+          for platform in linux-x86_64 macos-arm64; do
+            bundle="${RUNNER_TEMP}/inputs/jamscript-toolchain-scriptc-m2-v1-${platform}.tar.zst"
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha="$(sha256sum "${bundle}" | awk '{print $1}')"
+              size="$(stat -c '%s' "${bundle}")"
+            else
+              sha="$(shasum -a 256 "${bundle}" | awk '{print $1}')"
+              size="$(stat -f '%z' "${bundle}")"
+            fi
+            python3 ./tools/release/toolchain/make-candidate-manifest.py \
+              --input "${source_copy}/toolchains/distribution-v1.toml" \
+              --output "${source_copy}/toolchains/distribution-v1.toml" \
+              --platform "${platform}" --url "${release_url}/${bundle##*/}" \
+              --sha256 "${sha}" --size "${size}"
+          done
+          ./tools/release/build-cli-archive.sh "${source_copy}" "${RUNNER_TEMP}/cli" "${VERSION}" "${{ matrix.platform }}"
+          JAMSCRIPT_BACKEND_TARGET="${{ matrix.platform }}" \
+            ./tools/release/build-backend-artifact.sh "${RUNNER_TEMP}/backend" "${VERSION}"
+          producer="${RUNNER_TEMP}/native-assets"
+          mkdir -p "${producer}"
+          cp "${RUNNER_TEMP}/cli/jamscript-${VERSION}-${{ matrix.platform }}.tar.gz" "${producer}/"
+          cp "${RUNNER_TEMP}/backend/jamscript-service-backend-${VERSION}-${{ matrix.platform }}.tar.gz" "${producer}/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-input-native-${{ matrix.platform }}
+          path: ${{ runner.temp }}/native-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    needs: [validate, build-toolchain, build-native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 1
+          submodules: false
+      - name: Verify source identity
+        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-input-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+      - name: Write the immutable release manifest and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="${RUNNER_TEMP}/release-assets"
+          python3 ./tools/release/write-release-manifest.py \
+            --output "${assets}/release-manifest.json" \
+            --release-version "${VERSION}" \
+            --source-commit "${SOURCE_SHA}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --target linux-x86_64 \
+            --cli "${assets}/jamscript-${VERSION}-linux-x86_64.tar.gz" \
+            --toolchain "${assets}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst" \
+            --toolchain-manifest "${assets}/toolchain-manifest-linux-x86_64.json" \
+            --bundle-metadata "${assets}/bundle-metadata-linux-x86_64.json" \
+            --backend "${assets}/jamscript-service-backend-${VERSION}-linux-x86_64.tar.gz" \
+            --target macos-arm64 \
+            --cli "${assets}/jamscript-${VERSION}-macos-arm64.tar.gz" \
+            --toolchain "${assets}/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst" \
+            --toolchain-manifest "${assets}/toolchain-manifest-macos-arm64.json" \
+            --bundle-metadata "${assets}/bundle-metadata-macos-arm64.json" \
+            --backend "${assets}/jamscript-service-backend-${VERSION}-macos-arm64.tar.gz" \
+            --unsupported-target windows-x86_64
+          (cd "${assets}" && sha256sum -- * > SHA256SUMS)
+          jq -e '.targets | map(select(.supported == true)) | length == 2' "${assets}/release-manifest.json"
+          jq -e -s '.[0].sourceRevision == .[1].sourceRevision and .[0].toolchainId == .[1].toolchainId' \
+            "${assets}/bundle-metadata-linux-x86_64.json" \
+            "${assets}/bundle-metadata-macos-arm64.json"
+          echo "RELEASE_ASSEMBLY=PASS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assembled-release-assets
+          path: ${{ runner.temp }}/release-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  prepublish-consumer:
+    needs: [validate, assemble]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            package: sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd jq
+          - platform: macos-arm64
+            os: macos-15
+            package: brew install zstd jq
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 1
+          submodules: false
+      - name: Verify source identity and install consumer tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          ${{ matrix.package }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-release-assets
+          path: ${{ runner.temp }}/release-assets
+      - name: Run the clean consumer validation before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/prepublish-${{ matrix.platform }}.json"
+          ./scripts/release/release-kill-test-001.sh \
+            --asset-dir "${RUNNER_TEMP}/release-assets" \
+            --release-version "${VERSION}" \
+            --target "${{ matrix.platform }}" \
+            --result-json "${result}" \
+            --work-dir "${RUNNER_TEMP}/prepublish-${{ matrix.platform }}-work"
+          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == false and .gates.R3_immutable_github_release == false and .gates.R4_published_artifact_validation == false' "${result}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prepublish-consumer-${{ matrix.platform }}
+          path: ${{ runner.temp }}/prepublish-${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  cross-host-compare:
+    needs: [validate, prepublish-consumer]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 1
+          submodules: false
+      - name: Verify source identity
+        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - uses: actions/download-artifact@v4
+        with:
+          name: prepublish-consumer-linux-x86_64
+          path: ${{ runner.temp }}/linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: prepublish-consumer-macos-arm64
+          path: ${{ runner.temp }}/macos
+      - name: Compare host-independent canonical service artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact in service.pvm service.polkavm service.blob; do
+            linux_hash="$(jq -er --arg artifact "${artifact}" '.artifact_hashes[$artifact]' "${RUNNER_TEMP}/linux/prepublish-linux-x86_64.json")"
+            macos_hash="$(jq -er --arg artifact "${artifact}" '.artifact_hashes[$artifact]' "${RUNNER_TEMP}/macos/prepublish-macos-arm64.json")"
+            test "${linux_hash}" = "${macos_hash}"
+          done
+          echo "CROSS_HOST_CANONICAL_ARTIFACTS=PASS"
+
+  docker-prepublish-smoke:
+    needs: [validate, assemble, cross-host-compare]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 1
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-release-assets
+          path: ${{ runner.temp }}/release-assets
+      - name: Verify source and build the prebuilt-backend image
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          context="${RUNNER_TEMP}/backend-image-context"
+          mkdir -p "${context}"
+          tar -xzf "${RUNNER_TEMP}/release-assets/jamscript-service-backend-${VERSION}-linux-x86_64.tar.gz" -C "${context}"
+          cp Dockerfile.backend.runtime "${context}/Dockerfile"
+          docker build -f "${context}/Dockerfile" -t "jamscript-backend:prepublish-${GITHUB_RUN_ID}" "${context}"
+          volume="jamscript-backend-prepublish-${GITHUB_RUN_ID}"
+          container="jamscript-backend-prepublish-${GITHUB_RUN_ID}"
+          cleanup() {
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+            docker volume rm "${volume}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "${volume}" >/dev/null
+          docker run -d --name "${container}" -p 18090:8090 \
+            -e JAMSCRIPT_BACKEND_CORS_ORIGINS='*' -v "${volume}:/var/lib/jamscript" \
+            "jamscript-backend:prepublish-${GITHUB_RUN_ID}" \
+            --bind 0.0.0.0:8090 --genesis-hash "0x$(printf '00%.0s' {1..32})" >/dev/null
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:18090/healthz >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:18090/readinessz >/dev/null
+          docker rm -f "${container}" >/dev/null
+          docker run -d --name "${container}" -p 18090:8090 \
+            -e JAMSCRIPT_BACKEND_CORS_ORIGINS='*' -v "${volume}:/var/lib/jamscript" \
+            "jamscript-backend:prepublish-${GITHUB_RUN_ID}" \
+            --bind 0.0.0.0:8090 --genesis-hash "0x$(printf '00%.0s' {1..32})" >/dev/null
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:18090/healthz >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:18090/readinessz >/dev/null
+          echo "DOCKER_PREPUBLISH_SMOKE=PASS"
+
+  publish:
+    needs: [validate, assemble, prepublish-consumer, cross-host-compare, docker-prepublish-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Checkout the exact validated source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 0
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-release-assets
+          path: ${{ runner.temp }}/release-assets
+      - name: Create the exact source tag after all prepublish gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          remote_tag_sha="$(git ls-remote origin "refs/tags/${VERSION}^{}" | awk 'NR == 1 { print $1 }')"
+          if [[ -z "${remote_tag_sha}" ]]; then
+            remote_tag_sha="$(git ls-remote origin "refs/tags/${VERSION}" | awk 'NR == 1 { print $1 }')"
+          fi
+          if [[ -n "${remote_tag_sha}" ]]; then
+            test "${remote_tag_sha}" = "${SOURCE_SHA}"
+          else
+            git tag -a "${VERSION}" "${SOURCE_SHA}" -m "JamScript ${VERSION}"
+            git push origin "refs/tags/${VERSION}"
+          fi
+          echo "RELEASE_TAG_TARGET=${SOURCE_SHA}"
+      - name: Publish exact release bytes and the matching backend image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="${RUNNER_TEMP}/release-assets"
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            remote="${RUNNER_TEMP}/existing-release-assets"
+            mkdir -p "${remote}"
+            gh release download "${VERSION}" --dir "${remote}"
+            while IFS= read -r asset; do
+              cmp -s "${assets}/${asset}" "${remote}/${asset}" || {
+                echo "IMMUTABLE_RELEASE_ASSET=FAIL ${asset}" >&2
+                exit 1
+              }
+            done < <(cd "${assets}" && find . -maxdepth 1 -type f -printf '%f\n' | sort)
+            (cd "${assets}" && find . -maxdepth 1 -type f -printf '%f\n' | sort) > "${RUNNER_TEMP}/expected-release-assets.txt"
+            (cd "${remote}" && find . -maxdepth 1 -type f -printf '%f\n' | sort) > "${RUNNER_TEMP}/actual-release-assets.txt"
+            cmp -s "${RUNNER_TEMP}/expected-release-assets.txt" "${RUNNER_TEMP}/actual-release-assets.txt"
+            (cd "${remote}" && sha256sum -c SHA256SUMS)
+            echo "IMMUTABLE_RELEASE_PUBLICATION=PASS (existing bytes verified)"
+          else
+            args=("${VERSION}" --verify-tag --target "${SOURCE_SHA}" --title "JamScript ${VERSION}" --notes "Immutable JamScript release assets for ${VERSION}.")
+            [[ "${VERSION}" == *-rc.* ]] && args+=(--prerelease --latest=false)
+            gh release create "${args[@]}" "${assets}"/*
+            echo "IMMUTABLE_RELEASE_PUBLICATION=PASS"
+          fi
+          context="${RUNNER_TEMP}/backend-image-context"
+          mkdir -p "${context}"
+          tar -xzf "${assets}/jamscript-service-backend-${VERSION}-linux-x86_64.tar.gz" -C "${context}"
+          cp Dockerfile.backend.runtime "${context}/Dockerfile"
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          image="ghcr.io/archelabs/jamscript-backend:${VERSION}"
+          if docker manifest inspect "${image}" >/dev/null 2>&1; then
+            docker pull "${image}"
+            image_source="$(docker image inspect "${image}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+            test "${image_source}" = "${SOURCE_SHA}" || {
+              echo "GHCR image already exists for a different source: ${VERSION}" >&2
+              exit 1
+            }
+            echo "BACKEND_IMAGE_PUBLICATION=PASS (existing image identity verified)"
+          else
+            docker build -f "${context}/Dockerfile" \
+              --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
+              --label "org.opencontainers.image.version=${VERSION}" \
+              -t "${image}" "${context}"
+            docker push "${image}"
+            echo "BACKEND_IMAGE_PUBLICATION=PASS"
+          fi
+
+  published-consumer:
+    needs: [validate, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            package: sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd jq
+          - platform: macos-arm64
+            os: macos-15
+            package: brew install zstd jq
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 1
+          submodules: false
+      - name: Verify source identity and install public-test tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          ${{ matrix.package }}
+      - name: Run the public GitHub Release consumer validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/published-${{ matrix.platform }}.json"
+          ./scripts/release/release-kill-test-001.sh \
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}" \
+            --release-version "${VERSION}" \
+            --target "${{ matrix.platform }}" \
+            --result-json "${result}" \
+            --work-dir "${RUNNER_TEMP}/published-${{ matrix.platform }}-work"
+          jq -e '.status == "PASS" and .gates.R2_managed_toolchain_published == true and .gates.R3_immutable_github_release == true and .gates.R4_published_artifact_validation == true' "${result}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: published-consumer-${{ matrix.platform }}
+          path: ${{ runner.temp }}/published-${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  backend-image-test:
+    needs: [validate, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 1
+          submodules: false
+      - name: Verify source identity
+        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - name: Pull the published backend image and verify volume restart
+        env:
+          GHCR_IMAGE: ghcr.io/archelabs/jamscript-backend:${{ needs.validate.outputs.version }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker pull "${GHCR_IMAGE}"
+          volume="jamscript-backend-public-${GITHUB_RUN_ID}"
+          container="jamscript-backend-public-${GITHUB_RUN_ID}"
+          cleanup() {
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+            docker volume rm "${volume}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "${volume}" >/dev/null
+          for _ in 1 2; do
+            docker run -d --name "${container}" -p 18090:8090 \
+              -e JAMSCRIPT_BACKEND_CORS_ORIGINS='*' -v "${volume}:/var/lib/jamscript" \
+              "${GHCR_IMAGE}" --bind 0.0.0.0:8090 \
+              --genesis-hash "0x$(printf '00%.0s' {1..32})" >/dev/null
+            for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:18090/healthz >/dev/null && break; sleep 1; done
+            curl -fsS http://127.0.0.1:18090/readinessz >/dev/null
+            docker rm -f "${container}" >/dev/null
+          done
+          echo "PUBLISHED_BACKEND_IMAGE=PASS"
+          echo "PUBLISHED_BACKEND_IMAGE_VOLUME_RESTART=PASS"
+
+  release-ready:
+    needs: [validate, published-consumer, backend-image-test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 1
+          submodules: false
+      - name: Confirm the published release identity and final gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          gh release view "${VERSION}" >/dev/null
+          tag_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${VERSION}^{}" | awk 'NR == 1 { print $1 }')"
+          test "${tag_sha}" = "${SOURCE_SHA}"
+          echo "RELEASE_READY=PASS"

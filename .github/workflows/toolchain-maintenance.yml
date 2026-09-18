@@ -1,8 +1,14 @@
-name: Promote macOS ARM64 LLVM Lock
+name: Toolchain Maintenance
 
 on:
   workflow_dispatch:
     inputs:
+      task:
+        description: Maintenance task to run
+        required: true
+        type: choice
+        options:
+          - promote-macos-llvm-lock
       ref:
         description: Exact commit or ref to measure
         required: true
@@ -12,11 +18,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: promote-macos-llvm-lock-${{ inputs.ref }}
+  group: toolchain-maintenance-${{ inputs.task }}-${{ inputs.ref }}
   cancel-in-progress: false
 
 jobs:
-  measure-native-llvm:
+  promote-macos-llvm-lock:
+    if: inputs.task == 'promote-macos-llvm-lock'
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -26,7 +33,6 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 1
           submodules: false
-
       - name: Verify native runner and source identity
         shell: bash
         run: |
@@ -36,8 +42,6 @@ jobs:
           source_sha="$(git rev-parse HEAD)"
           test "${#source_sha}" -eq 40
           echo "MEASUREMENT_SOURCE_SHA=${source_sha}"
-          echo "MEASUREMENT_SOURCE_SHA=${source_sha}" >> "${GITHUB_ENV}"
-
       - name: Measure official locked LLVM executables
         shell: bash
         run: |
@@ -66,30 +70,21 @@ jobs:
             echo "llvm_ar_sha256=${LLVM_AR_SHA256_MEASURED}"
             echo "ld_lld_sha256=${LLVM_LD_LLD_SHA256_MEASURED}"
           } | tee "${RUNNER_TEMP}/macos-llvm-native-measurement.txt"
-          cp -L "${out}/llvm.env" "${RUNNER_TEMP}/llvm.env"
-
-      - name: Publish native measurement evidence
+      - name: Publish measurement evidence only
         shell: bash
         run: |
           set -euo pipefail
           {
             echo "## macOS ARM64 LLVM lock measurement"
             echo
-            echo "- Source: ${MEASUREMENT_SOURCE_SHA}"
-            echo "- Archive and executable identities were verified on macos-15 arm64."
-            echo
+            echo "The candidate lock is an artifact only; this workflow does not mutate git refs."
             cat "${RUNNER_TEMP}/macos-llvm-native-measurement.txt"
-            echo
-            echo "Commit the promoted lock from this evidence in a reviewed change; this workflow does not mutate git refs."
           } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Upload promotion candidate
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64-llvm-lock-promotion
           path: |
             ${{ runner.temp }}/macos-arm64.lock.promoted
             ${{ runner.temp }}/macos-llvm-native-measurement.txt
-            ${{ runner.temp }}/llvm.env
           if-no-files-found: error
           retention-days: 14

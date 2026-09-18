@@ -50,19 +50,17 @@ publishes them as GitHub Release assets. Users install JamScript and run
 `jams build`; Docker, LLVM, Rust, Node, and a MiniJAM checkout are not user
 requirements for that canonical service build. A separately compiled native
 Builder host adapter may require Apple's SDK / Command Line Tools. The
-candidate distribution workflow is
-[`build-toolchain-bundle.yml`](../.github/workflows/build-toolchain-bundle.yml).
+the single manual release workflow is
+[`release.yml`](../.github/workflows/release.yml).
 It has separate native Linux x86_64 and macOS arm64 producers, builds and
 verifies two identical archives per target, and uploads short-lived Actions
 validation artifacts. On branches and pull requests, this expensive workflow
 is path-filtered to compiler, toolchain, release-engineering, and validation
 inputs; documentation-only changes do not rebuild native bundles. Maintainers
-can force it at any time with `workflow_dispatch`. The tag workflow
-[`release-candidate.yml`](../.github/workflows/release-candidate.yml) is the
-only publication path; there is no mutable “latest toolchain” workflow.
-Release tags are never path-filtered: the tag workflow always rebuilds and
-validates the exact tagged source before immutable publication, rather than
-reusing a branch validation artifact.
+can force it at any time with `workflow_dispatch`. It runs only from `main`,
+binds every job to the dispatch SHA, and publishes only the validated A bytes;
+there is no mutable “latest toolchain” workflow. The normal CI workflow has a
+small Linux/macOS producer smoke but never publishes a bundle.
 
 The checked-in distribution record is intentionally marked unpublished until
 each release bundle has been built and its exact SHA-256 and byte size promoted
@@ -96,12 +94,14 @@ configuration but remains unsupported in v0.1.
 
 ## Release gates
 
-The tag workflow [`release-candidate.yml`](../.github/workflows/release-candidate.yml)
-builds native CLI archives and managed bundles for Linux x86_64 and macOS arm64
-from the exact tag commit. It writes one immutable `release-manifest.json` and
-complete `SHA256SUMS`, runs native pre-publication clean-consumer tests, and
-then allows exactly one publication job to create the GitHub Release. It
-refuses to replace an existing tag's assets. After publication, separate native
+The [`release.yml`](../.github/workflows/release.yml) workflow builds native
+CLI archives, backend archives, and managed bundles for Linux x86_64 and macOS
+arm64 from the exact dispatch SHA. It writes one immutable
+`release-manifest.json` and complete `SHA256SUMS`, runs native pre-publication
+clean-consumer tests, performs the Docker smoke, creates the annotated tag only
+after those gates, and then allows exactly one publication job to create the
+GitHub Release and matching backend image. Existing tag/release bytes are
+verified byte-for-byte for reruns. After publication, separate native
 jobs download the published bytes and run
 [`JamScript Release Kill Test 001`](../scripts/release/release-kill-test-001.sh)
 against the release URL; the local asset test never substitutes for this R4
@@ -109,7 +109,8 @@ check.
 
 For `v0.1.0-rc.*`, publication passes both `--prerelease` and
 `--latest=false` to GitHub CLI. The stable `v0.1.0` path does not set
-`--prerelease`; an existing release is always rejected before upload.
+`--prerelease`; an existing release is accepted only when every asset matches
+the already validated bytes.
 
 The kill test starts with isolated `HOME`, Cargo, Rustup, and JamScript cache
 directories. It hides host Rust, Cargo, rustup, Node, npm, Clang, LLVM, and Zig
@@ -135,16 +136,14 @@ release scope.
 
 ## Promotion protocol
 
-The release candidate workflow is never a substitute for preflight. The
-manual [`release-preflight.yml`](../.github/workflows/release-preflight.yml)
-must first validate one exact candidate ref and emit
-`RELEASE_PREFLIGHT_READY=PASS`. Only then may an operator create and push the
-next immutable candidate tag. The tag workflow checks out that exact tag,
-rebuilds the managed toolchain and `jams` CLI, runs the compiler-builtins
-regression, assembles immutable assets, runs Release Kill Test 001 with
-`--asset-dir`, and only then publishes the GitHub prerelease. Fresh native
-consumers download the published bytes and run the same test with
-`--release-url` before the workflow emits `RELEASE_READY=PASS`.
+Run `Release` manually from `main` with only the intended version, for example
+`v0.1.0-rc.3`. The workflow validates the generic semver and workspace base
+version, checks the tag/release identity, builds the release bytes once,
+assembles immutable assets, runs Release Kill Test 001 with `--asset-dir`,
+compares cross-host canonical artifacts, and runs the prepublish Docker smoke.
+Only then does it create and push the annotated tag and publish the exact same
+bytes. Fresh native consumers download the public bytes and run the same test
+with `--release-url` before the workflow emits `RELEASE_READY=PASS`.
 The checked-in distribution record stays unpublished until a reviewed release
 promotion records the exact URL, digest, and byte size; changing it to
 `published = true` without those bytes is rejected by the toolchain manager.

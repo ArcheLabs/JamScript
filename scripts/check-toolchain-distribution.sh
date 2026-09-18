@@ -17,7 +17,7 @@ command -v rg >/dev/null 2>&1 || {
 
 # The compiler and release gates must remain self-contained. The manually
 # triggered MiniJAM compatibility workflow is intentionally outside this set.
-for workflow in ci.yml build-toolchain-bundle.yml release.yml release-candidate.yml; do
+for workflow in ci.yml release.yml; do
   if rg -n -i 'minijam-client|jambda|JAMSCRIPT_MINIJAM_SDK' ".github/workflows/${workflow}"; then
     echo "CORE_WORKFLOW_DEPENDENCY=FAIL (${workflow})" >&2
     exit 1
