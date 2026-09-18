@@ -2,20 +2,21 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-mapfile -t SETUP_FILES < <(find "${ROOT}/tools/release" -maxdepth 1 -type f -name 'setup-host-build-env-*.sh' -print | sort)
-test "${#SETUP_FILES[@]}" -gt 0
 WORKFLOW_FILES=(
   "${ROOT}/.github/workflows/ci.yml"
   "${ROOT}/.github/workflows/release.yml"
 )
 
-for file in "${SETUP_FILES[@]}"; do
+setup_file_count=0
+for file in "${ROOT}"/tools/release/setup-host-build-env-*.sh; do
   test -f "${file}"
+  setup_file_count=$((setup_file_count + 1))
   if rg -n '(^|[[:space:]])(LD_LIBRARY_PATH|DYLD_LIBRARY_PATH|DYLD_FALLBACK_LIBRARY_PATH)=' "${file}"; then
     echo "GLOBAL_DYNAMIC_LOADER_OVERRIDE=FAIL (${file})" >&2
     exit 1
   fi
 done
+test "${setup_file_count}" -gt 0
 
 for file in "${WORKFLOW_FILES[@]}"; do
   test -f "${file}"
