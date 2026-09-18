@@ -51,10 +51,9 @@ projects use the installed `jams` command without compiling this repository.
 
 ## Manual installation
 
-Download the target-specific CLI archive, managed toolchain bundle,
-target-specific toolchain manifest and metadata, `SHA256SUMS`, and
-`release-manifest.json` from the immutable GitHub Release tag. Verify the
-checksums, extract the CLI, and install the pinned bundle:
+Download the target-specific CLI archive, managed toolchain bundle, and
+`SHA256SUMS` from the immutable GitHub Release tag. Verify the checksums,
+extract the CLI, and install the pinned bundle:
 
 ```bash
 sha256sum -c SHA256SUMS

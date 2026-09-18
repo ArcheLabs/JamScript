@@ -11,9 +11,8 @@ The implementation is
 [`scripts/release/release-kill-test-001.sh`](../../scripts/release/release-kill-test-001.sh).
 It accepts `--target linux-x86_64` or `--target macos-arm64` and must run on the
 matching native host. The bootstrap phase reads the target-specific CLI,
-managed toolchain, toolchain manifest, metadata, `release-manifest.json`, and
-`SHA256SUMS`. It verifies the acquired target bytes and the per-target digests
-embedded in the release manifest. After extraction it requires an executable
+managed toolchain, and `SHA256SUMS`. It verifies the acquired target bytes
+against the checksum index. After extraction it requires an executable
 `jams` and rejects any `jamscript` executable, so the archive structure itself
 enforces the public command rename.
 
@@ -42,6 +41,7 @@ The script writes a machine-readable result:
 
 An `--asset-dir` run is useful for local producer debugging. It leaves the
 publication and released-artifact gates false because local files are not proof
-of GitHub Release publication. The release workflow runs the same protocol
-against the public release URL after upload; the JSON status describes the kill
-test itself, while the overall release decision remains conjunctive.
+of GitHub Release publication. The JamScript release workflow does not invoke
+this deep consumer test; it is retained for manual release-engineering
+diagnosis. Consumer correctness is covered by the ordinary CI build-smoke
+jobs.

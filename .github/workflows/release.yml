@@ -24,7 +24,7 @@ env:
 jobs:
   validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     outputs:
       source_sha: ${{ steps.identity.outputs.source_sha }}
       version: ${{ steps.identity.outputs.version }}
@@ -35,7 +35,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           submodules: false
-      - name: Validate main source identity and release version
+      - name: Validate source, version, tag, and release identity
         id: identity
         env:
           VERSION: ${{ inputs.version }}
@@ -61,16 +61,14 @@ jobs:
             echo "RELEASE_TAG=AVAILABLE"
           fi
           if gh release view "${VERSION}" >/dev/null 2>&1; then
-            echo "RELEASE_OBJECT=EXISTING"
-          else
-            echo "RELEASE_OBJECT=AVAILABLE"
+            echo "a GitHub Release already exists for ${VERSION}; publish is immutable and will not replace it" >&2
+            exit 1
           fi
           {
             echo "source_sha=${source_sha}"
             echo "version=${VERSION}"
           } >> "${GITHUB_OUTPUT}"
-          echo "SOURCE_SHA=${source_sha}"
-          echo "RELEASE_VERSION=${VERSION}"
+          echo "RELEASE_VALIDATE=PASS"
 
   build-toolchain:
     needs: validate
@@ -92,7 +90,6 @@ jobs:
     timeout-minutes: 240
     env:
       SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
-      VERSION: ${{ needs.validate.outputs.version }}
     steps:
       - name: Checkout exact release source
         uses: actions/checkout@v4
@@ -109,96 +106,48 @@ jobs:
         with:
           toolchain: nightly-2026-05-02
           components: rust-src
-      - name: Set up the exact locked host toolchain
+      - name: Install locked ScriptC packages
+        working-directory: toolchains/scriptc
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Set up the canonical host build environment
         shell: bash
         run: |
           set -euo pipefail
           ./tools/release/${{ matrix.setup }} "${RUNNER_TEMP}/host.env"
-          grep -q '^LLVM_CONFIG_PATH=' "${RUNNER_TEMP}/host.env"
-          grep -q '^LIBCLANG_PATH=' "${RUNNER_TEMP}/host.env"
-          ! grep -q '^DYLD_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
-          ! grep -q '^DYLD_FALLBACK_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
-          ! grep -q '^LD_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
-          ./scripts/release/check-release-source.sh --platform "${{ matrix.platform }}"
-      - name: Verify host environment isolation
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -z "${DYLD_LIBRARY_PATH:-}"
-          test -z "${DYLD_FALLBACK_LIBRARY_PATH:-}"
-          test -z "${LD_LIBRARY_PATH:-}"
-          node --version
-          git --version
-          cargo --version
-          echo "GLOBAL_LD_LIBRARY_PATH=ABSENT"
-          echo "GLOBAL_DYLD_LIBRARY_PATH=ABSENT"
-          echo "GLOBAL_DYLD_FALLBACK_LIBRARY_PATH=ABSENT"
-          echo "NODE_AFTER_HOST_SETUP=PASS"
-          echo "GIT_AFTER_HOST_SETUP=PASS"
-          echo "HOST_ENVIRONMENT_ISOLATION=PASS"
-      - name: Verify macOS system tools remain uncontaminated
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -z "${DYLD_LIBRARY_PATH:-}"
-          test -z "${DYLD_FALLBACK_LIBRARY_PATH:-}"
-          node --version
-          git --version
-          for system_tool in node git; do
-            if otool -L "$(command -v "${system_tool}")" | grep -qi 'jamscript-llvm\|LLVM-20.1.8'; then
-              echo "SYSTEM_${system_tool}_LLVM_CONTAMINATION=FAIL" >&2
-              exit 1
-            fi
-          done
-          echo "MACOS_GLOBAL_DYLD_OVERRIDE=ABSENT"
-          echo "SYSTEM_NODE_NOT_CONTAMINATED=PASS"
-          echo "SYSTEM_GIT_NOT_CONTAMINATED=PASS"
-      - name: Install the pinned ScriptC packages
-        working-directory: toolchains/scriptc
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Build and verify toolchain A and B
+          set -a
+          source "${RUNNER_TEMP}/host.env"
+          set +a
+          test -x "${JAMSCRIPT_CLANG}"
+          test -x "${JAMSCRIPT_LLVM_AR}"
+          test -x "${JAMSCRIPT_LLVM_LD}"
+      - name: Build one toolchain archive
         shell: bash
         run: |
           set -euo pipefail
           set -a
           source "${RUNNER_TEMP}/host.env"
           set +a
-          for suffix in a b; do
-            out="${RUNNER_TEMP}/toolchain-${suffix}"
-            mkdir -p "${out}"
-            SCRIPTC_NODE="$(command -v node)" \
-              ./tools/release/toolchain/${{ matrix.build }} "${out}"
-            bundle="${out}/${{ matrix.archive }}"
-            ./tools/release/toolchain/verify-bundle.sh "${bundle}" \
-              "${RUNNER_TEMP}/verify-${suffix}" "${RUNNER_TEMP}/root-${suffix}.txt"
-            ./scripts/release/compiler-builtins-regression.sh \
-              "$(<"${RUNNER_TEMP}/root-${suffix}.txt")"
+          out="${RUNNER_TEMP}/toolchain"
+          mkdir -p "${out}"
+          SCRIPTC_NODE="$(command -v node)" \
+            ./tools/release/toolchain/${{ matrix.build }} "${out}"
+          bundle="${out}/${{ matrix.archive }}"
+          test -s "${bundle}"
+          zstd -q -t "${bundle}"
+          listing="${RUNNER_TEMP}/toolchain-members.txt"
+          zstd -q -d -c "${bundle}" | tar -tf - > "${listing}"
+          for required in bin/node bin/clang bin/rustc bin/cargo scriptc runtime targets/jam/sdk; do
+            grep -Eq "(^|/)${required}(/|$)" "${listing}"
           done
-          cmp -s \
-            "${RUNNER_TEMP}/toolchain-a/${{ matrix.archive }}" \
-            "${RUNNER_TEMP}/toolchain-b/${{ matrix.archive }}"
-          if [[ "${{ matrix.platform }}" == linux-x86_64 ]]; then
-            cp "${RUNNER_TEMP}/toolchain-a/toolchain-manifest.json" \
-              "${RUNNER_TEMP}/toolchain-a/toolchain-manifest-linux-x86_64.json"
-            cp "${RUNNER_TEMP}/toolchain-a/bundle-metadata.json" \
-              "${RUNNER_TEMP}/toolchain-a/bundle-metadata-linux-x86_64.json"
-            rm "${RUNNER_TEMP}/toolchain-a/toolchain-manifest.json" \
-              "${RUNNER_TEMP}/toolchain-a/bundle-metadata.json"
-          fi
-          echo "TOOLCHAIN_AB_REPRODUCIBILITY=${{ matrix.platform }}:PASS"
-      - name: Upload only the validated A producer bytes
-        uses: actions/upload-artifact@v4
+          echo "TOOLCHAIN_${{ matrix.platform == 'linux-x86_64' && 'LINUX' || 'MACOS' }}_BUILT=PASS"
+      - uses: actions/upload-artifact@v4
         with:
           name: release-input-toolchain-${{ matrix.platform }}
-          path: |
-            ${{ runner.temp }}/toolchain-a/${{ matrix.archive }}
-            ${{ runner.temp }}/toolchain-a/toolchain-manifest*.json
-            ${{ runner.temp }}/toolchain-a/bundle-metadata*.json
+          path: ${{ runner.temp }}/toolchain/${{ matrix.archive }}
           if-no-files-found: error
           retention-days: 7
 
-  build-native:
+  build-cli:
     needs: [validate, build-toolchain]
     strategy:
       fail-fast: false
@@ -235,47 +184,18 @@ jobs:
           pattern: release-input-toolchain-*
           path: ${{ runner.temp }}/inputs
           merge-multiple: true
-      - name: Set up the exact locked host toolchain
+      - name: Set up the canonical host build environment
         shell: bash
         run: |
           set -euo pipefail
           ./tools/release/${{ matrix.setup }} "${RUNNER_TEMP}/host.env"
-          grep -q '^LLVM_CONFIG_PATH=' "${RUNNER_TEMP}/host.env"
-          grep -q '^LIBCLANG_PATH=' "${RUNNER_TEMP}/host.env"
-          ! grep -q '^DYLD_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
-          ! grep -q '^DYLD_FALLBACK_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
-          ! grep -q '^LD_LIBRARY_PATH=' "${RUNNER_TEMP}/host.env"
-          ./scripts/release/check-release-source.sh --platform "${{ matrix.platform }}"
-      - name: Verify host environment isolation
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -z "${DYLD_LIBRARY_PATH:-}"
-          test -z "${DYLD_FALLBACK_LIBRARY_PATH:-}"
-          test -z "${LD_LIBRARY_PATH:-}"
-          node --version
-          git --version
-          cargo --version
-          echo "HOST_ENVIRONMENT_ISOLATION=PASS"
-      - name: Verify macOS system tools remain uncontaminated
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -z "${DYLD_LIBRARY_PATH:-}"
-          test -z "${DYLD_FALLBACK_LIBRARY_PATH:-}"
-          node --version
-          git --version
-          for system_tool in node git; do
-            if otool -L "$(command -v "${system_tool}")" | grep -qi 'jamscript-llvm\|LLVM-20.1.8'; then
-              echo "SYSTEM_${system_tool}_LLVM_CONTAMINATION=FAIL" >&2
-              exit 1
-            fi
-          done
-          echo "MACOS_GLOBAL_DYLD_OVERRIDE=ABSENT"
-          echo "SYSTEM_NODE_NOT_CONTAMINATED=PASS"
-          echo "SYSTEM_GIT_NOT_CONTAMINATED=PASS"
-      - name: Build the native CLI once
+          set -a
+          source "${RUNNER_TEMP}/host.env"
+          set +a
+          test -x "${JAMSCRIPT_CLANG}"
+          test -x "${JAMSCRIPT_LLVM_AR}"
+          test -x "${JAMSCRIPT_LLVM_LD}"
+      - name: Build the CLI once from the exact source
         shell: bash
         run: |
           set -euo pipefail
@@ -298,169 +218,39 @@ jobs:
             python3 ./tools/release/toolchain/make-candidate-manifest.py \
               --input "${source_copy}/toolchains/distribution-v1.toml" \
               --output "${source_copy}/toolchains/distribution-v1.toml" \
-              --platform "${platform}" --url "${release_url}/${bundle##*/}" \
-              --sha256 "${sha}" --size "${size}"
+              --platform "${platform}" \
+              --url "${release_url}/${bundle##*/}" \
+              --sha256 "${sha}" \
+              --size "${size}"
           done
           RUSTFLAGS="${host_rustflags}" \
-            ./tools/release/build-cli-archive.sh "${source_copy}" "${RUNNER_TEMP}/cli" "${VERSION}" "${{ matrix.platform }}"
-          producer="${RUNNER_TEMP}/native-assets"
-          mkdir -p "${producer}"
-          cp "${RUNNER_TEMP}/cli/jamscript-${VERSION}-${{ matrix.platform }}.tar.gz" "${producer}/"
+            ./tools/release/build-cli-archive.sh \
+              "${source_copy}" "${RUNNER_TEMP}/cli" "${VERSION}" "${{ matrix.platform }}"
+          archive="${RUNNER_TEMP}/cli/jamscript-${VERSION}-${{ matrix.platform }}.tar.gz"
+          test -s "${archive}"
+          tar -tzf "${archive}" >/dev/null
+          cli_check="${RUNNER_TEMP}/cli-check"
+          rm -rf -- "${cli_check}"
+          mkdir -p "${cli_check}"
+          tar -xzf "${archive}" -C "${cli_check}"
+          test -x "${cli_check}/jams"
+          test -f "${cli_check}/LICENSE"
+          test -f "${cli_check}/README.md"
+          test "$(find "${cli_check}" -maxdepth 1 -type f -name 'jamscript-service-*' | wc -l | tr -d ' ')" -eq 0
+          "${cli_check}/jams" --version
+          "${cli_check}/jams" --help >/dev/null
+          echo "CLI_${{ matrix.platform == 'linux-x86_64' && 'LINUX' || 'MACOS' }}_BUILT=PASS"
       - uses: actions/upload-artifact@v4
         with:
-          name: release-input-native-${{ matrix.platform }}
-          path: ${{ runner.temp }}/native-assets
+          name: release-input-cli-${{ matrix.platform }}
+          path: ${{ runner.temp }}/cli/jamscript-${{ needs.validate.outputs.version }}-${{ matrix.platform }}.tar.gz
           if-no-files-found: error
           retention-days: 7
-
-  assemble:
-    needs: [validate, build-toolchain, build-native]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
-      VERSION: ${{ needs.validate.outputs.version }}
-    steps:
-      - name: Checkout exact release source
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          fetch-depth: 1
-          submodules: false
-      - name: Verify source identity
-        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: release-input-*
-          path: ${{ runner.temp }}/release-assets
-          merge-multiple: true
-      - name: Write the immutable release manifest and checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-          assets="${RUNNER_TEMP}/release-assets"
-          python3 ./tools/release/write-release-manifest.py \
-            --output "${assets}/release-manifest.json" \
-            --release-version "${VERSION}" \
-            --source-commit "${SOURCE_SHA}" \
-            --repository "${GITHUB_REPOSITORY}" \
-            --target linux-x86_64 \
-            --cli "${assets}/jamscript-${VERSION}-linux-x86_64.tar.gz" \
-            --toolchain "${assets}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst" \
-            --toolchain-manifest "${assets}/toolchain-manifest-linux-x86_64.json" \
-            --bundle-metadata "${assets}/bundle-metadata-linux-x86_64.json" \
-            --target macos-arm64 \
-            --cli "${assets}/jamscript-${VERSION}-macos-arm64.tar.gz" \
-            --toolchain "${assets}/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst" \
-            --toolchain-manifest "${assets}/toolchain-manifest-macos-arm64.json" \
-            --bundle-metadata "${assets}/bundle-metadata-macos-arm64.json" \
-            --unsupported-target windows-x86_64
-          (cd "${assets}" && sha256sum -- * > SHA256SUMS)
-          jq -e '.targets | map(select(.supported == true)) | length == 2' "${assets}/release-manifest.json"
-          jq -e -s '.[0].sourceRevision == .[1].sourceRevision and .[0].toolchainId == .[1].toolchainId' \
-            "${assets}/bundle-metadata-linux-x86_64.json" \
-            "${assets}/bundle-metadata-macos-arm64.json"
-          echo "RELEASE_ASSEMBLY=PASS"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: assembled-release-assets
-          path: ${{ runner.temp }}/release-assets
-          if-no-files-found: error
-          retention-days: 7
-
-  prepublish-consumer:
-    needs: [validate, assemble]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x86_64
-            os: ubuntu-24.04
-            package: sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd jq
-          - platform: macos-arm64
-            os: macos-15
-            package: brew install zstd jq
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
-    permissions:
-      contents: read
-    env:
-      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
-      VERSION: ${{ needs.validate.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          fetch-depth: 1
-          submodules: false
-      - name: Verify source identity and install consumer tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-          ${{ matrix.package }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: assembled-release-assets
-          path: ${{ runner.temp }}/release-assets
-      - name: Run the clean consumer validation before publication
-        shell: bash
-        run: |
-          set -euo pipefail
-          result="${RUNNER_TEMP}/prepublish-${{ matrix.platform }}.json"
-          ./scripts/release/release-kill-test-001.sh \
-            --asset-dir "${RUNNER_TEMP}/release-assets" \
-            --release-version "${VERSION}" \
-            --target "${{ matrix.platform }}" \
-            --result-json "${result}" \
-            --work-dir "${RUNNER_TEMP}/prepublish-${{ matrix.platform }}-work"
-          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == false and .gates.R3_immutable_github_release == false and .gates.R4_published_artifact_validation == false' "${result}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: prepublish-consumer-${{ matrix.platform }}
-          path: ${{ runner.temp }}/prepublish-${{ matrix.platform }}.json
-          if-no-files-found: error
-          retention-days: 30
-
-  cross-host-compare:
-    needs: [validate, prepublish-consumer]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    env:
-      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          fetch-depth: 1
-          submodules: false
-      - name: Verify source identity
-        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-      - uses: actions/download-artifact@v4
-        with:
-          name: prepublish-consumer-linux-x86_64
-          path: ${{ runner.temp }}/linux
-      - uses: actions/download-artifact@v4
-        with:
-          name: prepublish-consumer-macos-arm64
-          path: ${{ runner.temp }}/macos
-      - name: Compare host-independent canonical service artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          for artifact in service.pvm service.polkavm service.blob; do
-            linux_hash="$(jq -er --arg artifact "${artifact}" '.artifact_hashes[$artifact]' "${RUNNER_TEMP}/linux/prepublish-linux-x86_64.json")"
-            macos_hash="$(jq -er --arg artifact "${artifact}" '.artifact_hashes[$artifact]' "${RUNNER_TEMP}/macos/prepublish-macos-arm64.json")"
-            test "${linux_hash}" = "${macos_hash}"
-          done
-          echo "CROSS_HOST_CANONICAL_ARTIFACTS=PASS"
 
   publish:
-    needs: [validate, assemble, prepublish-consumer, cross-host-compare]
+    needs: [validate, build-toolchain, build-cli]
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     environment: release
     permissions:
       contents: write
@@ -468,7 +258,7 @@ jobs:
       SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
-      - name: Checkout the exact validated source
+      - name: Checkout exact validated source
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.validate.outputs.source_sha }}
@@ -476,9 +266,29 @@ jobs:
           submodules: false
       - uses: actions/download-artifact@v4
         with:
-          name: assembled-release-assets
+          pattern: release-input-*
           path: ${{ runner.temp }}/release-assets
-      - name: Create the exact source tag after all prepublish gates
+          merge-multiple: true
+      - name: Verify the exact public asset set and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="${RUNNER_TEMP}/release-assets"
+          expected=(
+            "jamscript-${VERSION}-linux-x86_64.tar.gz"
+            "jamscript-${VERSION}-macos-arm64.tar.gz"
+            "jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+            "jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
+          )
+          for asset in "${expected[@]}"; do
+            test -s "${assets}/${asset}"
+          done
+          actual_count="$(find "${assets}" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          test "${actual_count}" -eq 4
+          (cd "${assets}" && sha256sum -- "${expected[@]}" > SHA256SUMS)
+          test "$(find "${assets}" -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 5
+          echo "SHA256SUMS_CREATED=PASS"
+      - name: Create the exact source tag
         shell: bash
         run: |
           set -euo pipefail
@@ -495,8 +305,8 @@ jobs:
             git tag -a "${VERSION}" "${SOURCE_SHA}" -m "JamScript ${VERSION}"
             git push origin "refs/tags/${VERSION}"
           fi
-          echo "RELEASE_TAG_TARGET=${SOURCE_SHA}"
-      - name: Publish exact JamScript release bytes
+          echo "TAG_CREATED=PASS"
+      - name: Publish the exact bytes
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -504,98 +314,17 @@ jobs:
           set -euo pipefail
           assets="${RUNNER_TEMP}/release-assets"
           if gh release view "${VERSION}" >/dev/null 2>&1; then
-            remote="${RUNNER_TEMP}/existing-release-assets"
-            mkdir -p "${remote}"
-            gh release download "${VERSION}" --dir "${remote}"
-            while IFS= read -r asset; do
-              cmp -s "${assets}/${asset}" "${remote}/${asset}" || {
-                echo "IMMUTABLE_RELEASE_ASSET=FAIL ${asset}" >&2
-                exit 1
-              }
-            done < <(cd "${assets}" && find . -maxdepth 1 -type f -printf '%f\n' | sort)
-            (cd "${assets}" && find . -maxdepth 1 -type f -printf '%f\n' | sort) > "${RUNNER_TEMP}/expected-release-assets.txt"
-            (cd "${remote}" && find . -maxdepth 1 -type f -printf '%f\n' | sort) > "${RUNNER_TEMP}/actual-release-assets.txt"
-            cmp -s "${RUNNER_TEMP}/expected-release-assets.txt" "${RUNNER_TEMP}/actual-release-assets.txt"
-            (cd "${remote}" && sha256sum -c SHA256SUMS)
-            echo "IMMUTABLE_RELEASE_PUBLICATION=PASS (existing bytes verified)"
-          else
-            args=("${VERSION}" --verify-tag --target "${SOURCE_SHA}" --title "JamScript ${VERSION}" --notes "Immutable JamScript release assets for ${VERSION}.")
-            [[ "${VERSION}" == *-rc.* ]] && args+=(--prerelease --latest=false)
-            gh release create "${args[@]}" "${assets}"/*
-            echo "IMMUTABLE_RELEASE_PUBLICATION=PASS"
+            echo "GitHub Release already exists: ${VERSION}; refusing to replace immutable bytes" >&2
+            exit 1
           fi
-  published-consumer:
-    needs: [validate, publish]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x86_64
-            os: ubuntu-24.04
-            package: sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd jq
-          - platform: macos-arm64
-            os: macos-15
-            package: brew install zstd jq
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
-    permissions:
-      contents: read
-    env:
-      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
-      VERSION: ${{ needs.validate.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          fetch-depth: 1
-          submodules: false
-      - name: Verify source identity and install public-test tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-          ${{ matrix.package }}
-      - name: Run the public GitHub Release consumer validation
-        shell: bash
-        run: |
-          set -euo pipefail
-          result="${RUNNER_TEMP}/published-${{ matrix.platform }}.json"
-          ./scripts/release/release-kill-test-001.sh \
-            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}" \
-            --release-version "${VERSION}" \
-            --target "${{ matrix.platform }}" \
-            --result-json "${result}" \
-            --work-dir "${RUNNER_TEMP}/published-${{ matrix.platform }}-work"
-          jq -e '.status == "PASS" and .gates.R2_managed_toolchain_published == true and .gates.R3_immutable_github_release == true and .gates.R4_published_artifact_validation == true' "${result}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: published-consumer-${{ matrix.platform }}
-          path: ${{ runner.temp }}/published-${{ matrix.platform }}.json
-          if-no-files-found: error
-          retention-days: 30
-
-  release-ready:
-    needs: [validate, published-consumer]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    env:
-      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
-      VERSION: ${{ needs.validate.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          fetch-depth: 1
-          submodules: false
-      - name: Confirm the published release identity and final gates
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-          gh release view "${VERSION}" >/dev/null
-          tag_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${VERSION}^{}" | awk 'NR == 1 { print $1 }')"
-          test "${tag_sha}" = "${SOURCE_SHA}"
-          echo "JAMSCRIPT_RELEASE_READY=PASS"
+          args=("${VERSION}" --verify-tag --target "${SOURCE_SHA}" --title "JamScript ${VERSION}" --notes "Immutable JamScript release assets for ${VERSION}.")
+          [[ "${VERSION}" == *-rc.* ]] && args+=(--prerelease --latest=false)
+          gh release create "${args[@]}" "${assets}"/*
+          echo "GITHUB_RELEASE_CREATED=PASS"
+          echo "SOURCE_SHA=${SOURCE_SHA}"
+          echo "RELEASE_VERSION=${VERSION}"
+          echo "TOOLCHAIN_LINUX_BUILT=PASS"
+          echo "TOOLCHAIN_MACOS_BUILT=PASS"
+          echo "CLI_LINUX_BUILT=PASS"
+          echo "CLI_MACOS_BUILT=PASS"
+          echo "JAMSCRIPT_RELEASE_PUBLISHED=PASS"

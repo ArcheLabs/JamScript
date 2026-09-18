@@ -106,8 +106,8 @@ jobs:
       - working-directory: packages/client
         run: npm test
 
-  release-producer-smoke:
-    name: Release producer smoke (${{ matrix.platform }})
+  native-producer-smoke:
+    name: Native producer smoke (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -191,4 +191,43 @@ jobs:
             ./tools/release/build-backend-artifact.sh "${RUNNER_TEMP}/backend" "${version}"
           test -f "${RUNNER_TEMP}/backend/jamscript-backend-${version}-${{ matrix.platform }}.tar.gz"
           echo "BACKEND_BUILD=PASS"
-          echo "RELEASE_PRODUCER_SMOKE=${{ matrix.platform }}:PASS"
+          echo "NATIVE_PRODUCER_SMOKE=${{ matrix.platform }}:PASS"
+          echo "CI_NATIVE_PRODUCER_${{ matrix.platform == 'linux-x86_64' && 'LINUX' || 'MACOS' }}=PASS"
+
+  jams-build-smoke:
+    name: JamScript build smoke (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            setup: setup-host-build-env-linux.sh
+          - platform: macos-arm64
+            os: macos-15
+            setup: setup-host-build-env-macos.sh
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: toolchains/scriptc/NODE_VERSION
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src
+      - name: Install locked ScriptC packages
+        working-directory: toolchains/scriptc
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build one real JamScript consumer service
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/${{ matrix.setup }} "${RUNNER_TEMP}/host.env"
+          set -a
+          source "${RUNNER_TEMP}/host.env"
+          set +a
+          host_rustflags="${RUSTFLAGS:-} ${JAMSCRIPT_HOST_RPATH_FLAG}"
+          RUSTFLAGS="${host_rustflags}" cargo build --release --locked --bin jams
+          ./scripts/ci/jams-build-smoke.sh

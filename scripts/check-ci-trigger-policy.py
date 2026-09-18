@@ -43,6 +43,8 @@ if trigger_events(WORKFLOWS / "toolchain-maintenance.yml") != ["workflow_dispatc
 
 release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
 backend_release = (WORKFLOWS / "backend-release.yml").read_text(encoding="utf-8")
+ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+smoke = (ROOT / "scripts/ci/jams-build-smoke.sh").read_text(encoding="utf-8")
 if "inputs:\n      version:" not in release:
     raise SystemExit("release.yml must accept only a version input")
 if re.search(r"(?m)^    (?:push|pull_request|schedule):", release):
@@ -56,6 +58,17 @@ for required in ("build-backend-artifact.sh", "backend-manifest.json", "BACKEND_
 for forbidden in ("build-cli-archive.sh", "release-input-toolchain-", "jamscript-toolchain-scriptc"):
     if forbidden in backend_release:
         raise SystemExit(f"backend-release.yml owns JamScript lifecycle: {forbidden}")
+for required in ("native-producer-smoke:", "jams-build-smoke:", "scripts/ci/jams-build-smoke.sh"):
+    if required not in ci:
+        raise SystemExit(f"ci.yml is missing fast correctness coverage: {required}")
+for marker in (
+    "LINUX_JAMS_BUILD_SMOKE=PASS",
+    "MACOS_APPLE_SDK_DISCOVERY=PASS",
+    "MACOS_SCRIPTC_RUNTIME_HEADERS=PASS",
+    "MACOS_JAMS_BUILD_SMOKE=PASS",
+):
+    if marker not in smoke:
+        raise SystemExit(f"ci.yml is missing build-smoke marker: {marker}")
 
 print("ACTIVE_WORKFLOW_COUNT=5")
 print("CI_TRIGGER_POLICY=PASS")

@@ -59,9 +59,8 @@ repository.
 
 For users who do not want to pipe a script into Bash:
 
-1. Download the target-specific CLI archive, managed toolchain bundle,
-   target-specific toolchain manifest and metadata, `SHA256SUMS`, and
-   `release-manifest.json` from the same immutable GitHub Release tag.
+1. Download the target-specific CLI archive, managed toolchain bundle, and
+   `SHA256SUMS` from the same immutable GitHub Release tag.
 2. Verify the downloaded files with `sha256sum -c SHA256SUMS` on Linux or
    `shasum -a 256 -c SHA256SUMS` on macOS.
 3. Extract the CLI archive with `tar -xzf jamscript-<VERSION>-<TARGET>.tar.gz`.
@@ -116,6 +115,6 @@ required by the production backend. If a user separately compiles
 `generated_builder_application.rs` into that adapter, the host binary links against Apple's arm64 ABI and therefore needs
 the macOS SDK / Xcode Command Line Tools (or an explicitly supplied `SDKROOT`).
 Those Apple components are not bundled or redistributable by JamScript. The
-native release closure and clean-consumer gate test this boundary explicitly;
-JamScript does not claim that the separate host adapter has zero OS SDK
-prerequisites.
+CI build-smoke job exercises the canonical JamScript compiler path on a native
+macOS runner; JamScript does not claim that the separate host adapter has zero
+OS SDK prerequisites.

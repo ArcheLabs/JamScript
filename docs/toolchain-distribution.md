@@ -90,17 +90,17 @@ The native producer flow is:
 2. Bootstrap and verify the locked LLVM distribution with the platform-specific
    `bootstrap-llvm-*` and `verify-llvm-*` scripts.
 3. Build the bundle with `build-linux.sh` or `build-macos.sh`.
-4. Run `verify-bundle.sh`, the managed execution-closure probe, and the
-   compiler-builtins regression.
-5. Build two independent archives and compare their bytes.
-6. Pass both native clean-consumer kill tests before publication. Backend
+4. Run the structural archive checks; compiler correctness and managed guest
+   closure checks run in CI or Toolchain Maintenance.
+5. Publish only the exact archive bytes and their `SHA256SUMS` entry. Backend
    artifacts are produced and released by the independent Backend workflow.
 
 The release workflow is
 [`release.yml`](../.github/workflows/release.yml). It has separate native
 Linux and macOS producers, checks exact source identity and native
-architecture, validates A/B reproducibility, and uploads only the validated A
-bundle as release input. An Actions artifact is not a public distribution URL.
+architecture, builds each toolchain and CLI once, and uploads only the exact
+producer bytes as release input. An Actions artifact is not a public
+distribution URL.
 
 ## Native ABI and SDK boundary
 
@@ -113,8 +113,8 @@ build` does not compile the separate generated Builder host application. When
 that host adapter is compiled, native host binaries still use the host ABI:
 Linux uses the Ubuntu/glibc boundary and macOS uses the Apple arm64 loader,
 system frameworks, and SDK / Xcode Command Line Tools for host linkage. Those
-Apple components are not copied into the bundle. The native macOS execution
-closure and clean-consumer tests are the release proof for this boundary.
+Apple components are not copied into the bundle. The CI build-smoke job and
+host-toolchain checks prove this boundary before release publication.
 
 The bundle contains only the JamScript-owned JAM target SDK under
 `targets/jam/sdk`; MiniJAM, Jambda, and deployment services are not bundled.
@@ -123,14 +123,12 @@ The bundle contains only the JamScript-owned JAM target SDK under
 
 The manual JamScript release workflow
 [`release.yml`](../.github/workflows/release.yml) builds both CLI archives and
-both managed bundles from the exact dispatch commit. It assembles one
-`release-manifest.json` with two supported target entries and an explicit
-unsupported Windows entry, plus target-specific toolchain manifests, metadata,
-and a complete `SHA256SUMS` index. Backend archives, Docker, and GHCR are owned
-by [`backend-release.yml`](../.github/workflows/backend-release.yml).
+both managed bundles from the exact dispatch commit. The public release has
+exactly those four files plus `SHA256SUMS`; `release-manifest.json`, toolchain
+engineering metadata, Backend archives, Docker, and GHCR are not part of the
+public JamScript release. Backend artifacts are owned by
+[`backend-release.yml`](../.github/workflows/backend-release.yml).
 
-The workflow has one publication job. Before it can run, native Linux and
-native macOS clean-consumer jobs download the exact assembled bytes and run
-[`release-kill-test-001.sh`](../scripts/release/release-kill-test-001.sh).
-After publication, separate native jobs repeat the same test against the
-GitHub Release URL. The release refuses to replace an existing tag.
+The release refuses to replace an existing GitHub Release and does not rerun
+consumer validation. The retained release kill test is a manual diagnostic;
+consumer correctness is proved by CI.

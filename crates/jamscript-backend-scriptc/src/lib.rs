@@ -123,8 +123,12 @@ impl ScriptcCompiler {
         )?;
         verify_surface_manifest(&self.toolchain_root)?;
         let script = self.toolchain_root.join("m2/compile-service.mjs");
+        let sdkroot = discover_macos_sdk()?;
         let mut command = Command::new(&self.node);
         command.current_dir(&output_dir).arg(script).arg(&spec_path);
+        if let Some(sdkroot) = sdkroot {
+            command.env("SDKROOT", sdkroot);
+        }
         let managed_bin = self.toolchain_root.parent().map(|root| root.join("bin"));
         if let Some(managed_bin) = managed_bin.filter(|path| path.is_dir()) {
             let mut path_entries = vec![managed_bin];
@@ -239,6 +243,40 @@ fn command_output(command: &Path, args: &[&str], cwd: &Path) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn discover_macos_sdk() -> Result<Option<PathBuf>> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(value) = env::var("SDKROOT") {
+            let path = PathBuf::from(value);
+            if path.is_dir() {
+                return Ok(Some(path));
+            }
+        }
+
+        let output = Command::new("xcrun")
+            .args(["--sdk", "macosx", "--show-sdk-path"])
+            .output()
+            .context("discovering the macOS SDK with xcrun")?;
+        if !output.status.success() {
+            bail!(
+                "xcrun could not discover the macOS SDK: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        if !path.is_dir() {
+            bail!(
+                "xcrun returned an invalid macOS SDK path: {}",
+                path.display()
+            );
+        }
+        return Ok(Some(path));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    Ok(None)
 }
 
 fn read_trim(path: &Path) -> Result<String> {

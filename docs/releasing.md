@@ -94,38 +94,22 @@ configuration but remains unsupported in v0.1.
 
 ## JamScript release gates
 
-The [`release.yml`](../.github/workflows/release.yml) workflow builds native
-CLI archives and managed bundles for Linux x86_64 and macOS
-arm64 from the exact dispatch SHA. It writes one immutable JamScript-only
-`release-manifest.json` and complete `SHA256SUMS`, runs native clean-consumer
-validation against the assembled bytes, creates the annotated tag only after
-those gates, and then allows exactly one publication job to create the GitHub
-Release. Existing tag/release bytes are verified byte-for-byte for reruns. The
-standalone
+The [`release.yml`](../.github/workflows/release.yml) workflow is deliberately
+minimal. It has exactly four jobs: `validate`, `build-toolchain`, `build-cli`,
+and `publish`. Each native toolchain and CLI archive is built once from the
+exact dispatch SHA. Release-time checks only verify archive structure, required
+files, exact filenames, and `SHA256SUMS`.
+
+The public release contains two CLI archives, two managed toolchain archives,
+and `SHA256SUMS`. It does not publish `release-manifest.json`, toolchain
+engineering metadata, Backend assets, Docker images, or GHCR references.
+The workflow finishes with `JAMSCRIPT_RELEASE_PUBLISHED=PASS`; all consumer,
+compiler, SDK, guest, determinism, and host-environment correctness checks
+belong to CI.
+
+The standalone
 [`JamScript Release Kill Test 001`](../scripts/release/release-kill-test-001.sh)
-is the native consumer gate used before and after publication.
-
-For `v0.1.0-rc.*`, publication passes both `--prerelease` and
-`--latest=false` to GitHub CLI. The stable `v0.1.0` path does not set
-`--prerelease`; an existing release is accepted only when every asset matches
-the already validated bytes.
-
-The kill test starts with isolated `HOME`, Cargo, Rustup, and JamScript cache
-directories. It hides host Rust, Cargo, rustup, Node, npm, Clang, LLVM, and Zig
-behind a restricted `PATH`, installs the digest-pinned bundle, runs `jams toolchain verify`,
-builds an external fixture twice with network disabled, executes the resulting
-PVM artifact, and compares the two artifact hashes. It runs natively on both
-Linux x86_64 and macOS arm64; the macOS native Builder linkage is where the
-Apple SDK / Xcode Command Line Tools boundary is exercised. Its JSON result is
-the machine-readable R1/R4 decision.
-
-The explicit
-[`compiler-builtins-regression.sh`](../scripts/release/compiler-builtins-regression.sh)
-keeps the earlier offline failure covered: the managed `rust-src` tree must
-contain `compiler-builtins`, and the same isolated execution-closure probe
-must build a PolkaVM cdylib guest. The old failure occurred when the consumer
-scan treated binary PVM files as text; the current gate verifies execution and
-managed paths instead of grepping generated binaries.
+is retained for manual release-engineering diagnosis and is not a release gate.
 
 `toolchains/release-targets.toml` is the authoritative v0 platform matrix.
 Linux x86_64 and macOS arm64 are supported only with matching native producers,
@@ -134,13 +118,11 @@ release scope.
 
 ## Promotion protocol
 
-Run `Release JamScript` manually from `main` with only the intended version, for example
-`v0.1.0-rc.3`. The workflow validates the generic semver and workspace base
-version, checks the tag/release identity, builds the release bytes once,
-assembles immutable CLI/toolchain assets, runs native prepublish consumers and
-cross-host artifact comparison, and only then creates and pushes the annotated
-tag and publishes the exact same bytes. Native consumers repeat the validation
-against the public release before emitting `JAMSCRIPT_RELEASE_READY=PASS`.
+Run `Release JamScript` manually from `main` with only the intended version,
+for example `v0.1.0-rc.3`. The workflow validates the generic semver and
+source identity, builds the release bytes once, checks the exact five-file
+public asset set, creates and pushes the annotated tag, and publishes the exact
+same bytes. It does not rerun consumer or correctness tests.
 
 ## Independent Backend release
 
