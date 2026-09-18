@@ -280,6 +280,8 @@ jobs:
           if [[ -n "${remote_tag_sha}" ]]; then
             test "${remote_tag_sha}" = "${SOURCE_SHA}"
           else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag -a "${VERSION}" "${SOURCE_SHA}" -m "JamScript Backend ${IMAGE_VERSION}"
             git push origin "refs/tags/${VERSION}"
           fi
