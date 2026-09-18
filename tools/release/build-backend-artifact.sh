@@ -16,9 +16,9 @@ cp -L "${ROOT}/Dockerfile.backend" "${ROOT}/docker-compose.backend.yml" "${STAGE
 cp -L "${ROOT}/docs/service-backend.md" "${ROOT}/docs/service-backend-v1.md" "${STAGE}/"
 
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(cd "${ROOT}" && git show -s --format=%ct HEAD)}"
-tar -C "${STAGE}" \
-  --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
-  -czf "${OUT}/${ARCHIVE}" .
+python3 "${ROOT}/tools/release/toolchain/create-deterministic-archive.py" \
+  --root "${STAGE}" --source-date-epoch "${SOURCE_DATE_EPOCH}" | \
+  gzip -n -c > "${OUT}/${ARCHIVE}"
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "${OUT}" && sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256")
 else

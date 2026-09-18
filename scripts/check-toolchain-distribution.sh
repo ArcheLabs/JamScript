@@ -16,6 +16,12 @@ command -v rg >/dev/null 2>&1 || {
   exit 1
 }
 
+if rg -n --glob '*.sh' -- '--sort=name|--numeric-owner|--owner=|--group=|--mtime=@' tools/release; then
+  echo "PORTABLE_RELEASE_ARCHIVES=FAIL GNU-only tar options remain in release scripts" >&2
+  exit 1
+fi
+echo "PORTABLE_RELEASE_ARCHIVES=PASS"
+
 # The compiler and release gates must remain self-contained. The manually
 # triggered MiniJAM compatibility workflow is intentionally outside this set.
 for workflow in ci.yml release.yml; do
