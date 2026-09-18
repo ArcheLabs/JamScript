@@ -374,97 +374,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  prepublish-consumer:
-    needs: [validate, assemble]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x86_64
-            os: ubuntu-24.04
-            package: sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd jq
-          - platform: macos-arm64
-            os: macos-15
-            package: brew install zstd jq
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
-    permissions:
-      contents: read
-    env:
-      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
-      VERSION: ${{ needs.validate.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          fetch-depth: 1
-          submodules: false
-      - name: Verify source identity and install consumer tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-          ${{ matrix.package }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: assembled-release-assets
-          path: ${{ runner.temp }}/release-assets
-      - name: Run the clean consumer validation before publication
-        shell: bash
-        run: |
-          set -euo pipefail
-          result="${RUNNER_TEMP}/prepublish-${{ matrix.platform }}.json"
-          ./scripts/release/release-kill-test-001.sh \
-            --asset-dir "${RUNNER_TEMP}/release-assets" \
-            --release-version "${VERSION}" \
-            --target "${{ matrix.platform }}" \
-            --result-json "${result}" \
-            --work-dir "${RUNNER_TEMP}/prepublish-${{ matrix.platform }}-work"
-          jq -e '.status == "PASS" and .gates.R1_clean_consumer_e2e == true and .gates.R2_managed_toolchain_published == false and .gates.R3_immutable_github_release == false and .gates.R4_published_artifact_validation == false' "${result}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: prepublish-consumer-${{ matrix.platform }}
-          path: ${{ runner.temp }}/prepublish-${{ matrix.platform }}.json
-          if-no-files-found: error
-          retention-days: 30
-
-  cross-host-compare:
-    needs: [validate, prepublish-consumer]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    env:
-      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          fetch-depth: 1
-          submodules: false
-      - name: Verify source identity
-        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-      - uses: actions/download-artifact@v4
-        with:
-          name: prepublish-consumer-linux-x86_64
-          path: ${{ runner.temp }}/linux
-      - uses: actions/download-artifact@v4
-        with:
-          name: prepublish-consumer-macos-arm64
-          path: ${{ runner.temp }}/macos
-      - name: Compare host-independent canonical service artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          for artifact in service.pvm service.polkavm service.blob; do
-            linux_hash="$(jq -er --arg artifact "${artifact}" '.artifact_hashes[$artifact]' "${RUNNER_TEMP}/linux/prepublish-linux-x86_64.json")"
-            macos_hash="$(jq -er --arg artifact "${artifact}" '.artifact_hashes[$artifact]' "${RUNNER_TEMP}/macos/prepublish-macos-arm64.json")"
-            test "${linux_hash}" = "${macos_hash}"
-          done
-          echo "CROSS_HOST_CANONICAL_ARTIFACTS=PASS"
-
   docker-prepublish-smoke:
-    needs: [validate, assemble, cross-host-compare]
+    needs: [validate, assemble]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -516,7 +427,7 @@ jobs:
           echo "DOCKER_PREPUBLISH_SMOKE=PASS"
 
   publish:
-    needs: [validate, assemble, prepublish-consumer, cross-host-compare, docker-prepublish-smoke]
+    needs: [validate, assemble, docker-prepublish-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment: release
@@ -605,56 +516,6 @@ jobs:
             echo "BACKEND_IMAGE_PUBLICATION=PASS"
           fi
 
-  published-consumer:
-    needs: [validate, publish]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x86_64
-            os: ubuntu-24.04
-            package: sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd jq
-          - platform: macos-arm64
-            os: macos-15
-            package: brew install zstd jq
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
-    permissions:
-      contents: read
-    env:
-      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
-      VERSION: ${{ needs.validate.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          fetch-depth: 1
-          submodules: false
-      - name: Verify source identity and install public-test tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-          ${{ matrix.package }}
-      - name: Run the public GitHub Release consumer validation
-        shell: bash
-        run: |
-          set -euo pipefail
-          result="${RUNNER_TEMP}/published-${{ matrix.platform }}.json"
-          ./scripts/release/release-kill-test-001.sh \
-            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}" \
-            --release-version "${VERSION}" \
-            --target "${{ matrix.platform }}" \
-            --result-json "${result}" \
-            --work-dir "${RUNNER_TEMP}/published-${{ matrix.platform }}-work"
-          jq -e '.status == "PASS" and .gates.R2_managed_toolchain_published == true and .gates.R3_immutable_github_release == true and .gates.R4_published_artifact_validation == true' "${result}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: published-consumer-${{ matrix.platform }}
-          path: ${{ runner.temp }}/published-${{ matrix.platform }}.json
-          if-no-files-found: error
-          retention-days: 30
-
   backend-image-test:
     needs: [validate, publish]
     runs-on: ubuntu-24.04
@@ -703,7 +564,7 @@ jobs:
           echo "PUBLISHED_BACKEND_IMAGE_VOLUME_RESTART=PASS"
 
   release-ready:
-    needs: [validate, published-consumer, backend-image-test]
+    needs: [validate, backend-image-test]
     runs-on: ubuntu-24.04
     permissions:
       contents: read

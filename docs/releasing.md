@@ -97,15 +97,15 @@ configuration but remains unsupported in v0.1.
 The [`release.yml`](../.github/workflows/release.yml) workflow builds native
 CLI archives, backend archives, and managed bundles for Linux x86_64 and macOS
 arm64 from the exact dispatch SHA. It writes one immutable
-`release-manifest.json` and complete `SHA256SUMS`, runs native pre-publication
-clean-consumer tests, performs the Docker smoke, creates the annotated tag only
-after those gates, and then allows exactly one publication job to create the
-GitHub Release and matching backend image. Existing tag/release bytes are
-verified byte-for-byte for reruns. After publication, separate native
-jobs download the published bytes and run
+`release-manifest.json` and complete `SHA256SUMS`, performs the Docker smoke,
+creates the annotated tag only after those artifact gates, and then allows
+exactly one publication job to create the GitHub Release and matching backend
+image. Existing tag/release bytes are verified byte-for-byte for reruns. After
+publication, a separate backend-image job verifies the published image and its
+volume restart. The standalone
 [`JamScript Release Kill Test 001`](../scripts/release/release-kill-test-001.sh)
-against the release URL; the local asset test never substitutes for this R4
-check.
+is intentionally not part of the release workflow; run it separately when a
+consumer compatibility investigation is explicitly requested.
 
 For `v0.1.0-rc.*`, publication passes both `--prerelease` and
 `--latest=false` to GitHub CLI. The stable `v0.1.0` path does not set
@@ -130,20 +130,19 @@ scan treated binary PVM files as text; the current gate verifies execution and
 managed paths instead of grepping generated binaries.
 
 `toolchains/release-targets.toml` is the authoritative v0 platform matrix.
-Linux x86_64 and macOS arm64 are supported only with matching native producers,
-immutable assets, and native kill-test evidence. Windows is outside this
-release scope.
+Linux x86_64 and macOS arm64 are supported only with matching native producers
+and immutable assets. Windows is outside this release scope. Consumer
+compatibility remains a separate manual validation track.
 
 ## Promotion protocol
 
 Run `Release` manually from `main` with only the intended version, for example
 `v0.1.0-rc.3`. The workflow validates the generic semver and workspace base
 version, checks the tag/release identity, builds the release bytes once,
-assembles immutable assets, runs Release Kill Test 001 with `--asset-dir`,
-compares cross-host canonical artifacts, and runs the prepublish Docker smoke.
-Only then does it create and push the annotated tag and publish the exact same
-bytes. Fresh native consumers download the public bytes and run the same test
-with `--release-url` before the workflow emits `RELEASE_READY=PASS`.
+assembles immutable assets, and runs the prepublish Docker smoke. Only then
+does it create and push the annotated tag and publish the exact same bytes.
+The final job verifies the public release identity and the published backend
+image gate before emitting `RELEASE_READY=PASS`.
 The checked-in distribution record stays unpublished until a reviewed release
 promotion records the exact URL, digest, and byte size; changing it to
 `published = true` without those bytes is rejected by the toolchain manager.

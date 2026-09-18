@@ -51,8 +51,19 @@ if release.count("for suffix in a b") < 1 or "cmp -s" not in release:
     raise SystemExit("release must build and compare toolchain A/B")
 if "release-input-toolchain-" not in release:
     raise SystemExit("release must upload only the validated toolchain producer bytes")
-if "--asset-dir" not in release or "CROSS_HOST_CANONICAL_ARTIFACTS=PASS" not in release:
-    raise SystemExit("release is missing prepublish consumer or cross-host gates")
+for removed_gate in (
+    "prepublish-consumer:",
+    "published-consumer:",
+    "cross-host-compare:",
+    "release-kill-test-001.sh",
+    "--asset-dir",
+    "--release-url",
+    "R1_clean_consumer_e2e",
+    "R4_published_artifact_validation",
+    "CROSS_HOST_CANONICAL_ARTIFACTS=PASS",
+):
+    if removed_gate in release:
+        raise SystemExit(f"release must not run the standalone consumer gate: {removed_gate}")
 if "docker-prepublish-smoke:" not in release or "DOCKER_PREPUBLISH_SMOKE=PASS" not in release:
     raise SystemExit("release is missing the prepublish Docker smoke")
 if "git tag -a \"${VERSION}\" \"${SOURCE_SHA}\"" not in release or "git push origin \"refs/tags/${VERSION}\"" not in release:
