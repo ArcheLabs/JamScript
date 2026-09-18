@@ -164,7 +164,6 @@ jobs:
           set -a
           source "${RUNNER_TEMP}/host.env"
           set +a
-          export RUSTFLAGS="${RUSTFLAGS:-} ${JAMSCRIPT_HOST_RPATH_FLAG}"
           for suffix in a b; do
             out="${RUNNER_TEMP}/toolchain-${suffix}"
             mkdir -p "${out}"
@@ -283,7 +282,7 @@ jobs:
           set -a
           source "${RUNNER_TEMP}/host.env"
           set +a
-          export RUSTFLAGS="${RUSTFLAGS:-} ${JAMSCRIPT_HOST_RPATH_FLAG}"
+          host_rustflags="${RUSTFLAGS:-} ${JAMSCRIPT_HOST_RPATH_FLAG}"
           source_copy="${RUNNER_TEMP}/release-source"
           mkdir -p "${source_copy}"
           git archive --format=tar "${SOURCE_SHA}" | tar -xf - -C "${source_copy}"
@@ -303,8 +302,10 @@ jobs:
               --platform "${platform}" --url "${release_url}/${bundle##*/}" \
               --sha256 "${sha}" --size "${size}"
           done
-          ./tools/release/build-cli-archive.sh "${source_copy}" "${RUNNER_TEMP}/cli" "${VERSION}" "${{ matrix.platform }}"
-          JAMSCRIPT_BACKEND_TARGET="${{ matrix.platform }}" \
+          RUSTFLAGS="${host_rustflags}" \
+            ./tools/release/build-cli-archive.sh "${source_copy}" "${RUNNER_TEMP}/cli" "${VERSION}" "${{ matrix.platform }}"
+          RUSTFLAGS="${host_rustflags}" \
+            JAMSCRIPT_BACKEND_TARGET="${{ matrix.platform }}" \
             ./tools/release/build-backend-artifact.sh "${RUNNER_TEMP}/backend" "${VERSION}"
           producer="${RUNNER_TEMP}/native-assets"
           mkdir -p "${producer}"

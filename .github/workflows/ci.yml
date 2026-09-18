@@ -180,13 +180,14 @@ jobs:
           set -a
           source "${RUNNER_TEMP}/host.env"
           set +a
-          export RUSTFLAGS="${RUSTFLAGS:-} ${JAMSCRIPT_HOST_RPATH_FLAG}"
+          host_rustflags="${RUSTFLAGS:-} ${JAMSCRIPT_HOST_RPATH_FLAG}"
           ./scripts/release/check-release-source.sh --platform "${{ matrix.platform }}"
           version="v${{ github.run_number }}.0.0-rc.1"
-          cargo build --release --locked --bin jams
+          RUSTFLAGS="${host_rustflags}" cargo build --release --locked --bin jams
           test -x target/release/jams
           echo "JAMS_BUILD=PASS"
-          JAMSCRIPT_BACKEND_TARGET="${{ matrix.platform }}" \
+          RUSTFLAGS="${host_rustflags}" \
+            JAMSCRIPT_BACKEND_TARGET="${{ matrix.platform }}" \
             ./tools/release/build-backend-artifact.sh "${RUNNER_TEMP}/backend" "${version}"
           test -f "${RUNNER_TEMP}/backend/jamscript-service-backend-${version}-${{ matrix.platform }}.tar.gz"
           echo "BACKEND_BUILD=PASS"

@@ -6,6 +6,10 @@ WORKFLOW_FILES=(
   "${ROOT}/.github/workflows/ci.yml"
   "${ROOT}/.github/workflows/release.yml"
 )
+CLOSURE_FILES=(
+  "${ROOT}/tools/release/toolchain/verify-execution-closure.sh"
+  "${ROOT}/tools/release/toolchain/verify-execution-closure-macos.sh"
+)
 
 setup_file_count=0
 for file in "${ROOT}"/tools/release/setup-host-build-env-*.sh; do
@@ -17,6 +21,11 @@ for file in "${ROOT}"/tools/release/setup-host-build-env-*.sh; do
   fi
 done
 test "${setup_file_count}" -gt 0
+
+for file in "${CLOSURE_FILES[@]}"; do
+  test -f "${file}"
+  grep -Eq 'unset .*RUSTFLAGS' "${file}"
+done
 
 for file in "${WORKFLOW_FILES[@]}"; do
   test -f "${file}"

@@ -36,6 +36,8 @@ export CC="${BUNDLE_ROOT}/bin/clang"
 export CXX="${BUNDLE_ROOT}/bin/clang"
 export AR="${BUNDLE_ROOT}/bin/ar"
 export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${BUNDLE_ROOT}/bin/jamscript-host-linker"
+# Host-only rpath flags must never reach the PolkaVM guest linker.
+unset RUSTFLAGS DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH
 run_gate() {
   local name="$1"
   shift
