@@ -19,12 +19,13 @@ green in ordinary CI before starting a release.
 ## Release validation
 
 Run `Release JamScript` manually from `main` with the intended version, for
-example `v0.1.0-rc.3`. The workflow has only four jobs: validate, build one
+example `v0.1.0-rc.4`. The workflow has only four jobs: validate, build one
 toolchain archive per platform, build one CLI archive per platform, and publish
-the exact bytes. It performs only cheap archive-structure checks before
-publication. No consumer build, execution closure, determinism comparison,
-Backend binary, Docker image, GHCR push, or backend health check is part of
-this workflow.
+the exact bytes. Validation requires an already successful push-triggered CI
+run for the exact source SHA; it does not rerun those tests. It performs only
+cheap archive-structure checks before publication. No consumer build,
+execution closure, determinism comparison, Backend binary, Docker image, GHCR
+push, or backend health check is part of this workflow.
 
 ## Freeze and publish
 

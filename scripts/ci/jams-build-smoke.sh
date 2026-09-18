@@ -49,7 +49,8 @@ if [[ "$(uname -s)" == Darwin ]]; then
 fi
 
 export JAMSCRIPT_DEV_TOOLCHAIN=1
-export SCRIPTC_CC="${JAMSCRIPT_CLANG:?JAMSCRIPT_CLANG must be set by the canonical host setup}"
+export SCRIPTC_CC=clang
+test -x "${JAMSCRIPT_CLANG:?JAMSCRIPT_CLANG must be set by the canonical host setup}"
 export PATH="$(dirname -- "${JAMSCRIPT_CLANG}"):${PATH}"
 "${JAMS}" build "${FIXTURE}" --offline --output "${OUTPUT}"
 

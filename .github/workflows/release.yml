@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release-${{ inputs.version }}
@@ -64,6 +65,26 @@ jobs:
             echo "a GitHub Release already exists for ${VERSION}; publish is immutable and will not replace it" >&2
             exit 1
           fi
+          ci_runs="$(gh run list \
+            --workflow ci.yml \
+            --commit "${source_sha}" \
+            --event push \
+            --limit 20 \
+            --json databaseId,status,conclusion,headSha,event,createdAt)"
+          if ! jq -e --arg sha "${source_sha}" \
+            'any(.[]; .headSha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")' \
+            <<<"${ci_runs}" >/dev/null; then
+            echo "no successful CI push run exists for ${source_sha}" >&2
+            jq -r '.[] | [.databaseId, .status, (.conclusion // ""), .event, .headSha, .createdAt] | @tsv' \
+              <<<"${ci_runs}" >&2
+            echo "SOURCE_CI_STATUS=FAIL" >&2
+            exit 1
+          fi
+          ci_run_id="$(jq -r --arg sha "${source_sha}" \
+            '.[] | select(.headSha == $sha and .event == "push" and .status == "completed" and .conclusion == "success") | .databaseId' \
+            <<<"${ci_runs}" | head -n 1)"
+          echo "SOURCE_CI_STATUS=PASS"
+          echo "SOURCE_CI_RUN_ID=${ci_run_id}"
           {
             echo "source_sha=${source_sha}"
             echo "version=${VERSION}"

@@ -61,6 +61,10 @@ for forbidden in ("build-cli-archive.sh", "release-input-toolchain-", "jamscript
 for required in ("native-producer-smoke:", "jams-build-smoke:", "scripts/ci/jams-build-smoke.sh"):
     if required not in ci:
         raise SystemExit(f"ci.yml is missing fast correctness coverage: {required}")
+if "export SCRIPTC_CC=clang" not in smoke:
+    raise SystemExit("jams-build-smoke must select ScriptC's clang driver name")
+if 'SCRIPTC_CC="${JAMSCRIPT_CLANG}"' in smoke:
+    raise SystemExit("jams-build-smoke must not pass a clang path as SCRIPTC_CC")
 for marker in (
     "LINUX_JAMS_BUILD_SMOKE=PASS",
     "MACOS_APPLE_SDK_DISCOVERY=PASS",
