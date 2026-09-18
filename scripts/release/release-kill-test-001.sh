@@ -97,11 +97,11 @@ else
 fi
 echo "K0_BOOTSTRAP=PASS"
 
-target_json="$(jq -cer --arg target "${target}" '.targets[] | select(.triple == $target and .supported == true)' "${bootstrap}/release-manifest.json")"
+target_json="$(jq -cer --arg target "${target}" '.targets[] | select(.target == $target and .supported == true)' "${bootstrap}/release-manifest.json")"
 cli_asset="$(jq -er '.cli.name' <<<"${target_json}")"
 toolchain_asset="$(jq -er '.toolchain.name' <<<"${target_json}")"
 toolchain_manifest_asset="$(jq -er '.toolchainManifest.name' <<<"${target_json}")"
-toolchain_metadata_asset="$(jq -er '.toolchainMetadata.name' <<<"${target_json}")"
+toolchain_metadata_asset="$(jq -er '.bundleMetadata.name' <<<"${target_json}")"
 for required_asset in "${cli_asset}" "${toolchain_asset}" "${toolchain_manifest_asset}" "${toolchain_metadata_asset}"; do
   if [[ -n "${release_url}" ]]; then
     curl --fail --location --retry 3 --silent --show-error "${release_url}/${required_asset}" -o "${bootstrap}/${required_asset}"
@@ -112,25 +112,25 @@ done
 
 # SHA256SUMS is a release-asset index. Validate every acquired target asset;
 # entries for the other native target are expected in a multi-platform release.
-declare -A checksum_seen=()
+checksum_seen=""
 while read -r checksum filename; do
   [[ -n "${checksum:-}" && -n "${filename:-}" ]] || continue
   [[ "${checksum}" =~ ^[[:xdigit:]]{64}$ ]] || { echo "invalid SHA256SUMS entry" >&2; exit 1; }
   filename="${filename#\*}"
   [[ "${filename}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "unsafe SHA256SUMS filename: ${filename}" >&2; exit 1; }
-  checksum_seen["${filename}"]=1
+  checksum_seen+="${filename}\n"
   if [[ -f "${bootstrap}/${filename}" ]]; then
     test "$(sha256_file "${bootstrap}/${filename}")" = "${checksum}"
   fi
 done < "${bootstrap}/SHA256SUMS"
 for required_asset in release-manifest.json "${cli_asset}" "${toolchain_asset}" "${toolchain_manifest_asset}" "${toolchain_metadata_asset}"; do
-  [[ "${checksum_seen[${required_asset}]:-}" == 1 ]] || {
+  grep -Fqx "${required_asset}" <(printf '%b' "${checksum_seen}") || {
     echo "SHA256SUMS is missing acquired release asset: ${required_asset}" >&2
     exit 1
   }
 done
 test "$(jq -er '.releaseVersion' "${bootstrap}/release-manifest.json")" = "${release_version}"
-test "$(jq -er --arg target "${target}" '.targets[] | select(.triple == $target) | .triple' "${bootstrap}/release-manifest.json")" = "${target}"
+test "$(jq -er --arg target "${target}" '.targets[] | select(.target == $target) | .target' "${bootstrap}/release-manifest.json")" = "${target}"
 manifest_cli_sha="$(jq -er '.cli.sha256' <<<"${target_json}")"
 manifest_toolchain_sha="$(jq -er '.toolchain.sha256' <<<"${target_json}")"
 test "$(sha256_file "${bootstrap}/${cli_asset}")" = "${manifest_cli_sha}"
@@ -154,7 +154,7 @@ import { action, publicAction, u64 } from "jam";
 export const hello = action({
   auth: publicAction(),
   input: { value: u64 },
-  execute(_ctx, input) { return input.value + 1; },
+  execute(_ctx, input) { return input.value + 1n; },
 });
 EOF
   cat >"${fixture_dir}/jamscript.toml" <<'EOF'
@@ -162,7 +162,7 @@ EOF
 name = "release-consumer-hello"
 version = "0.1.0"
 entry = "hello.ts"
-language = "0.2"
+language = "0.3"
 
 [compiler]
 backend = "scriptc"

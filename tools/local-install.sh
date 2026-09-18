@@ -52,16 +52,14 @@ export CC="${CC_BIN}"
 export CXX="${CXX_BIN}"
 CARGO_TARGET_DIR="${BUILD_ROOT}/cargo-target"
 
-printf 'Building release CLI and backend...\n'
+printf 'Building release CLI...\n'
 (cd "${ROOT}" && \
   CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" \
   cargo +"${RUST_TOOLCHAIN}" build --release --locked \
-    --bin jams --bin jamscript-service-backend)
+    --bin jams)
 
 CLI_BINARY="${CARGO_TARGET_DIR}/release/jams"
-BACKEND_BINARY="${CARGO_TARGET_DIR}/release/jamscript-service-backend"
 [[ -x "${CLI_BINARY}" ]] || fail "release CLI was not built"
-[[ -x "${BACKEND_BINARY}" ]] || fail "release backend was not built"
 
 printf 'Building managed toolchain bundle...\n'
 TOOLCHAIN_OUT="${BUILD_ROOT}/toolchain"
@@ -83,15 +81,12 @@ TOOLCHAIN_ARCHIVE="${TOOLCHAIN_OUT}/jamscript-toolchain-scriptc-m2-v1-linux-x86_
 mkdir -p "${LOCAL_BIN}"
 LOCAL_BIN="$(cd "${LOCAL_BIN}" && pwd -P)"
 NEW_CLI="${LOCAL_BIN}/.jams.new.$$"
-NEW_BACKEND="${LOCAL_BIN}/.jamscript-service-backend.new.$$"
 cleanup_install() {
-  rm -f -- "${NEW_CLI}" "${NEW_BACKEND}"
+  rm -f -- "${NEW_CLI}"
 }
 trap 'cleanup_install; rm -rf -- "${BUILD_ROOT}"' EXIT
 install -m 0755 "${CLI_BINARY}" "${NEW_CLI}"
-install -m 0755 "${BACKEND_BINARY}" "${NEW_BACKEND}"
 mv -f -- "${NEW_CLI}" "${LOCAL_BIN}/jams"
-mv -f -- "${NEW_BACKEND}" "${LOCAL_BIN}/jamscript-service-backend"
 
 printf 'Installing and verifying managed toolchain...\n'
 unset JAMSCRIPT_DEV_TOOLCHAIN JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING \
@@ -99,8 +94,8 @@ unset JAMSCRIPT_DEV_TOOLCHAIN JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING \
 PATH="${LOCAL_BIN}:${PATH}" "${LOCAL_BIN}/jams" toolchain install --archive "${TOOLCHAIN_ARCHIVE}"
 PATH="${LOCAL_BIN}:${PATH}" "${LOCAL_BIN}/jams" toolchain verify
 
-printf '\nJamScript local installation complete.\n\nCLI:\n  %s\nBackend:\n  %s\nManaged toolchain:\n  installed and verified\n\nTry:\n  jams --help\n  jams new hello\n  jams build\n' \
-  "${LOCAL_BIN}/jams" "${LOCAL_BIN}/jamscript-service-backend"
+printf '\nJamScript local installation complete.\n\nCLI:\n  %s\nManaged toolchain:\n  installed and verified\n\nTry:\n  jams --help\n  jams new hello\n  jams build\n' \
+  "${LOCAL_BIN}/jams"
 if [[ "$(command -v jams 2>/dev/null || true)" != "${LOCAL_BIN}/jams" ]]; then
   printf '\nFor this shell:\n  export PATH="%s:$PATH"\n' "${LOCAL_BIN}"
 fi

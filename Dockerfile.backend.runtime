@@ -1,7 +1,7 @@
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl libgcc-s1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home jamscript
 

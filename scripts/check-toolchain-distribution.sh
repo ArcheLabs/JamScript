@@ -7,6 +7,7 @@ python3 tools/release/toolchain/test-deterministic-archive.py
 python3 scripts/check-ci-trigger-policy.py
 python3 scripts/check-release-pipeline-policy.py
 python3 tools/release/test-write-release-manifest.py
+python3 tools/release/test-write-backend-manifest.py
 python3 tools/release/toolchain/test-release-source-check.py
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -29,7 +30,7 @@ fi
 echo "PORTABLE_RELEASE_METADATA=PASS"
 
 # The compiler and release gates must remain self-contained. The manually
-# triggered MiniJAM compatibility workflow is intentionally outside this set.
+# triggered MiniJAM and Backend workflows are intentionally outside this set.
 for workflow in ci.yml release.yml; do
   if rg -n -i 'minijam-client|jambda|JAMSCRIPT_MINIJAM_SDK' ".github/workflows/${workflow}"; then
     echo "CORE_WORKFLOW_DEPENDENCY=FAIL (${workflow})" >&2

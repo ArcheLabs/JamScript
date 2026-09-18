@@ -93,7 +93,8 @@ The native producer flow is:
 4. Run `verify-bundle.sh`, the managed execution-closure probe, and the
    compiler-builtins regression.
 5. Build two independent archives and compare their bytes.
-6. Pass both native clean-consumer kill tests before publication.
+6. Pass both native clean-consumer kill tests before publication. Backend
+   artifacts are produced and released by the independent Backend workflow.
 
 The release workflow is
 [`release.yml`](../.github/workflows/release.yml). It has separate native
@@ -120,12 +121,13 @@ The bundle contains only the JamScript-owned JAM target SDK under
 
 ## Published bytes and consumer validation
 
-The manual release workflow
-[`release.yml`](../.github/workflows/release.yml) builds both CLI archives,
-backend archives, and both managed bundles from the exact dispatch commit. It
-assembles one `release-manifest.json` with two supported target entries and an
-explicit unsupported Windows entry, plus target-specific toolchain manifests,
-metadata, backend hashes, and a complete `SHA256SUMS` index.
+The manual JamScript release workflow
+[`release.yml`](../.github/workflows/release.yml) builds both CLI archives and
+both managed bundles from the exact dispatch commit. It assembles one
+`release-manifest.json` with two supported target entries and an explicit
+unsupported Windows entry, plus target-specific toolchain manifests, metadata,
+and a complete `SHA256SUMS` index. Backend archives, Docker, and GHCR are owned
+by [`backend-release.yml`](../.github/workflows/backend-release.yml).
 
 The workflow has one publication job. Before it can run, native Linux and
 native macOS clean-consumer jobs download the exact assembled bytes and run

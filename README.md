@@ -45,9 +45,9 @@ local product once from this repository:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-This installs both `jams` and `jamscript-service-backend`, imports the managed
-toolchain into the normal immutable cache, and verifies it. Consumer projects
-then use the installed `jams` command without compiling this repository.
+This installs `jams`, imports the managed toolchain into the normal immutable
+cache, and verifies it. The backend is released independently; consumer
+projects use the installed `jams` command without compiling this repository.
 
 ## Manual installation
 
@@ -210,6 +210,8 @@ docker run --rm \
 ```
 
 `docker-compose.backend.yml` provides the equivalent persistent-volume setup.
+Backend images are published by the independent `Release Backend` workflow;
+its GitHub tag is `backend-v<version>` while the image tag is `v<version>`.
 The frontend trusts the selected backend for convenience data; consensus,
 refine witnesses, and accumulate root revalidation remain chain-authoritative.
 

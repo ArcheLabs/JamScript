@@ -6,9 +6,9 @@ RUN apt-get update \
 COPY . .
 RUN cargo build --locked --release --bin jamscript-service-backend
 
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl libgcc-s1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home jamscript
 COPY --from=build /src/target/release/jamscript-service-backend /usr/local/bin/jamscript-service-backend

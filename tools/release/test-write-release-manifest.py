@@ -35,10 +35,8 @@ with tempfile.TemporaryDirectory(prefix="jamscript-release-manifest-test-") as d
         bundle = root / f"jamscript-toolchain-scriptc-m2-v1-{platform}.tar.zst"
         manifest = root / f"toolchain-manifest-{platform}.json"
         metadata = root / f"bundle-metadata-{platform}.json"
-        backend = root / f"jamscript-service-backend-v0.1.0-rc.2-{platform}.tar.gz"
         cli.write_bytes(platform.encode())
         bundle.write_bytes(platform.encode())
-        backend.write_bytes(platform.encode())
         write_json(
             manifest,
             {
@@ -73,8 +71,6 @@ with tempfile.TemporaryDirectory(prefix="jamscript-release-manifest-test-") as d
                 str(manifest),
                 "--bundle-metadata",
                 str(metadata),
-                "--backend",
-                str(backend),
             ]
         )
     args.extend(["--unsupported-target", "windows-x86_64"])
@@ -83,17 +79,19 @@ with tempfile.TemporaryDirectory(prefix="jamscript-release-manifest-test-") as d
     assert release["releaseVersion"] == "v0.1.0-rc.2"
     assert release["sourceCommit"] == SOURCE_SHA
     assert release["provenance"]["workflow"] == "release.yml"
-    assert [target["triple"] for target in release["targets"]] == [
+    assert "backend" not in release
+    assert [target["target"] for target in release["targets"]] == [
         "linux-x86_64",
         "macos-arm64",
         "windows-x86_64",
     ]
     assert all(target["supported"] for target in release["targets"][:2])
     assert release["targets"][2]["supported"] is False
+    assert all("backend" not in target for target in release["targets"])
+    assert all("bundleMetadata" in target for target in release["targets"][:2])
+    assert all("toolchainMetadata" not in target for target in release["targets"])
     for target in release["targets"][:2]:
         asset_path = root / target["cli"]["name"]
         assert target["cli"]["sha256"] == hashlib.sha256(asset_path.read_bytes()).hexdigest()
-        backend_path = root / target["backend"]["name"]
-        assert target["backend"]["sha256"] == hashlib.sha256(backend_path.read_bytes()).hexdigest()
 
 print("RELEASE_MANIFEST_TESTS=PASS")

@@ -63,17 +63,16 @@ make_archive() {
   write_fixture_cli
   printf 'fixture license\n' > "${fixture_dir}/LICENSE"
   printf 'fixture readme\n' > "${fixture_dir}/README.md"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "${fixture_dir}/jamscript-service-backend"
-  chmod 0755 "${fixture_dir}/jamscript-service-backend"
+  if [[ "$mode" == 'with-backend' ]]; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > "${fixture_dir}/jamscript-service-backend"
+    chmod 0755 "${fixture_dir}/jamscript-service-backend"
+  fi
   if [[ "$mode" == 'legacy-jamscript' ]]; then
     printf '#!/usr/bin/env bash\nexit 0\n' > "${fixture_dir}/jamscript"
     chmod 0755 "${fixture_dir}/jamscript"
   fi
   if [[ "$mode" == 'missing-jams' ]]; then
     rm -f "${fixture_dir}/jams"
-  fi
-  if [[ "$mode" == 'missing-backend' ]]; then
-    rm -f "${fixture_dir}/jamscript-service-backend"
   fi
   (cd "$fixture_dir" && tar -czf "${asset_dir}/${asset}" .)
   case "$checksum_mode" in
@@ -119,9 +118,7 @@ make_archive
 : > "$log_file"
 run_install > "${tmp}/success.out"
 test -x "${bin_dir}/jams"
-test -x "${bin_dir}/jamscript-service-backend"
 assert_log_contains 'toolchain install'
-grep -Fq 'Backend:' "${tmp}/success.out"
 grep -Fq 'installed and verified' "${tmp}/success.out"
 ! grep -Fq 'readiness' "${tmp}/success.out"
 if PATH="$test_path" command -v jams >/dev/null 2>&1; then
@@ -177,8 +174,8 @@ grep -qx 'old CLI' "${bin_dir}/jams"
 make_archive missing-jams
 run_expect_failure run_install
 
-# I8b: archive structure requires the packaged backend.
-make_archive missing-backend
+# I8b: the CLI archive must not package the backend.
+make_archive with-backend
 run_expect_failure run_install
 
 # I9: legacy jamscript is forbidden.

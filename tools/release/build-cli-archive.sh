@@ -30,13 +30,17 @@ cp -L "${SOURCE_ROOT}/README.md" "${stage}/README.md"
 # stock BSD tar can unpack it without a third-party zstd dependency.
 (cd "${stage}" && tar -czf "${OUT}/${archive}" .)
 archive_entries="$(tar -tzf "${OUT}/${archive}")"
-printf '%s\n' "${archive_entries}" | sed 's#^\./##' | grep -qx 'jams'
+normalized_entries="$(printf '%s\n' "${archive_entries}" | sed 's#^\./##' | sed '/^$/d')"
+printf '%s\n' "${normalized_entries}" | grep -qx 'jams'
+printf '%s\n' "${normalized_entries}" | grep -qx 'LICENSE'
+printf '%s\n' "${normalized_entries}" | grep -qx 'README.md'
+test "$(printf '%s\n' "${normalized_entries}" | wc -l | tr -d ' ')" -eq 3
 if printf '%s\n' "${archive_entries}" | sed 's#^\./##' | grep -qx 'jamscript'; then
   echo "legacy jamscript executable unexpectedly present" >&2
   exit 1
 fi
 if printf '%s\n' "${archive_entries}" | sed 's#^\./##' | grep -Eq '(^|/)jamscript-service-backend$'; then
-  echo "backend executable must be published by build-backend-artifact.sh, not the CLI archive" >&2
+  echo "backend executable must not be included in the JamScript CLI archive" >&2
   exit 1
 fi
 if command -v sha256sum >/dev/null 2>&1; then

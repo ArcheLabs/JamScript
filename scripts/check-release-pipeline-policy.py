@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static invariants for the single manual release producer."""
+"""Static invariants for the JamScript-only manual release producer."""
 
 import re
 from pathlib import Path
@@ -42,38 +42,47 @@ for script in (
     "setup-host-build-env-linux.sh",
     "setup-host-build-env-macos.sh",
     "build-cli-archive.sh",
-    "build-backend-artifact.sh",
     "verify-bundle.sh",
     "make-candidate-manifest.py",
+    "write-release-manifest.py",
 ):
     require(script, f"producer script {script}")
 if release.count("for suffix in a b") < 1 or "cmp -s" not in release:
     raise SystemExit("release must build and compare toolchain A/B")
 if "release-input-toolchain-" not in release:
     raise SystemExit("release must upload only the validated toolchain producer bytes")
-for removed_gate in (
+for required_gate in (
     "prepublish-consumer:",
     "published-consumer:",
     "cross-host-compare:",
     "release-kill-test-001.sh",
     "--asset-dir",
     "--release-url",
-    "R1_clean_consumer_e2e",
-    "R4_published_artifact_validation",
     "CROSS_HOST_CANONICAL_ARTIFACTS=PASS",
+    "JAMSCRIPT_RELEASE_READY=PASS",
 ):
-    if removed_gate in release:
-        raise SystemExit(f"release must not run the standalone consumer gate: {removed_gate}")
-if "docker-prepublish-smoke:" not in release or "DOCKER_PREPUBLISH_SMOKE=PASS" not in release:
-    raise SystemExit("release is missing the prepublish Docker smoke")
+    if required_gate not in release:
+        raise SystemExit(f"release is missing JamScript consumer gate: {required_gate}")
+for forbidden in (
+    "build-backend-artifact.sh",
+    "jamscript-service-backend",
+    "Dockerfile.backend",
+    "docker-prepublish",
+    "backend-image-test",
+    "ghcr.io/archelabs/jamscript-backend",
+    "packages: write",
+    "--backend",
+):
+    if forbidden in release:
+        raise SystemExit(f"JamScript release must not own backend lifecycle: {forbidden}")
+if "write-release-manifest.py" not in release:
+    raise SystemExit("JamScript release must write its CLI/toolchain manifest")
 if "git tag -a \"${VERSION}\" \"${SOURCE_SHA}\"" not in release or "git push origin \"refs/tags/${VERSION}\"" not in release:
     raise SystemExit("release must create and push the exact source tag after prepublish gates")
 if "environment: release" not in release:
     raise SystemExit("publish must use the release environment")
-if "contents: write" not in release or "packages: write" not in release:
+if "contents: write" not in release or "packages: write" in release:
     raise SystemExit("publish must own the write permissions")
-if "RELEASE_READY=PASS" not in release:
-    raise SystemExit("release is missing RELEASE_READY=PASS")
 if "git tag" in maintenance or "git push" in maintenance or "contents: write" in maintenance:
     raise SystemExit("toolchain maintenance must not mutate repository refs")
 if "MACOS_LLVM_NATIVE_MEASUREMENT=PASS" not in maintenance:

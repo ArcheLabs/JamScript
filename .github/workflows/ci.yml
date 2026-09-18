@@ -189,6 +189,6 @@ jobs:
           RUSTFLAGS="${host_rustflags}" \
             JAMSCRIPT_BACKEND_TARGET="${{ matrix.platform }}" \
             ./tools/release/build-backend-artifact.sh "${RUNNER_TEMP}/backend" "${version}"
-          test -f "${RUNNER_TEMP}/backend/jamscript-service-backend-${version}-${{ matrix.platform }}.tar.gz"
+          test -f "${RUNNER_TEMP}/backend/jamscript-backend-${version}-${{ matrix.platform }}.tar.gz"
           echo "BACKEND_BUILD=PASS"
           echo "RELEASE_PRODUCER_SMOKE=${{ matrix.platform }}:PASS"

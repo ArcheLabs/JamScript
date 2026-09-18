@@ -25,8 +25,7 @@ curl -fsSL \
 ```
 
 The installer detects the host platform, downloads the matching gzip CLI
-archive, verifies its SHA-256 entry, installs `jams` and its sibling backend
-atomically, then runs:
+archive, verifies its SHA-256 entry, installs `jams` atomically, then runs:
 
 ```bash
 jams toolchain install
@@ -51,8 +50,10 @@ local product once from the JamScript repository:
 ./tools/local-install.sh
 ```
 
-The producer utility installs the CLI, sibling service backend, and verified
-managed toolchain. Consumer projects do not compile the JamScript repository.
+The producer utility installs the CLI and verified managed toolchain. The
+backend is an independently released deployable service and is not installed
+by the JamScript CLI installer. Consumer projects do not compile the JamScript
+repository.
 
 ## Manual installation
 

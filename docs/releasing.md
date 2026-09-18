@@ -92,20 +92,18 @@ deployment record. Wallet calls remain in the TypeScript/browser client so the w
 standard `signRaw` request and private keys never enter the CLI. JAM deployment is recognized in
 configuration but remains unsupported in v0.1.
 
-## Release gates
+## JamScript release gates
 
 The [`release.yml`](../.github/workflows/release.yml) workflow builds native
-CLI archives, backend archives, and managed bundles for Linux x86_64 and macOS
-arm64 from the exact dispatch SHA. It writes one immutable
-`release-manifest.json` and complete `SHA256SUMS`, performs the Docker smoke,
-creates the annotated tag only after those artifact gates, and then allows
-exactly one publication job to create the GitHub Release and matching backend
-image. Existing tag/release bytes are verified byte-for-byte for reruns. After
-publication, a separate backend-image job verifies the published image and its
-volume restart. The standalone
+CLI archives and managed bundles for Linux x86_64 and macOS
+arm64 from the exact dispatch SHA. It writes one immutable JamScript-only
+`release-manifest.json` and complete `SHA256SUMS`, runs native clean-consumer
+validation against the assembled bytes, creates the annotated tag only after
+those gates, and then allows exactly one publication job to create the GitHub
+Release. Existing tag/release bytes are verified byte-for-byte for reruns. The
+standalone
 [`JamScript Release Kill Test 001`](../scripts/release/release-kill-test-001.sh)
-is intentionally not part of the release workflow; run it separately when a
-consumer compatibility investigation is explicitly requested.
+is the native consumer gate used before and after publication.
 
 For `v0.1.0-rc.*`, publication passes both `--prerelease` and
 `--latest=false` to GitHub CLI. The stable `v0.1.0` path does not set
@@ -130,19 +128,29 @@ scan treated binary PVM files as text; the current gate verifies execution and
 managed paths instead of grepping generated binaries.
 
 `toolchains/release-targets.toml` is the authoritative v0 platform matrix.
-Linux x86_64 and macOS arm64 are supported only with matching native producers
-and immutable assets. Windows is outside this release scope. Consumer
-compatibility remains a separate manual validation track.
+Linux x86_64 and macOS arm64 are supported only with matching native producers,
+immutable assets, and native consumer evidence. Windows is outside this
+release scope.
 
 ## Promotion protocol
 
-Run `Release` manually from `main` with only the intended version, for example
+Run `Release JamScript` manually from `main` with only the intended version, for example
 `v0.1.0-rc.3`. The workflow validates the generic semver and workspace base
 version, checks the tag/release identity, builds the release bytes once,
-assembles immutable assets, and runs the prepublish Docker smoke. Only then
-does it create and push the annotated tag and publish the exact same bytes.
-The final job verifies the public release identity and the published backend
-image gate before emitting `RELEASE_READY=PASS`.
+assembles immutable CLI/toolchain assets, runs native prepublish consumers and
+cross-host artifact comparison, and only then creates and pushes the annotated
+tag and publishes the exact same bytes. Native consumers repeat the validation
+against the public release before emitting `JAMSCRIPT_RELEASE_READY=PASS`.
+
+## Independent Backend release
+
+The backend is a separately versioned deployable service. Run
+`Release Backend` with a tag such as `backend-v0.1.0-rc.1`. Its workflow builds
+only the native backend artifacts, creates `backend-manifest.json`, performs
+native and Docker health/readiness plus volume-restart checks, publishes the
+backend GitHub Release and GHCR image, and emits `BACKEND_RELEASE_READY=PASS`.
+Backend Docker failures therefore do not block a JamScript language/toolchain
+release.
 The checked-in distribution record stays unpublished until a reviewed release
 promotion records the exact URL, digest, and byte size; changing it to
 `published = true` without those bytes is rejected by the toolchain manager.
