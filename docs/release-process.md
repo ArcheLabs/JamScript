@@ -21,15 +21,17 @@ green in ordinary CI before starting a release.
 Run `Release JamScript` manually from `main` with the intended version, for
 example `v0.1.0-rc.4`. The workflow has only four jobs: validate, build one
 toolchain archive per platform, build one CLI archive per platform, and publish
-the exact bytes. Validation requires an already successful push-triggered CI
-run for the exact source SHA; it does not rerun those tests. It performs only
-cheap archive-structure checks before publication. No consumer build,
-execution closure, determinism comparison, Backend binary, Docker image, GHCR
-push, or backend health check is part of this workflow.
+the exact bytes. Validation requires already successful push-triggered CI and
+canonical MiniJAM consumer E2E runs for the exact source SHA; it does not rerun
+those tests. It performs only cheap archive-structure checks before
+publication. No consumer build, execution closure, determinism comparison,
+Backend binary, Docker image build, GHCR push, or backend health check is part
+of this workflow.
 
 ## Freeze and publish
 
-After the producer jobs pass, `release.yml` creates one annotated immutable tag
+After normal CI and the manual `minijam-network-e2e.yml` run both pass for the
+exact candidate SHA, `release.yml` creates one annotated immutable tag
 on the validated commit and publishes the exact producer bytes. The public
 release contains only two CLI archives, two managed toolchain archives, and
 `SHA256SUMS`. Existing GitHub Releases are rejected rather than replaced.

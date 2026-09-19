@@ -14,7 +14,7 @@ default_network = "local"
 
 [networks.local]
 kind = "minijam"
-deployment_rpc = "http://127.0.0.1:8090"
+deployment_rpc = "http://127.0.0.1:8080"
 node_rpc = "http://127.0.0.1:9944"
 genesis_hash = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -138,9 +138,10 @@ DEPLOYMENT_RECORD_WRITE_FAILED
 ## Real MiniJAM E2E
 
 `./scripts/minijam-network-e2e.sh` is the canonical cross-process check. It
-uses a pinned sibling MiniJAM checkout and separate Work and Provider paths.
-It builds before deployment, obtains the local genesis hash, appends a local
-named network to the temporary project, calls `jams deploy --network local`,
-and then runs the client Work/Provider verification. It does not use the
-Playground lifecycle API and does not require MiniJAM or Docker for ordinary
-JamScript builds.
+pulls the exact aggregate MiniJAM image pinned in `toolchains/minijam.lock` and
+runs it with `--dev`; the image supplies the canonical local Node, Formal RPC
+on `8080`, and one Worker. The script obtains the local genesis hash, appends a
+local named network to the temporary project, calls `jams deploy --network
+local`, exercises single and batched actions, and verifies state after a
+backend restart. It does not use the Playground lifecycle API, a MiniJAM
+checkout, Jambda, or a custom MiniJAM Compose file.

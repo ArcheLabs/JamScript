@@ -85,6 +85,26 @@ jobs:
             <<<"${ci_runs}" | head -n 1)"
           echo "SOURCE_CI_STATUS=PASS"
           echo "SOURCE_CI_RUN_ID=${ci_run_id}"
+          consumer_runs="$(gh run list \
+            --workflow minijam-network-e2e.yml \
+            --commit "${source_sha}" \
+            --event workflow_dispatch \
+            --limit 20 \
+            --json databaseId,status,conclusion,headSha,event,createdAt)"
+          if ! jq -e --arg sha "${source_sha}" \
+            'any(.[]; .headSha == $sha and .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success")' \
+            <<<"${consumer_runs}" >/dev/null; then
+            echo "no successful canonical MiniJAM consumer E2E exists for ${source_sha}" >&2
+            jq -r '.[] | [.databaseId, .status, (.conclusion // ""), .event, .headSha, .createdAt] | @tsv' \
+              <<<"${consumer_runs}" >&2
+            echo "JAMSCRIPT_CANONICAL_MINIJAM_E2E=FAIL" >&2
+            exit 1
+          fi
+          consumer_run_id="$(jq -r --arg sha "${source_sha}" \
+            '.[] | select(.headSha == $sha and .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success") | .databaseId' \
+            <<<"${consumer_runs}" | head -n 1)"
+          echo "JAMSCRIPT_CANONICAL_MINIJAM_E2E=PASS"
+          echo "JAMSCRIPT_CANONICAL_MINIJAM_E2E_RUN_ID=${consumer_run_id}"
           {
             echo "source_sha=${source_sha}"
             echo "version=${VERSION}"

@@ -166,7 +166,7 @@ function nonceAwareTransport({ failFirstSubmission = false, submissionDelayMs = 
   };
 }
 
-test("client keeps a per-signer lane while different signers submit in parallel", async () => {
+test("client reserves per-signer nonces while all signers submit in parallel", async () => {
   const transport = nonceAwareTransport({ submissionDelayMs: 25 });
   const client = new JamScriptClient(deployment, transport);
   const alice = {
@@ -183,14 +183,17 @@ test("client keeps a per-signer lane while different signers submit in parallel"
     client.submitAction("submit", { score: 2n }, bob),
   ]);
   assert.equal(transport.submissions.length, 3);
-  assert.equal(transport.maxActiveSubmissions, 2);
+  assert.equal(transport.maxActiveSubmissions, 3);
   const nonces = transport.submissions.map((request) =>
     decodeSignedActionV1(Uint8Array.from(Buffer.from(request.payloadBase64, "base64"))));
   assert.deepEqual(
-    nonces.filter((action) => action.publicKey[0] === 1).map((action) => action.nonce),
+    nonces
+      .filter((action) => action.publicKey[0] === 1)
+      .map((action) => action.nonce)
+      .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)),
     [0n, 1n],
   );
-  console.log("CLIENT_PER_SIGNER_LANE=PASS");
+  console.log("CLIENT_PER_SIGNER_NONCE_RESERVATION=PASS");
   console.log("CLIENT_CROSS_SIGNER_PARALLEL=PASS");
 });
 

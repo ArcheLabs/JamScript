@@ -51,7 +51,8 @@ export class JamScriptClient {
   private readonly rpc: WorkRpc;
   private readonly actionHashes = new Map<string, string>();
   private readonly nextNonces = new Map<string, bigint>();
-  private readonly signerTails = new Map<string, Promise<void>>();
+  private readonly nonceTails = new Map<string, Promise<void>>();
+  private readonly ownershipTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly deployment: DeploymentDescriptor,
@@ -99,35 +100,26 @@ export class JamScriptClient {
   ): Promise<SubmitActionResult> {
     if (signer.publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
     const signerKey = toHex(signer.publicKey).toLowerCase();
-    const previous = this.signerTails.get(signerKey) ?? Promise.resolve();
-    let release!: () => void;
-    const lane = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.signerTails.set(signerKey, lane);
-    await previous;
+    const prepared = await this.prepareAction(
+      actionName,
+      input,
+      signer,
+      options,
+    );
+    let submitted: SubmitTransactionResult;
     try {
-      const prepared = await this.prepareAction(
-        actionName,
-        input,
-        signer,
-        options,
-      );
-      let submitted: SubmitTransactionResult;
-      try {
-        submitted = await this.rpc.submitTransaction(prepared.request);
-      } catch (error) {
-        // Admission failure means the local reservation may have created a
-        // nonce gap.  Force the next action in this signer lane to resync.
+      submitted = await this.rpc.submitTransaction(prepared.request);
+    } catch (error) {
+      // Only rewind a reservation when no later concurrent action has already
+      // reserved a nonce.  This keeps the common single-admission-failure
+      // recovery while avoiding duplicate nonces for an active batch.
+      if (this.nextNonces.get(signerKey) === prepared.nonce + 1n) {
         this.nextNonces.delete(signerKey);
-        throw error;
       }
-      this.actionHashes.set(submitted.transactionId.toLowerCase(), prepared.actionHash);
-      return { ...submitted, actionHash: prepared.actionHash };
-    } finally {
-      release();
-      if (this.signerTails.get(signerKey) === lane) this.signerTails.delete(signerKey);
+      throw error;
     }
+    this.actionHashes.set(submitted.transactionId.toLowerCase(), prepared.actionHash);
+    return { ...submitted, actionHash: prepared.actionHash };
   }
 
   async submitOwnershipAction(
@@ -138,10 +130,10 @@ export class JamScriptClient {
   ): Promise<SubmitActionResult> {
     const controller = await signer.getController();
     const signerLane = toHex(controller.public).toLowerCase();
-    const previous = this.signerTails.get(signerLane) ?? Promise.resolve();
+    const previous = this.ownershipTails.get(signerLane) ?? Promise.resolve();
     let release!: () => void;
     const lane = new Promise<void>((resolve) => { release = resolve; });
-    this.signerTails.set(signerLane, lane);
+    this.ownershipTails.set(signerLane, lane);
     await previous;
     try {
       await this.validateDeployment();
@@ -183,7 +175,31 @@ export class JamScriptClient {
       return { ...submitted, actionHash };
     } finally {
       release();
-      if (this.signerTails.get(signerLane) === lane) this.signerTails.delete(signerLane);
+      if (this.ownershipTails.get(signerLane) === lane) this.ownershipTails.delete(signerLane);
+    }
+  }
+
+  private async reserveWalletNonce(
+    publicKey: Uint8Array,
+  ): Promise<{ context: FinalizedContext; nonce: bigint }> {
+    const signerKey = toHex(publicKey).toLowerCase();
+    const previous = this.nonceTails.get(signerKey) ?? Promise.resolve();
+    let release!: () => void;
+    const lane = new Promise<void>((resolve) => { release = resolve; });
+    this.nonceTails.set(signerKey, lane);
+    await previous;
+    try {
+      const context = await this.rpc.finalizedContext();
+      const localNonce = this.nextNonces.get(signerKey);
+      const chainNonce = localNonce === undefined
+        ? await this.readNonce(publicKey, context)
+        : localNonce;
+      const nonce = localNonce === undefined || localNonce < chainNonce ? chainNonce : localNonce;
+      this.nextNonces.set(signerKey, nonce + 1n);
+      return { context, nonce };
+    } finally {
+      release();
+      if (this.nonceTails.get(signerKey) === lane) this.nonceTails.delete(signerKey);
     }
   }
 
@@ -192,7 +208,7 @@ export class JamScriptClient {
     input: Record<string, CodecValue>,
     signer: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number },
-  ): Promise<{ request: Parameters<WorkRpc["submitTransaction"]>[0]; actionHash: string }> {
+  ): Promise<{ request: Parameters<WorkRpc["submitTransaction"]>[0]; actionHash: string; nonce: bigint }> {
     await this.validateDeployment();
     const action = actionByName(this.deployment.abi, actionName);
     if (action.auth !== "wallet") throw new Error("submitAction requires a wallet-authenticated action");
@@ -202,12 +218,7 @@ export class JamScriptClient {
     if (!sameHex(toHex(selector), action.selector)) {
       throw new Error("deployment ABI selector does not match the canonical selector");
     }
-    const initialContext = await this.rpc.finalizedContext();
-    const signerKey = toHex(signer.publicKey).toLowerCase();
-    const chainNonce = await this.readNonce(signer.publicKey, initialContext);
-    const localNonce = this.nextNonces.get(signerKey) ?? 0n;
-    const nonce = localNonce < chainNonce ? chainNonce : localNonce;
-    this.nextNonces.set(signerKey, nonce + 1n);
+    const { context: initialContext, nonce } = await this.reserveWalletNonce(signer.publicKey);
     const ttl = options.ttl ?? 64n;
     const validUntil = BigInt(initialContext.slot) + ttl;
     const unsigned: Omit<SignedActionV1, "signature"> = {
@@ -233,7 +244,7 @@ export class JamScriptClient {
       extrinsicsBase64: (options.extrinsics ?? []).map(toBase64),
     };
 
-    return { request: requestBase, actionHash };
+    return { request: requestBase, actionHash, nonce };
   }
 
   async queryLatest(queryName: string, key?: CodecValue): Promise<QueryResult> {

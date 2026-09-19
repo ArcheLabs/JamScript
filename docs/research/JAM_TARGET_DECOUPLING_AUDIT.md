@@ -21,7 +21,7 @@ outside the compiler target boundary.
 | `tools/release/toolchain/build-linux.sh` | JamScript | Reproducible compiler distribution producer | A/B | JamScript release tooling | Build the in-tree JAM target and vendor only its dependencies |
 | `.github/workflows/release.yml` | JamScript | Hosted bundle gate | A | JamScript CI | Keep exact LLVM, A/B, and offline smoke gates |
 | `tools/minijam-e2e/*`, `scripts/minijam-network-e2e.sh`, `packages/client/*` | JamScript integration | MiniJAM RPC/network and Jambda-facing execution tests | C | Optional MiniJAM integration | Keep separate; never make these compiler/build dependencies |
-| `toolchains/minijam.lock` | JamScript | MiniJAM checkout pin used by compiler distribution and integration | C/obsolete for compiler | Optional integration workflow | Retain only until integration workflow no longer needs it, then remove with evidence |
+| `toolchains/minijam.lock` | JamScript | Exact published MiniJAM consumer-image pins for downstream integration | C, never a compiler input | Optional integration workflow | Keep only the source revision and digest-addressed image pins; the compiler must not read or checkout MiniJAM |
 | `docs/minijam-*.md` | JamScript docs | Downstream protocol/integration history and compatibility record | C | Integration documentation | Keep and clarify that MiniJAM is a consumer, not the JAM compiler target |
 
 ## Boundary findings

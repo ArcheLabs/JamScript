@@ -20,7 +20,7 @@ import {
   verifyManagedStateProof,
 } from "../dist/index.js";
 
-const backendUrl = process.env.JAMSCRIPT_E2E_BACKEND_URL ?? "http://127.0.0.1:8091";
+const backendUrl = process.env.JAMSCRIPT_E2E_BACKEND_URL ?? "http://127.0.0.1:8090";
 const artifacts = process.env.JAMSCRIPT_E2E_ARTIFACTS;
 const serviceId = Number(process.env.JAMSCRIPT_E2E_SERVICE_ID);
 const serviceKey = process.env.JAMSCRIPT_E2E_SERVICE_KEY;

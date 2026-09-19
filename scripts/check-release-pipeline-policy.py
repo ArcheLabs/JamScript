@@ -33,6 +33,8 @@ if "actions: read" not in release or "gh run list" not in release:
     raise SystemExit("release validate job must require a successful source CI run")
 if "SOURCE_CI_STATUS=PASS" not in release:
     raise SystemExit("release must report the source CI status")
+if "minijam-network-e2e.yml" not in release or "JAMSCRIPT_CANONICAL_MINIJAM_E2E=PASS" not in release:
+    raise SystemExit("release must require a successful canonical MiniJAM consumer E2E")
 
 jobs = set(re.findall(r"(?m)^  ([a-z][a-z0-9-]+):\n", release.split("jobs:\n", 1)[1]))
 if jobs != {"validate", "build-toolchain", "build-cli", "publish"}:

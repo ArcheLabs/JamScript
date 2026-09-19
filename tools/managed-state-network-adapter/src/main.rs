@@ -531,7 +531,7 @@ fn main() -> Result<(), String> {
         bind: env::var("JAMSCRIPT_ADAPTER_BIND").unwrap_or_else(|_| "127.0.0.1:8091".into()),
         node_url: env::var("MINIJAM_NODE_RPC").unwrap_or_else(|_| "http://127.0.0.1:9944".into()),
         formal_url: env::var("MINIJAM_FORMAL_RPC_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8090".into()),
+            .unwrap_or_else(|_| "http://127.0.0.1:8080".into()),
         service_id: env_parse("JAMSCRIPT_E2E_SERVICE_ID")?,
         service_key: ServiceKeyV1::new(parse_hash(&required_env("JAMSCRIPT_E2E_SERVICE_KEY")?)?),
         code_hash: parse_hash(&required_env("JAMSCRIPT_E2E_CODE_HASH")?)?,

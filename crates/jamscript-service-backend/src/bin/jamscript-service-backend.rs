@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind = args
         .bind
         .or_else(|| env::var("JAMSCRIPT_BACKEND_BIND").ok())
-        .unwrap_or_else(|| "127.0.0.1:8091".into());
+        .unwrap_or_else(|| "127.0.0.1:8090".into());
     let node_rpc = args
         .node_rpc
         .or_else(|| env::var("JAMSCRIPT_NODE_RPC").ok());

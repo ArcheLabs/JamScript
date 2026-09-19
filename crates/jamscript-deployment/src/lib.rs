@@ -1448,7 +1448,7 @@ mod tests {
                 "local".into(),
                 NetworkConfig {
                     kind: "minijam".into(),
-                    deployment_rpc: Some("http://127.0.0.1:8090".into()),
+                    deployment_rpc: Some("http://127.0.0.1:8080".into()),
                     node_rpc: None,
                     backend_rpc: None,
                     genesis_hash: None,
@@ -1484,7 +1484,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(selected.deployment_rpc, "http://127.0.0.1:8090");
+        assert_eq!(selected.deployment_rpc, "http://127.0.0.1:8080");
     }
 
     #[test]
