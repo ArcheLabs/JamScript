@@ -30,6 +30,10 @@ jobs:
         with:
           node-version: 24.15.0
 
+      - name: Install locked ScriptC packages
+        working-directory: JamScript/toolchains/scriptc
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y clang-20 lld-20 libclang-20-dev llvm-20-dev
 
