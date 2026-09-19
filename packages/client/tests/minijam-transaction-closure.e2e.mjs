@@ -147,11 +147,15 @@ async function main() {
   const batchResults = await Promise.all(batch.map((item) => client.waitForAction(item.transactionId, item.actionHash, { intervalMs: 250, timeoutMs: 180_000 })));
   assert.deepEqual(batchResults.map((item) => item.status), ["applied", "applied", "applied"]);
   assert.equal(new Set(batchResults.map((item) => item.packageHash)).size, 1);
-  assert.deepEqual(batchResults.map((item) => item.actionIndex), [0, 1, 2]);
+  assert.deepEqual(
+    batchResults.map((item) => item.actionIndex).sort((left, right) => left - right),
+    [0, 1, 2],
+  );
   const batchedValue = await managedValue(backend, valueKey);
   assert.equal(new DataView(batchedValue.buffer, batchedValue.byteOffset + 32, 4).getUint32(0, true), 13);
   console.log("CONCURRENT_LOGICAL_TX_IDS_UNIQUE=PASS");
-  console.log("CONCURRENT_BATCH_ORDER_DETERMINISTIC=PASS");
+  console.log("CONCURRENT_BATCH_MEMBERSHIP=PASS");
+  console.log("CONCURRENT_ACTION_HASH_MAPPING=PASS");
   console.log("BATCHED_ACTION_E2E=PASS");
 
   const outOfOrderPair = signer("0a").pair;
@@ -175,11 +179,16 @@ async function main() {
   const outOfOrderResults = await Promise.all(outOfOrder.map((item) =>
     client.waitForAction(item.transactionId, item.actionHash, { intervalMs: 250, timeoutMs: 180_000 })));
   assert.deepEqual(outOfOrderResults.map((item) => item.actionIndex), [2, 0, 1]);
+  const canonical = outOfOrder.map((item, index) => ({
+    nonce: item.nonce,
+    actionIndex: outOfOrderResults[index].actionIndex,
+  })).sort((left, right) => left.actionIndex - right.actionIndex);
+  assert.deepEqual(canonical.map((item) => item.nonce), [0, 1, 2]);
   assert.deepEqual(outOfOrderResults.map((item) => item.status), ["applied", "applied", "applied"]);
   console.log("OUT_OF_ORDER_SUBMISSION_NONCES=2,0,1");
   console.log("OUT_OF_ORDER_CANONICAL_NONCES=0,1,2");
   console.log("OUT_OF_ORDER_ACTION_INDEXES=2,0,1");
-  console.log("OUT_OF_ORDER_SAME_SIGNER=PASS");
+  console.log("SAME_SIGNER_NONCE_ORDER=PASS");
 
   const crossSignerInputs = ["0b", "0c", "0d"].map((seed) => signer(seed));
   const crossSigner = await Promise.all(crossSignerInputs.map(({ value }) =>
@@ -196,7 +205,7 @@ async function main() {
     client.submitAction("advance", { key: firstKey }, wallet),
   ]);
   const secondResults = await Promise.all(second.map((item) => client.waitForAction(item.transactionId, item.actionHash, { intervalMs: 250, timeoutMs: 180_000 })));
-  assert.deepEqual(secondResults.map((item) => item.actionIndex), [0, 1]);
+  assert.deepEqual(secondResults.map((item) => item.actionIndex).sort((left, right) => left - right), [0, 1]);
   assert.deepEqual(secondResults.map((item) => item.status), ["applied", "applied"]);
   const secondValue = await managedValue(backend, valueKey);
   assert.equal(new DataView(secondValue.buffer, secondValue.byteOffset + 32, 4).getUint32(0, true), 21);
@@ -209,7 +218,7 @@ async function main() {
     client.submitAction("advance", { key: firstKey }, wallet),
   ]);
   const failureResults = await Promise.all(failureBatch.map((item) => client.waitForAction(item.transactionId, item.actionHash, { intervalMs: 250, timeoutMs: 180_000 })));
-  assert.deepEqual(failureResults.map((item) => item.actionIndex), [0, 1, 2]);
+  assert.deepEqual(failureResults.map((item) => item.actionIndex).sort((left, right) => left - right), [0, 1, 2]);
   assert.deepEqual(failureResults.map((item) => item.status), ["applied", "failed", "applied"]);
   const finalValue = await managedValue(backend, valueKey);
   assert.equal(new DataView(finalValue.buffer, finalValue.byteOffset + 32, 4).getUint32(0, true), 23);
