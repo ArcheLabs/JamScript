@@ -19,7 +19,7 @@ import {
   verifyManagedStateProof,
 } from "../dist/index.js";
 
-const backendEndpoint = process.env.JAMSCRIPT_E2E_BACKEND_URL ?? "http://127.0.0.1:8091";
+const backendEndpoint = process.env.JAMSCRIPT_E2E_BACKEND_URL ?? "http://127.0.0.1:8090";
 const genesisHash = process.env.JAMSCRIPT_E2E_GENESIS_HASH;
 const networkDomain = process.env.JAMSCRIPT_E2E_NETWORK_DOMAIN ?? genesisHash;
 const artifactsA = process.env.JAMSCRIPT_E2E_ARTIFACTS;
@@ -113,7 +113,8 @@ async function exerciseService(backend, service, seedValue, firstKey, secondKey,
     seededAction.actionHash,
     { intervalMs: 500, timeoutMs: 120_000 },
   );
-  assert.equal(seededResult.status, "imported");
+  assert.equal(seededResult.status, "applied");
+  assert.equal(seededResult.transactionStatus, "imported");
   assert.equal(
     seededResult.actionReceipt.actionHash.toLowerCase(),
     seededAction.actionHash.toLowerCase(),
@@ -137,7 +138,8 @@ async function exerciseService(backend, service, seedValue, firstKey, secondKey,
     advanceAction.actionHash,
     { intervalMs: 500, timeoutMs: 120_000 },
   );
-  assert.equal(advanceResult.status, "imported");
+  assert.equal(advanceResult.status, "applied");
+  assert.equal(advanceResult.transactionStatus, "imported");
   assert.equal(
     advanceResult.actionReceipt.actionHash.toLowerCase(),
     advanceAction.actionHash.toLowerCase(),

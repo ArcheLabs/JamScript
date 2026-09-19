@@ -22,7 +22,7 @@ listed artifact before displaying its metadata.
 MiniJamSpec compatibility is an execution-boundary property. JamScript does
 not target JAM FullSpec directly and does not embed MiniJamSpec constants. It
 ships the JAM target ABI and its own target SDK. MiniJAM compatibility is
-checked separately by the optional downstream network E2E; a MiniJAM or
+checked separately by the canonical downstream network E2E; a MiniJAM or
 Jambda checkout is not part of a JamScript build or release input.
 
 The public backend is one multi-Service process. Each deployment is registered
@@ -81,8 +81,9 @@ rewritten as a successful run.
 4. Run one `jamscript-service-backend` process and configure its internal Node and Formal RPCs.
 5. Let the backend discover each deployed Service and prewarm its PVM artifact.
 6. Configure the browser client with the single public backend endpoint.
-7. When a downstream network is available, run the manual MiniJAM network E2E
-   as a compatibility check before publishing the release artifacts.
+7. Run the manual MiniJAM network E2E against the exact source commit before
+   publishing. It consumes the digest-pinned MiniJAM v0.2.0 aggregate image;
+   the release workflow verifies the successful run by commit identity.
 
 The deployment command is intentionally a separate control-plane operation, not an application
 RPC. In v0.1 it targets the formal MiniJAM Stage-1
@@ -96,9 +97,10 @@ configuration but remains unsupported in v0.1.
 
 The [`release.yml`](../.github/workflows/release.yml) workflow is deliberately
 minimal. It has exactly four jobs: `validate`, `build-toolchain`, `build-cli`,
-and `publish`. Each native toolchain and CLI archive is built once from the
-exact dispatch SHA. Release-time checks only verify archive structure, required
-files, exact filenames, and `SHA256SUMS`.
+and `publish`. Validation requires successful source CI and a successful
+canonical MiniJAM consumer E2E for the exact dispatch SHA. Each native
+toolchain and CLI archive is built once from that SHA. Release-time checks only
+verify archive structure, required files, exact filenames, and `SHA256SUMS`.
 
 The public release contains two CLI archives, two managed toolchain archives,
 and `SHA256SUMS`. It does not publish `release-manifest.json`, toolchain

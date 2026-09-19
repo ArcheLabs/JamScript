@@ -147,7 +147,7 @@ default_network = "local"
 
 [networks.local]
 kind = "minijam"
-deployment_rpc = "http://127.0.0.1:8090"
+deployment_rpc = "http://127.0.0.1:8080"
 node_rpc = "http://127.0.0.1:9944"
 # Optional but recommended for identity verification.
 genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -202,7 +202,7 @@ For Docker, use a versioned image and a persistent volume:
 docker run --rm \
   -p 8090:8090 \
   -e JAMSCRIPT_NODE_RPC=http://host.docker.internal:9944 \
-  -e JAMSCRIPT_FORMAL_RPC=http://host.docker.internal:8090 \
+  -e JAMSCRIPT_FORMAL_RPC=http://host.docker.internal:8080 \
   -e JAMSCRIPT_BACKEND_CORS_ORIGINS='*' \
   -v jamscript-backend:/var/lib/jamscript \
   ghcr.io/archelabs/jamscript-backend:v0.1.0
@@ -232,27 +232,14 @@ remain out of scope.
 
 ## Development and contribution
 
-To run the optional cross-process MiniJAM compatibility path (it requires a
-separate MiniJAM checkout):
+To run the canonical downstream MiniJAM compatibility path (it pulls the
+exact aggregate image pinned in `toolchains/minijam.lock`):
 
     ./scripts/minijam-network-e2e.sh
 
-To consume an already-running local MiniJAM Stage-1 provider without managing
-its lifecycle:
-
-    ./scripts/minijam-consumer-e2e.sh
-
-To run the minimal known-good baseline, prepare the external provider and
-export only the RPC endpoints from its `connection.env`:
-
-    JAMSCRIPT_E2E_MODE=baseline \
-    JAMSCRIPT_NODE_RPC="$MINIJAM_NODE_RPC" \
-    JAMSCRIPT_FORMAL_RPC_URL="$MINIJAM_FORMAL_RPC_URL" \
-    ./scripts/minijam-consumer-e2e.sh
-
-Baseline mode reuses the complete two-service deployment and network Work
-E2E, then stops before the full-mode backend restart and persistence checks.
-The default `full` mode continues through those checks.
+The consumer assertions can also target an already-running canonical local
+endpoint by setting `JAMSCRIPT_NODE_RPC` and `JAMSCRIPT_FORMAL_RPC_URL`; the
+canonical network script owns the aggregate image lifecycle by default.
 
 To validate contributor guest dependency acquisition with a fresh Cargo home
 (this is an acceptance check, not a cache-warmup prerequisite):

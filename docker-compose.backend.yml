@@ -13,7 +13,7 @@ services:
       JAMSCRIPT_BACKEND_BIND: 0.0.0.0:8090
       JAMSCRIPT_BACKEND_DATA: /var/lib/jamscript
       JAMSCRIPT_NODE_RPC: ${JAMSCRIPT_NODE_RPC:-http://host.docker.internal:9944}
-      JAMSCRIPT_FORMAL_RPC: ${JAMSCRIPT_FORMAL_RPC:-http://host.docker.internal:8090}
+      JAMSCRIPT_FORMAL_RPC: ${JAMSCRIPT_FORMAL_RPC:-http://host.docker.internal:8080}
       JAMSCRIPT_BACKEND_CORS_ORIGINS: ${JAMSCRIPT_BACKEND_CORS_ORIGINS:-*}
     volumes:
       - jamscript-backend-data:/var/lib/jamscript

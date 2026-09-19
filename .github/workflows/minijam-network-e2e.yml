@@ -11,6 +11,11 @@ jobs:
   network-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      CC: clang-20
+      CXX: clang++-20
+      LIBCLANG_PATH: /usr/lib/llvm-20/lib
+      LLVM_CONFIG_PATH: /usr/bin/llvm-config-20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,7 +31,7 @@ jobs:
           node-version: 24.15.0
 
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang-20 lld-20
+        run: sudo apt-get update && sudo apt-get install -y clang-20 lld-20 libclang-20-dev llvm-20-dev
 
       - name: Run real network E2E against published MiniJAM containers
         working-directory: JamScript

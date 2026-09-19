@@ -48,7 +48,7 @@ bundle gateway to use the same HTTP endpoint:
 
     MINIJAM_RPC_URL=ws://127.0.0.1:9944 \
     MINIJAM_RELAYER_URI='//Alice' \
-    MINIJAM_FORMAL_RPC_BIND=127.0.0.1:8090 \
+    MINIJAM_FORMAL_RPC_BIND=127.0.0.1:8080 \
     MINIJAM_BUNDLE_DIR=./bundles \
     cargo run -p minijam-formal-rpc
 
@@ -78,13 +78,14 @@ Run:
 
     ./scripts/minijam-network-e2e.sh
 
-The test uses a pinned MiniJAM checkout, starts a real local node, formal Work
-RPC and Workers, builds a network-independent JamScript artifact, and deploys
-the Service through `jams deploy --network local`. The deployment uses the
-formal Stage-1 `minijam_createServiceV1` RPC and verifies the node genesis
-identity before mutation. It then submits a wallet-signed action through the
-production client path, waits for finalized Work, and verifies finalized
-Service state.
+The test pulls the exact digest-pinned aggregate MiniJAM image from
+`toolchains/minijam.lock` and starts it with `--dev`. The image owns the
+canonical local node, Formal RPC on `8080`, and exactly one Worker on `8082`;
+JamScript does not start a custom MiniJAM Compose topology or checkout MiniJAM
+source. It builds a network-independent JamScript artifact, deploys the
+Service through `jams deploy --network local`, submits wallet-signed actions,
+waits for finalized Work, verifies batched receipts and finalized state, and
+restarts the backend before querying durable state again.
 
 The canonical E2E does not use the Playground lifecycle API or its legacy
 `/api/v1/*` endpoints. Logical transactions enter through the Backend;

@@ -1,7 +1,7 @@
 # MiniJamSpec compatibility audit
 
 This document records the JamScript-side execution-boundary audit for the
-MiniJAM checkout used by this workspace. Deployment profile parameters are
+published MiniJAM aggregate image consumed by this workspace. Deployment profile parameters are
 deliberately not part of the JamScript language, IR, application ABI,
 SignedActionV1, or Managed State formats.
 
@@ -10,16 +10,22 @@ SignedActionV1, or Managed State formats.
 | Item | Observed value |
 | --- | --- |
 | JamScript baseline | Formal V1 release commit |
-| MiniJAM locked SHA | `18de55e175abb1cb40679be2e538644e2387655f` |
-| MiniJAM Jambda gitlink | `d33e0abf8116b23bbc551c6a8d7075eacb2994ce` |
+| MiniJAM source revision | `toolchains/minijam.lock:source_revision` |
+| MiniJAM aggregate image | `toolchains/minijam.lock:dev_image` |
 | MiniJAM SDK ABI | `MINIJAM_ABI_VERSION = 1` |
 | PolkaVM linker / derive | `0.30.0 / 0.30.0` |
 | target adapter | `minijam-0.2` |
 
-The lock file and checkout agree at the time of this audit. MiniJAM is pinned
-to a merged Jambda integration commit containing the independent
-`jambda-minijam-spec::MiniJamSpec` profile. JamScript remains spec-agnostic and
-targets the MiniJAM ABI; it does not target JAM FullSpec directly.
+The lock file and published aggregate image are the downstream integration
+boundary. JamScript remains spec-agnostic and targets the MiniJAM ABI; it does
+not target JAM FullSpec directly, and it does not checkout MiniJAM or Jambda
+when building or running the consumer E2E.
+
+The checked-in `dev_image` points at the published MiniJAM Stage-1 v0.2.0
+aggregate image. The consumer E2E fails closed with
+`MINIJAM_DEV_IMAGE_PIN=BLOCKED` if this value is missing, mutable, or not
+digest-addressed; it never falls back to component images or a source
+checkout.
 
 ## ABI boundary
 
@@ -87,7 +93,7 @@ cargo build --locked --bin jams
 ./scripts/minijam-network-e2e.sh
 ```
 
-The local checkout used for this audit is a Stage 0 network and its real
-network E2E remains an upstream integration gate. It must be reported as
-`REAL_MINIJAM_E2E=FAIL` until an actual MiniJAM node executes Refine,
-Accumulate, finalization, managed-state updates, and proof verification.
+The real network E2E is a downstream integration gate. It must be run against
+the exact `dev_image` digest and the canonical `--dev` topology before release;
+no source checkout, private Jambda tree, or custom test chain may substitute
+for that image.

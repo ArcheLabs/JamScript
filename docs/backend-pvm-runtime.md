@@ -26,9 +26,9 @@ protocol.
 ## Running
 
 ```bash
-JAMSCRIPT_BACKEND_BIND=127.0.0.1:8091 \
+JAMSCRIPT_BACKEND_BIND=127.0.0.1:8090 \
 JAMSCRIPT_NODE_RPC=http://node:9944 \
-JAMSCRIPT_FORMAL_RPC=http://formal:8090 \
+JAMSCRIPT_FORMAL_RPC=http://formal:8080 \
 JAMSCRIPT_BACKEND_DATA=/var/lib/jamscript \
 cargo run --release -p jamscript-service-backend --bin jamscript-service-backend
 ```

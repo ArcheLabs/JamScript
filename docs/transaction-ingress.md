@@ -42,6 +42,23 @@ T3 ─┘
 The Backend retains `T1/T2/T3 -> P` and the corresponding action indexes.
 There is no intermediate Formal transaction ID.
 
+## Batching and nonce admission
+
+The backend keeps one insertion-ordered queue per managed Service and permits
+at most one in-flight batch for that Service. The default batch limit is four
+actions and the flush window is 50 ms; deployments may set
+`JAMSCRIPT_BATCH_MAX_ACTIONS` and `JAMSCRIPT_BATCH_FLUSH_MS` explicitly.
+Actions selected for one batch are built with one `build_actions` call and
+become one physical MiniJAM WorkItem. A second batch is not built until the
+first batch has been materialized against the finalized managed-state root.
+
+The TypeScript client does not serialize a complete `submitAction` call per
+signer. It serializes only the local nonce reservation, then signs and submits
+the logical transactions concurrently. The backend, rather than a client-side
+FIFO, assigns arrival order and action indexes. This preserves nonce
+correctness while allowing concurrent submissions to share the same batch
+window.
+
 ## Status and finality
 
 After a Work is submitted, a temporary Work-not-found response is reported

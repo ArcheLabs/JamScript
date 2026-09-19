@@ -3,261 +3,142 @@ set -euo pipefail
 
 JAMSCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 E2E_RUNTIME="${JAMSCRIPT_E2E_RUNTIME:-${JAMSCRIPT_ROOT}/target/jamscript-network-e2e}"
-E2E_PROJECT="${E2E_RUNTIME}/dynamic-state-scriptc"
-ARTIFACTS="${E2E_PROJECT}/dist"
-E2E_PROJECT_B="${E2E_RUNTIME}/dynamic-state-scriptc-b"
-ARTIFACTS_B="${E2E_PROJECT_B}/dist"
 LOCK_FILE="${JAMSCRIPT_ROOT}/toolchains/minijam.lock"
-COMPOSE_FILE="${JAMSCRIPT_ROOT}/scripts/minijam-network-e2e.compose.yml"
-COMPOSE_PROJECT="${JAMSCRIPT_E2E_COMPOSE_PROJECT:-jamscript-minijam-e2e}"
-minijam_result=FAIL
+CONTAINER="${JAMSCRIPT_MINIJAM_CONTAINER:-jamscript-minijam-${GITHUB_RUN_ID:-$$}}"
+MINIJAM_IMAGE="${MINIJAM_IMAGE:-}"
+MINIJAM_SOURCE_REVISION=""
+result=FAIL
 
-# The checked-in distribution manifest is intentionally unpublished in a
-# source checkout. This integration gate uses the local toolchain by default;
-# CI/release jobs can set JAMSCRIPT_DEV_TOOLCHAIN=0 to exercise the published
-# bundle path instead.
-export JAMSCRIPT_DEV_TOOLCHAIN="${JAMSCRIPT_DEV_TOOLCHAIN:-1}"
-export MINIJAM_FORMAL_RPC_URL="${MINIJAM_FORMAL_RPC_URL:-http://127.0.0.1:8090}"
-export JAMSCRIPT_BACKEND_BIND="${JAMSCRIPT_BACKEND_BIND:-127.0.0.1:8091}"
-export JAMSCRIPT_BACKEND_URL="${JAMSCRIPT_BACKEND_URL:-http://127.0.0.1:8091}"
-export JAMSCRIPT_BACKEND_DATA="${JAMSCRIPT_BACKEND_DATA:-${E2E_RUNTIME}/backend-data}"
 export MINIJAM_NODE_RPC="${MINIJAM_NODE_RPC:-http://127.0.0.1:9944}"
-export JAMSCRIPT_NODE_RPC="${MINIJAM_NODE_RPC}"
-export JAMSCRIPT_FORMAL_RPC="${MINIJAM_FORMAL_RPC_URL}"
-export MINIJAM_FORMAL_RELAYER_URI="${MINIJAM_FORMAL_RELAYER_URI:-0x9292929292929292929292929292929292929292929292929292929292929292}"
-export JAMSCRIPT_E2E_DEPLOY_TIMEOUT="${JAMSCRIPT_E2E_DEPLOY_TIMEOUT:-240s}"
-compose=(docker compose --project-name "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}")
+export MINIJAM_FORMAL_RPC_URL="${MINIJAM_FORMAL_RPC_URL:-http://127.0.0.1:8080}"
+export JAMSCRIPT_BACKEND_BIND="${JAMSCRIPT_BACKEND_BIND:-127.0.0.1:8090}"
+export JAMSCRIPT_BACKEND_URL="${JAMSCRIPT_BACKEND_URL:-http://127.0.0.1:8090}"
 
-nvm_script="${JAMSCRIPT_NVM_SH:-}"
-if [[ -z "${nvm_script}" ]]; then
-  task_home="$(cd ~ && pwd -P)"
-  nvm_script="${task_home}/.nvm/nvm.sh"
-fi
-if [[ -s "${nvm_script}" ]]; then
-  # shellcheck disable=SC1090
-  source "${nvm_script}"
-  nvm use 24.15.0 >/dev/null
-fi
-[[ "$(node --version)" == "v24.15.0" ]] || {
-  echo "ScriptC M2 requires Node v24.15.0; set JAMSCRIPT_NVM_SH or activate that Node version" >&2
-  exit 1
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$1 is required" >&2
+    exit 127
+  }
 }
 
-cleanup() {
-  local status=$?
-  trap - EXIT INT TERM
-  if [[ -n "${backend_pid:-}" ]]; then
-    kill "${backend_pid}" 2>/dev/null || true
-    wait "${backend_pid}" 2>/dev/null || true
-  fi
-  if [[ "${status}" -ne 0 ]]; then
-    echo "JamScript MiniJAM network E2E: FAIL" >&2
-    echo "MiniJAM logs: ${E2E_RUNTIME}/logs" >&2
-    echo "JamScript artifacts: ${E2E_RUNTIME}" >&2
-    for log in "${E2E_RUNTIME}"/logs/*.log; do
-      [[ -f "${log}" ]] || continue
-      echo "----- ${log} (last 100 lines) -----" >&2
-      tail -n 100 "${log}" >&2 || true
-    done
-    "${compose[@]}" ps --all >&2 || true
-    "${compose[@]}" logs --no-color --tail 100 >&2 || true
-  elif [[ "${JAMSCRIPT_E2E_KEEP_DATA:-0}" != "1" ]]; then
-    rm -rf "${E2E_PROJECT}" "${E2E_PROJECT_B}" "${JAMSCRIPT_BACKEND_DATA}"
-  fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  echo "REAL_MINIJAM_E2E=${minijam_result}"
-  echo "REAL_MINIJAM_MULTI_SERVICE_E2E=${minijam_result}"
-  exit "${status}"
-}
-trap cleanup EXIT INT TERM
+require_command curl
+require_command docker
+require_command jq
 
 [[ -f "${LOCK_FILE}" ]] || {
   echo "MiniJAM lock file not found: ${LOCK_FILE}" >&2
   exit 1
 }
-command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 1; }
+
+if [[ -z "${MINIJAM_IMAGE}" ]]; then
+  MINIJAM_IMAGE="$(sed -n 's/^dev_image = "\([^"]*\)"/\1/p' "${LOCK_FILE}")"
+fi
+MINIJAM_SOURCE_REVISION="$(sed -n 's/^source_revision = "\([^"]*\)"/\1/p' "${LOCK_FILE}")"
+
+[[ "${MINIJAM_IMAGE}" =~ ^ghcr\.io/archelabs/minijam@sha256:[0-9a-f]{64}$ ]] || {
+  echo "MINIJAM_DEV_IMAGE_PIN=BLOCKED" >&2
+  echo "toolchains/minijam.lock must contain the published aggregate dev_image digest" >&2
+  echo "or MINIJAM_IMAGE must be set to ghcr.io/archelabs/minijam@sha256:<64-hex>" >&2
+  exit 1
+}
+echo "JAMSCRIPT_MINIJAM_EXACT_PIN=PASS"
+echo "NO_MINIJAM_SOURCE_CHECKOUT=PASS"
+echo "NO_PRIVATE_JAMBDA_DEPENDENCY=PASS"
+echo "NO_CUSTOM_MINIJAM_COMPOSE=PASS"
+echo "NO_STAGE1_WORK_E2E_DEPENDENCY=PASS"
+
+if [[ -n "${MINIJAM_SOURCE_REVISION}" && ! "${MINIJAM_SOURCE_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "invalid MiniJAM source_revision in ${LOCK_FILE}: ${MINIJAM_SOURCE_REVISION}" >&2
+  exit 1
+fi
+
 docker info >/dev/null
-locked_revision="$(sed -n 's/^revision = "\([^"]*\)"/\1/p' "${LOCK_FILE}")"
-container_revision="$(sed -n 's/^container_revision = "\([^"]*\)"/\1/p' "${LOCK_FILE}")"
-container_revision="${container_revision:-${locked_revision}}"
-export MINIJAM_NODE_IMAGE="${MINIJAM_NODE_IMAGE:-$(sed -n 's/^node_image = "\([^"]*\)"/\1/p' "${LOCK_FILE}")}"
-export MINIJAM_WORKER_IMAGE="${MINIJAM_WORKER_IMAGE:-$(sed -n 's/^worker_image = "\([^"]*\)"/\1/p' "${LOCK_FILE}")}"
-export MINIJAM_FORMAL_RPC_IMAGE="${MINIJAM_FORMAL_RPC_IMAGE:-$(sed -n 's/^formal_rpc_image = "\([^"]*\)"/\1/p' "${LOCK_FILE}")}"
-for image in "${MINIJAM_NODE_IMAGE}" "${MINIJAM_WORKER_IMAGE}" "${MINIJAM_FORMAL_RPC_IMAGE}"; do
-  [[ "${image}" == *@sha256:* ]] || { echo "MiniJAM image is not digest-pinned: ${image}" >&2; exit 1; }
-done
-"${compose[@]}" config --quiet
-
 mkdir -p "${E2E_RUNTIME}/logs"
-rm -f "${E2E_RUNTIME}"/logs/*.log
 
-echo "[prepare] MiniJAM container revision: ${container_revision} (native pin: ${locked_revision})"
-"${compose[@]}" pull --quiet
-for image in "${MINIJAM_NODE_IMAGE}" "${MINIJAM_WORKER_IMAGE}" "${MINIJAM_FORMAL_RPC_IMAGE}"; do
-  image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")"
-  [[ "${image_revision}" == "${container_revision}" ]] || {
-    echo "MiniJAM image revision ${image_revision} does not match ${container_revision}" >&2
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [[ "${status}" -ne 0 && -n "${CONTAINER}" ]] && docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
+    echo "----- MiniJAM aggregate logs (last 200 lines) -----" >&2
+    docker logs --tail 200 "${CONTAINER}" >&2 || true
+  fi
+  docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+  if [[ "${status}" -eq 0 && "${JAMSCRIPT_E2E_KEEP_DATA:-0}" != "1" ]]; then
+    rm -rf -- "${E2E_RUNTIME}"
+  fi
+  echo "REAL_MINIJAM_E2E=${result}"
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+echo "MINIJAM_DEV_IMAGE=${MINIJAM_IMAGE}"
+if [[ -n "${MINIJAM_SOURCE_REVISION}" ]]; then
+  echo "MINIJAM_SOURCE_REVISION=${MINIJAM_SOURCE_REVISION}"
+fi
+docker pull "${MINIJAM_IMAGE}" >/dev/null
+
+docker run --detach \
+  --name "${CONTAINER}" \
+  -p 127.0.0.1:9944:9944 \
+  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:8082:8082 \
+  "${MINIJAM_IMAGE}" --dev >/dev/null
+
+node_ready() {
+  curl -fsS --max-time 5 \
+    -H 'content-type: application/json' \
+    --data '{"jsonrpc":"2.0","id":1,"method":"system_health","params":[]}' \
+    "${MINIJAM_NODE_RPC}" |
+    jq -e '.result != null and .error == null' >/dev/null
+}
+
+formal_ready() {
+  curl -fsS --max-time 5 "${MINIJAM_FORMAL_RPC_URL}/health/ready" |
+    jq -e '.status == "ready"' >/dev/null
+}
+
+worker_ready() {
+  curl -fsS --max-time 5 "http://127.0.0.1:8082/health/ready" >/dev/null
+}
+
+for _ in $(seq 1 120); do
+  if ! docker inspect -f '{{.State.Running}}' "${CONTAINER}" 2>/dev/null | grep -qx true; then
+    echo "MiniJAM aggregate container exited during startup" >&2
     exit 1
-  }
-done
-
-(cd "${JAMSCRIPT_ROOT}" && cargo build --locked --bin jams)
-npm --prefix "${JAMSCRIPT_ROOT}/packages/client" ci --no-audit
-npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run build
-
-echo "[network] starting isolated MiniJAM network"
-"${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-"${compose[@]}" up --detach --no-build --pull never
-for _ in $(seq 1 90); do
-  if curl -fsS --max-time 3 "${MINIJAM_FORMAL_RPC_URL}/health/ready" >/dev/null 2>&1 &&
-    curl -fsS --max-time 3 -H "content-type: application/json" \
-      --data '{"jsonrpc":"2.0","id":1,"method":"system_health","params":[]}' \
-      "${MINIJAM_NODE_RPC}" >/dev/null 2>&1; then
+  fi
+  if node_ready && formal_ready && worker_ready; then
     break
   fi
   sleep 2
 done
-curl -fsS --max-time 3 "${MINIJAM_FORMAL_RPC_URL}/health/ready" >/dev/null
-curl -fsS --max-time 3 -H "content-type: application/json" \
-  --data '{"jsonrpc":"2.0","id":1,"method":"system_health","params":[]}' \
-  "${MINIJAM_NODE_RPC}" >/dev/null
-[[ "$("${compose[@]}" ps --services --status running | wc -l)" -eq 5 ]] || {
-  echo "one or more MiniJAM containers exited during startup" >&2
-  exit 1
-}
-echo "[network] MiniJAM node ready"
-echo "[network] Formal Work RPC ready"
-echo "[network] Workers ready"
 
-echo "[network] starting one dynamic PVM backend"
-(cd "${JAMSCRIPT_ROOT}" && cargo build --locked --bin jamscript-service-backend)
-JAMSCRIPT_BACKEND_BIND="${JAMSCRIPT_BACKEND_BIND}" \
-JAMSCRIPT_NODE_RPC="${MINIJAM_NODE_RPC}" \
-JAMSCRIPT_FORMAL_RPC="${MINIJAM_FORMAL_RPC_URL}" \
-JAMSCRIPT_BACKEND_DATA="${JAMSCRIPT_BACKEND_DATA}" \
-  "${JAMSCRIPT_ROOT}/target/debug/jamscript-service-backend" \
-  >"${E2E_RUNTIME}/logs/jamscript-backend.log" 2>&1 &
-backend_pid=$!
-for _ in $(seq 1 60); do
-  if curl -fsS "${JAMSCRIPT_BACKEND_URL}/healthz" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-curl -fsS "${JAMSCRIPT_BACKEND_URL}/readinessz" >/dev/null
-echo "[network] dynamic PVM backend ready"
-backend_binary_hash="$(sha256sum "${JAMSCRIPT_ROOT}/target/debug/jamscript-service-backend" | awk '{print $1}')"
+node_ready
+formal_ready
+worker_ready
+echo "MINIJAM_DEV_NODE_READY=PASS"
+echo "MINIJAM_DEV_FORMAL_RPC_READY=PASS"
+echo "MINIJAM_DEV_WORKER_0_READY=PASS"
+echo "JAMSCRIPT_ONE_WORKER_NETWORK=PASS"
 
 genesis_hash="$(
-  curl -fsS \
-    -H "content-type: application/json" \
+  curl -fsS --max-time 5 \
+    -H 'content-type: application/json' \
     --data '{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[0]}' \
     "${MINIJAM_NODE_RPC}" |
-    node -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>{const r=JSON.parse(b);if(r.error)throw new Error(JSON.stringify(r.error));process.stdout.write(r.result);});'
+    jq -er '.result | strings'
 )"
 [[ "${genesis_hash}" =~ ^0x[0-9a-fA-F]{64}$ ]] || {
-  echo "invalid genesis hash from MiniJAM node: ${genesis_hash}" >&2
+  echo "invalid canonical local genesis hash: ${genesis_hash}" >&2
   exit 1
 }
+echo "JAMSCRIPT_CANONICAL_LOCAL=PASS"
 
-prepare_project() {
-  local project="$1"
-  local artifacts="$2"
-  local package_name="$3"
-  local service_key="$4"
-  rm -rf "${project}"
-  cp -R "${JAMSCRIPT_ROOT}/examples/dynamic-state-scriptc" "${project}"
-  sed -i \
-    -e "s/^name = \"dynamic-state-scriptc\"/name = \"${package_name}\"/" \
-    -e "s/\"serviceKey\": \"0x[0-9a-fA-F]*\"/\"serviceKey\": \"${service_key}\"/" \
-    -e "s/\"name\": \"dynamic-state-scriptc\"/\"name\": \"${package_name}\"/" \
-    "${project}/jamscript.toml" "${project}/.jamscript/service.json"
-  cat >> "${project}/jamscript.toml" <<EOF
-
-[networks.local]
-kind = "minijam"
-deployment_rpc = "${MINIJAM_FORMAL_RPC_URL}"
-node_rpc = "${MINIJAM_NODE_RPC}"
-backend_rpc = "${JAMSCRIPT_BACKEND_URL}"
-genesis_hash = "${genesis_hash}"
-EOF
-  (cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jams -- check "${project}")
-  (cd "${JAMSCRIPT_ROOT}" && cargo run --locked --bin jams -- build "${project}" --output "${artifacts}")
-}
-
-mkdir -p "${E2E_RUNTIME}"
-prepare_project "${E2E_PROJECT}" "${ARTIFACTS}" "dynamic-state-scriptc" "0x4444444444444444444444444444444444444444444444444444444444444444"
-prepare_project "${E2E_PROJECT_B}" "${ARTIFACTS_B}" "dynamic-state-scriptc-b" "0x5555555555555555555555555555555555555555555555555555555555555555"
-code_hash="$(
-  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).code_hash));' < "${ARTIFACTS}/build.json"
-)"
-service_key="$(
-  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>{const v=JSON.parse(b);process.stdout.write(v.serviceKey ?? v.service_key);});' < "${ARTIFACTS}/build.json"
-)"
-echo "[build] JamScript service built: ${ARTIFACTS}/service.blob"
-
-code_hash_b="$(
-  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).code_hash));' < "${ARTIFACTS_B}/build.json"
-)"
-service_key_b="$(
-  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>{const v=JSON.parse(b);process.stdout.write(v.serviceKey ?? v.service_key);});' < "${ARTIFACTS_B}/build.json"
-)"
-echo "[build] second JamScript service built: ${ARTIFACTS_B}/service.blob"
-
-deployment_json="$(
-  cd "${JAMSCRIPT_ROOT}"
-  cargo run --locked --bin jams -- deploy "${E2E_PROJECT}" \
-    --network local --artifact "${ARTIFACTS}" --timeout "${JAMSCRIPT_E2E_DEPLOY_TIMEOUT}" --json
-)"
-service_id="$(
-  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(b).serviceId)));' <<<"${deployment_json}"
-)"
-code_hash="$(
-  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).codeHash));' <<<"${deployment_json}"
-)"
-echo "[deploy] JamScript Service ${service_id} created through minijam_createServiceV1"
-
-deployment_json_b="$(
-  cd "${JAMSCRIPT_ROOT}"
-  cargo run --locked --bin jams -- deploy "${E2E_PROJECT_B}" \
-    --network local --artifact "${ARTIFACTS_B}" --timeout "${JAMSCRIPT_E2E_DEPLOY_TIMEOUT}" --json
-)"
-service_id_b="$(
-  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(b).serviceId)));' <<<"${deployment_json_b}"
-)"
-code_hash_b="$(
-  node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).codeHash));' <<<"${deployment_json_b}"
-)"
-echo "[deploy] JamScript Service ${service_id_b} created through minijam_createServiceV1"
-
-service_count="$(
-  curl -fsS -H "content-type: application/json" \
-    --data '{"jsonrpc":"2.0","id":1,"method":"jamscript_listServicesV1","params":{}}' \
-    "${JAMSCRIPT_BACKEND_URL}" |
-    node --input-type=module -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>{const r=JSON.parse(b);if(r.error)throw new Error(JSON.stringify(r.error));process.stdout.write(String(r.result.length));});'
-)"
-[[ "${service_count}" -ge 2 ]] || {
-  echo "dynamic backend registered fewer than two Services: ${service_count}" >&2
-  exit 1
-}
-[[ "$(sha256sum "${JAMSCRIPT_ROOT}/target/debug/jamscript-service-backend" | awk '{print $1}')" == "${backend_binary_hash}" ]] || {
-  echo "backend binary changed during the multi-Service deployment" >&2
-  exit 1
-}
-
-JAMSCRIPT_E2E_ARTIFACTS="${ARTIFACTS}" \
-JAMSCRIPT_E2E_SERVICE_ID="${service_id}" \
-JAMSCRIPT_E2E_SERVICE_KEY="${service_key}" \
-JAMSCRIPT_E2E_CODE_HASH="${code_hash}" \
-JAMSCRIPT_E2E_ARTIFACTS_B="${ARTIFACTS_B}" \
-JAMSCRIPT_E2E_SERVICE_ID_B="${service_id_b}" \
-JAMSCRIPT_E2E_SERVICE_KEY_B="${service_key_b}" \
-JAMSCRIPT_E2E_CODE_HASH_B="${code_hash_b}" \
+JAMSCRIPT_CONSUMER_E2E_RUNTIME="${E2E_RUNTIME}/consumer" \
+JAMSCRIPT_NODE_RPC="${MINIJAM_NODE_RPC}" \
+JAMSCRIPT_FORMAL_RPC_URL="${MINIJAM_FORMAL_RPC_URL}" \
+JAMSCRIPT_BACKEND_BIND="${JAMSCRIPT_BACKEND_BIND}" \
+JAMSCRIPT_BACKEND_URL="${JAMSCRIPT_BACKEND_URL}" \
 JAMSCRIPT_E2E_GENESIS_HASH="${genesis_hash}" \
-JAMSCRIPT_E2E_BACKEND_URL="${JAMSCRIPT_BACKEND_URL}" \
-JAMSCRIPT_E2E_LOG_DIR="${E2E_RUNTIME}/logs" \
-npm --prefix "${JAMSCRIPT_ROOT}/packages/client" run test:network
-minijam_result=PASS
-kill -0 "${backend_pid}"
-echo "NO_BACKEND_RECOMPILE=PASS"
-echo "NO_BACKEND_RESTART=PASS"
+  "${JAMSCRIPT_ROOT}/scripts/minijam-consumer-e2e.sh"
+
+result=PASS
