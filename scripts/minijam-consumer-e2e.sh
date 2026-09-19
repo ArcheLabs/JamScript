@@ -61,12 +61,16 @@ if [[ -z "${nvm_script}" ]]; then
   task_home="$(cd ~ && pwd -P)"
   nvm_script="${task_home}/.nvm/nvm.sh"
 fi
-# WSL development uses nvm; CI uses actions/setup-node. In both cases the
-# version gate below remains authoritative, without requiring a CI-only nvm.
-if [[ -s "${nvm_script}" ]]; then
+# WSL development uses nvm; CI uses actions/setup-node. Prefer an already
+# correct Node on PATH, and only ask nvm to switch when that version is
+# actually installed there. The version gate below remains authoritative.
+current_node_version="$(node --version 2>/dev/null || true)"
+if [[ "${current_node_version}" != "v24.15.0" && -s "${nvm_script}" ]]; then
   # shellcheck disable=SC1090
   source "${nvm_script}"
-  nvm use 24.15.0 >/dev/null
+  if [[ "$(nvm version 24.15.0 2>/dev/null || true)" == "v24.15.0" ]]; then
+    nvm use 24.15.0 >/dev/null
+  fi
 fi
 for command in node npm; do
   command -v "${command}" >/dev/null 2>&1 || {
