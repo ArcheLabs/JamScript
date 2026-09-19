@@ -100,6 +100,7 @@ fn generate_no_std_rust_with_backend(
     Ok(format!(
         r##"#![no_std]
 #![allow(static_mut_refs)]
+extern crate alloc;
 #[cfg(not(target_env = "polkavm"))]
 compile_error!("generated service must be built with the official PolkaVM target");
 
@@ -387,10 +388,14 @@ fn generate_scriptc_application_rust(
         .actions
         .iter()
         .all(|action| action.auth == AuthKind::Wallet);
+    let ownership_only = ir
+        .actions
+        .iter()
+        .all(|action| action.auth == AuthKind::Ownership);
     let single_public = ir.actions.len() == 1 && ir.actions[0].auth == AuthKind::Public;
-    if !wallet_only && !single_public {
+    if !wallet_only && !ownership_only && !single_public {
         return Err(
-            "language 0.2 currently requires either wallet-only actions or one public action"
+            "ScriptC currently requires wallet-only actions, ownership-only actions, or one public action"
                 .to_string(),
         );
     }
@@ -422,7 +427,7 @@ fn generate_scriptc_application_rust(
         .iter()
         .map(|action| {
             format!(
-                "{} => unsafe {{ {}(payload.as_ptr(), payload.len(), sender.as_ptr(), sender.len(), state_view.as_ptr(), state_view.len(), &mut output, &mut output_len) }},",
+                "{} => unsafe {{ {}(payload.as_ptr(), payload.len(), auth_context.as_ptr(), auth_context.len(), state_view.as_ptr(), state_view.len(), &mut output, &mut output_len) }},",
                 byte_array_literal(&action_selector(&action.name)),
                 scriptc_entry_symbol(&action.name)
             )
@@ -471,6 +476,42 @@ fn generate_scriptc_application_rust(
         execute_scriptc(context, selected_selector, verified.payload, &sender)
 "##
         )
+    } else if ownership_only {
+        format!(
+            r##"
+        let signed = jamscript_runtime_core::decode_signed_action_v2(raw_action)
+            .map_err(|error| StateAccessError::Rejected(error.code()))?;
+        match signed.action_selector {{ {known_selectors} _ => return Err(StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::UnknownAction.code())), }}
+        let selected_selector = signed.action_selector;
+        let nonce_owner = signed.act_as.as_ref().unwrap_or(&signed.controller);
+        let nonce_key = jamscript_runtime_core::ownership_nonce_key(nonce_owner)
+            .map_err(|_| StateAccessError::Backend)?;
+        let nonce_bytes = context.state().get(&nonce_key)?.unwrap_or_default();
+        let expected_nonce = match nonce_bytes.as_slice() {{
+            [] => 0u64,
+            bytes if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?),
+            _ => return Err(StateAccessError::Backend),
+        }};
+        let claim_key = if let Some(owner) = signed.act_as.as_ref() {{
+            Some(jamscript_runtime_core::control_claim_key(owner, &signed.controller)
+                .map_err(|_| StateAccessError::Backend)?)
+        }} else {{ None }};
+        let active_control_claim = match claim_key.as_ref() {{
+            Some(key) => matches!(context.state().get(key)?.as_deref(), Some([1])),
+            None => false,
+        }};
+        let verified = jamscript_runtime_core::verify_signed_action_v2(
+            signed, context.network_domain(), SERVICE_KEY, selected_selector,
+            Some(expected_nonce), active_control_claim,
+        ).map_err(|error| StateAccessError::Rejected(error.code()))?;
+        context.set_ownership(verified.owner.clone(), verified.controller.clone());
+        context.constrain_valid_until(verified.valid_until);
+        let next_nonce = expected_nonce.checked_add(1).ok_or(StateAccessError::Backend)?;
+        context.state().set(&nonce_key, &next_nonce.to_le_bytes())?;
+        let auth_context = encode_scriptc_ownership_context(&verified.owner, &verified.controller)?;
+        execute_scriptc(context, selected_selector, verified.payload, &auth_context)
+"##
+        )
     } else {
         let selector = byte_array_literal(&action_selector(&ir.actions[0].name));
         format!("execute_scriptc(context, {selector}, raw_action, &[])")
@@ -514,11 +555,33 @@ fn apply_script_result(
     }}
 }}
 
+fn encode_scriptc_ownership_context(
+    owner: &jamscript_runtime_core::Ownership,
+    controller: &jamscript_runtime_core::Ownership,
+) -> Result<alloc::vec::Vec<u8>, StateAccessError> {{
+    let owner = owner.encode().map_err(|_| StateAccessError::Backend)?;
+    let controller = controller.encode().map_err(|_| StateAccessError::Backend)?;
+    if owner.len() > u16::MAX as usize || controller.len() > u16::MAX as usize {{
+        return Err(StateAccessError::Backend);
+    }}
+    let total = 1usize
+        .checked_add(2 + owner.len())
+        .and_then(|value| value.checked_add(2 + controller.len()))
+        .ok_or(StateAccessError::Backend)?;
+    let mut encoded = alloc::vec::Vec::with_capacity(total);
+    encoded.push(1);
+    encoded.extend_from_slice(&(owner.len() as u16).to_le_bytes());
+    encoded.extend_from_slice(&owner);
+    encoded.extend_from_slice(&(controller.len() as u16).to_le_bytes());
+    encoded.extend_from_slice(&controller);
+    Ok(encoded)
+}}
+
 fn execute_scriptc(
     context: &mut service_runtime_core::ExecutionContext<'_>,
     selector: [u8; 8],
     payload: &[u8],
-    sender: &[u8],
+    auth_context: &[u8],
 ) -> Result<(), StateAccessError> {{
         context.begin_transaction()?;
     let business = (|| -> Result<(), StateAccessError> {{
@@ -647,6 +710,15 @@ impl<'a> PayloadReader<'a> {{
     fn natural(&mut self) -> Result<u64, ()> {{ let first = *self.input.get(self.offset).ok_or(())?; self.offset += 1; if first < 0x80 {{ return Ok(first as u64); }} let length = first.leading_ones() as usize; if length == 0 || length > 8 {{ return Err(()); }} let mut low = 0u64; for index in 0..length {{ low |= (*self.input.get(self.offset + index).ok_or(())? as u64) << (8 * index); }} self.offset += length; if length == 8 {{ return Ok(low); }} Ok(low | (((first as u64) & (0x7f >> length)) << (8 * length))) }}
     fn bounded_bytes(&mut self, max: usize) -> Result<&'a [u8], ()> {{ let length = self.natural()? as usize; if length > max {{ return Err(()); }} self.take(length) }}
     fn fixed_bytes(&mut self, length: usize) -> Result<&'a [u8], ()> {{ self.take(length) }}
+    fn ownership(&mut self) -> Result<jamscript_runtime_core::Ownership, ()> {{
+        let start = self.offset;
+        let _version = self.u8()?;
+        let _kind = self.u8()?;
+        let length = self.u16()? as usize;
+        if length > 4092usize {{ return Err(()); }}
+        self.take(length)?;
+        jamscript_runtime_core::decode_ownership(&self.input[start..self.offset]).map_err(|_| ())
+    }}
 }}
 
 {decoder}
@@ -695,9 +767,7 @@ fn payload_decoder(action: &ActionIr) -> Result<String, String> {
             TypeIr::Address => {
                 reads.push(format!("let {variable} = reader.fixed_bytes(32usize)?;"))
             }
-            TypeIr::Ownership => reads.push(format!(
-                "let {variable} = jamscript_runtime_core::decode_ownership(reader.bounded_bytes(4096usize)?).map_err(|_| ())?;"
-            )),
+            TypeIr::Ownership => reads.push(format!("let {variable} = reader.ownership()?;")),
             _ => {
                 return Err(format!(
                     "unsupported action input type for `{}`",
@@ -1019,6 +1089,41 @@ mod tests {
         assert!(source.contains("context.network_domain()"));
         assert!(!source.contains("NETWORK_DOMAIN"));
         assert!(source.contains("return error_output(error_code)"));
+    }
+
+    #[test]
+    fn ownership_scriptc_codegen_uses_canonical_payload_and_auth_context() {
+        let ir = ServiceIr {
+            package_name: "ownership".into(),
+            package_version: "1.0.0".into(),
+            language_version: "0.3".into(),
+            source: String::new(),
+            states: Vec::new(),
+            queries: Vec::new(),
+            native_imports: Vec::new(),
+            actions: vec![ActionIr {
+                name: "transfer".into(),
+                auth: AuthKind::Ownership,
+                input: vec![FieldIr {
+                    name: "to".into(),
+                    ty: TypeIr::Ownership,
+                }],
+                body: ActionBodyIr::ScriptC {
+                    symbol: "transfer".into(),
+                    source_unit: "service.ts".into(),
+                    state_effect: None,
+                },
+            }],
+        };
+        let source =
+            generate_no_std_rust_with_scriptc_context(&ir, ArtifactBuildContext::default())
+                .unwrap();
+        assert!(source.contains("decode_signed_action_v2"));
+        assert!(source.contains("encode_scriptc_ownership_context"));
+        assert!(source.contains("auth_context.as_ptr()"));
+        let decoder = payload_decoder(&ir.actions[0]).unwrap();
+        assert!(decoder.contains("let field_0 = reader.ownership()?;"));
+        assert!(!decoder.contains("reader.bounded_bytes(4096usize)"));
     }
 
     #[test]

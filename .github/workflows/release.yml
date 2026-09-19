@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: v0.1.0-rc.3 or v0.1.0
+        description: v0.1.0-rc.6 or v0.1.0
         required: true
         type: string
 
@@ -281,6 +281,38 @@ jobs:
           "${cli_check}/jams" --version
           "${cli_check}/jams" --help >/dev/null
           echo "CLI_${{ matrix.platform == 'linux-x86_64' && 'LINUX' || 'MACOS' }}_BUILT=PASS"
+      - name: Validate released Ownership consumer topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="${RUNNER_TEMP}/ownership-assets"
+          rm -rf -- "${assets}"
+          mkdir -p "${assets}"
+          cli_asset="jamscript-${VERSION}-${{ matrix.platform }}.tar.gz"
+          toolchain_asset="jamscript-toolchain-scriptc-m2-v1-${{ matrix.platform }}.tar.zst"
+          cp -L "${RUNNER_TEMP}/cli/${cli_asset}" "${assets}/${cli_asset}"
+          cp -L "${RUNNER_TEMP}/inputs/${toolchain_asset}" "${assets}/${toolchain_asset}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "${assets}" && sha256sum -- "${cli_asset}" "${toolchain_asset}" > SHA256SUMS)
+          else
+            (cd "${assets}" && shasum -a 256 -- "${cli_asset}" "${toolchain_asset}" > SHA256SUMS)
+          fi
+          result="${RUNNER_TEMP}/ownership-consumer-${{ matrix.platform }}.json"
+          ./scripts/release/ownership-consumer-closure.sh \
+            --asset-dir "${assets}" \
+            --release-version "${VERSION}" \
+            --target "${{ matrix.platform }}" \
+            --fixture-dir "${GITHUB_WORKSPACE}/tests/release-consumer-ownership" \
+            --result-json "${result}" \
+            --work-dir "${RUNNER_TEMP}/ownership-consumer-${{ matrix.platform }}-work"
+          jq -e '.status == "PASS" and .offline_build == true and .execution == true' "${result}"
+          echo "JAMSCRIPT_OWNERSHIP_CONSUMER_CHECK=PASS"
+          echo "JAMSCRIPT_OWNERSHIP_CONSUMER_ABI=PASS"
+          echo "JAMSCRIPT_OWNERSHIP_CONSUMER_BUILD=PASS"
+          echo "JAMSCRIPT_OWNERSHIP_KEY_PARITY=PASS"
+          npm --prefix packages/client ci --ignore-scripts --no-audit --no-fund
+          node --test packages/client/test/ownership-v1.test.mjs
+          echo "JAMSCRIPT_OWNERSHIP_CODEC_PARITY=PASS"
       - uses: actions/upload-artifact@v4
         with:
           name: release-input-cli-${{ matrix.platform }}
