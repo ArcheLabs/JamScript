@@ -21,6 +21,7 @@ tools/pvm-*-probe/Cargo.lock
 /examples/*/dist
 /packages/*/node_modules
 /packages/*/dist
+/packages/client/*.tgz
 **/.jamscript/deployments/
 
 # RustRover
