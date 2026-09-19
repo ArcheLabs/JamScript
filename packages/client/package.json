@@ -1,16 +1,28 @@
 {
-  "name": "@jamscript/minijam-client",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@jamscript/client",
+  "version": "0.1.0-rc.1",
+  "description": "TypeScript client for JamScript services, managed state and Ownership.",
+  "private": false,
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.mjs",
     "test:network": "node tests/minijam-network.e2e.mjs",
-    "test:transaction-closure": "node tests/minijam-transaction-closure.e2e.mjs"
+    "test:transaction-closure": "node tests/minijam-transaction-closure.e2e.mjs",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@polkadot-api/substrate-bindings": "^0.21.0",
@@ -19,5 +31,25 @@
   },
   "devDependencies": {
     "typescript": "^5.9.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ArcheLabs/JamScript.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/ArcheLabs/JamScript",
+  "bugs": {
+    "url": "https://github.com/ArcheLabs/JamScript/issues"
+  },
+  "keywords": [
+    "jamscript",
+    "jam",
+    "ownership",
+    "polkadot"
+  ],
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
