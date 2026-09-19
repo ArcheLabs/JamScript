@@ -104,7 +104,7 @@ function transformService(text, service) {
     retained.push(printer.printNode(ts.EmitHint.Unspecified, transformed, file));
   }
 
-  const sections = [runtimeImports(), codecRuntime(), ...retained];
+  const sections = [runtimeImports(), ownershipImports(), codecRuntime(), ...retained];
   for (const state of service.states) sections.push(generateStateBinding(state));
   for (const action of service.actions) {
     const execute = actionBodies.get(action.name);
@@ -185,6 +185,10 @@ function runtimeImports() {
   return `import {\n  abort, applicationKeyV1, appliedResult, caughtResult, initializeStateView,\n  stateDeleteRaw, stateGetRaw, stateHasRaw, stateSetRaw,\n} from "./scriptc_runtime.js";\nimport {\n  jamU8FromNumber, jamU16FromNumber, jamU32FromNumber,\n  jamU8AddChecked, jamU8SubChecked, jamU8MulChecked, jamU8DivChecked, jamU8ModChecked, jamU8Compare,\n  jamU16AddChecked, jamU16SubChecked, jamU16MulChecked, jamU16DivChecked, jamU16ModChecked, jamU16Compare,\n  jamU32AddChecked, jamU32SubChecked, jamU32MulChecked, jamU32DivChecked, jamU32ModChecked, jamU32Compare,\n  jamU64Const, jamU64Identity, jamU64Or, jamU64AddChecked, jamU64SubChecked, jamU64MulChecked,\n  jamU64DivChecked, jamU64ModChecked, jamU64Compare, jamU64FromNumber,\n  jamU64FromU128, jamU8FromU64, jamU16FromU64, jamU32FromU64,\n  jamU128Const, jamU128Identity, jamU128Or, jamU128AddChecked, jamU128SubChecked, jamU128MulChecked,\n  jamU128DivChecked, jamU128ModChecked, jamU128Compare, jamU128FromNumber, jamU128FromU64,\n  jamU8FromU128, jamU16FromU128, jamU32FromU128, jamEncodeU64, jamEncodeU128,\n  jamDecodeU64, jamDecodeU128,\n} from "./jamscript_numeric_runtime.js";\nexport { abort };`;
 }
 
+function ownershipImports() {
+  return `type JamOwnership = { version: number; kind: number; public: Uint8Array };\nimport { decodeOwnershipAt, decodeOwnershipAuthContext, encodeOwnership, ownershipKey } from "./scriptc_runtime.js";`;
+}
+
 function codecRuntime() {
   return `type JamCursor = { input: Uint8Array; offset: number };\ntype JamU64 = { w0: number; w1: number };\ntype JamU128 = { w0: number; w1: number; w2: number; w3: number };\nfunction jamTake(cursor: JamCursor, length: number): Uint8Array { const end = cursor.offset + length; if (length < 0 || end < cursor.offset || end > cursor.input.length) throw new Error("invalid JAM bytes"); const value = cursor.input.slice(cursor.offset, end); cursor.offset = end; return value; }\nfunction jamU8(cursor: JamCursor): number { return jamTake(cursor, 1)[0]; }\nfunction jamU16(cursor: JamCursor): number { const b = jamTake(cursor, 2); return b[0] + b[1] * 256; }\nfunction jamU32(cursor: JamCursor): number { const b = jamTake(cursor, 4); return b[0] + b[1] * 256 + b[2] * 65536 + b[3] * 16777216; }\nfunction jamU64(cursor: JamCursor): JamU64 { const value = jamDecodeU64(cursor.input, cursor.offset); cursor.offset += 8; return value; }\nfunction jamU128(cursor: JamCursor): JamU128 { const value = jamDecodeU128(cursor.input, cursor.offset); cursor.offset += 16; return value; }\nfunction jamEncodeU8(value: number): Uint8Array { if (value < 0 || value > 255 || Math.floor(value) !== value) throw new Error("u8 out of range"); return new Uint8Array([value]); }\nfunction jamEncodeU16(value: number): Uint8Array { if (value < 0 || value > 65535 || Math.floor(value) !== value) throw new Error("u16 out of range"); return new Uint8Array([value % 256, Math.floor(value / 256) % 256]); }\nfunction jamEncodeU32(value: number): Uint8Array { if (value < 0 || value > 4294967295 || Math.floor(value) !== value) throw new Error("u32 out of range"); return new Uint8Array([value % 256, Math.floor(value / 256) % 256, Math.floor(value / 65536) % 256, Math.floor(value / 16777216) % 256]); }\nfunction jamConcat(parts: Uint8Array[]): Uint8Array { let length = 0; for (const part of parts) length += part.length; const output = new Uint8Array(length); let offset = 0; for (const part of parts) { output.set(part, offset); offset += part.length; } return output; }\nfunction jamNatural(cursor: JamCursor): number { const first = jamU8(cursor); if (first < 128) return first; let length = 0; while (length < 8 && (first & (128 >>> length)) !== 0) length += 1; if (length === 0 || length > 7) throw new Error("invalid JAM natural"); const low = jamTake(cursor, length); let multiplier = 1; let value = 0; for (let index = 0; index < length; index += 1) { value += low[index] * multiplier; multiplier *= 256; } return value + (first & (127 >>> length)) * multiplier; }\nfunction jamEncodeNatural(value: number): Uint8Array { if (value < 0 || value > 4294967295 || Math.floor(value) !== value) throw new Error("natural out of range"); if (value < 128) return new Uint8Array([value]); let length = 1; let threshold = 16384; while (length < 4 && value >= threshold) { length += 1; threshold *= 128; } let divisor = 1; for (let index = 0; index < length; index += 1) divisor *= 256; const output = new Uint8Array(1 + length); output[0] = ((256 - (1 << (8 - length))) & 255) | (Math.floor(value / divisor) & (127 >>> length)); let multiplier = 1; for (let index = 0; index < length; index += 1) { output[index + 1] = Math.floor(value / multiplier) % 256; multiplier *= 256; } return output; }\nfunction jamFixed(value: Uint8Array, length: number): Uint8Array { if (value.length !== length) throw new Error("fixed bytes length"); return value.slice(); }\nfunction jamBounded(value: Uint8Array, max: number): Uint8Array { if (value.length > max) throw new Error("bounded bytes length"); return jamConcat([jamEncodeNatural(value.length), value]); }`;
 }
@@ -205,8 +209,15 @@ function generateStateBinding(state) {
 function generateAction(action, execute, printer, file, service) {
   const suffix = safe(action.name);
   const inputShape = { kind: "record", fields: action.input.map((field) => ({ name: field.name, type: numericType(field.ty) })) };
+  const ownershipAuth = action.auth === "Ownership";
+  const contextType = ownershipAuth
+    ? "{ owner: JamOwnership; controller: JamOwnership }"
+    : "{ sender: Uint8Array }";
+  const contextParameter = ownershipAuth
+    ? { name: "ctx", type: { kind: "record", fields: [{ name: "owner", type: "ownership" }, { name: "controller", type: "ownership" }] } }
+    : { name: "ctx", type: { kind: "record", fields: [{ name: "sender", type: "bytes" }] } };
   const parameters = [
-    { name: "ctx", type: { kind: "record", fields: [{ name: "sender", type: "bytes" }] } },
+    contextParameter,
     { name: "input", type: inputShape },
   ];
   const bodyNode = service.language_version === "0.3"
@@ -216,8 +227,12 @@ function generateAction(action, execute, printer, file, service) {
   const fields = action.input.map((field) => `${field.name}: ${tsType(field.ty)}`).join("; ");
   const inputType = `{ ${fields} }`;
   const decode = decoderFunction(`decode_${suffix}_input`, { Record: { fields: action.input } });
-  const senderCheck = action.auth === "Wallet" ? "if (sender.length !== 32) throw new Error(\"wallet sender length\");" : "if (sender.length !== 0) throw new Error(\"public sender must be empty\");";
-  return `${decode}\nfunction execute_${suffix}(ctx: { sender: Uint8Array }, input: ${inputType}): void ${body}\nexport function __jamscript_action_${action.name}_v1(payload: Uint8Array, sender: Uint8Array, stateView: Uint8Array): Uint8Array { try { initializeStateView(stateView); ${senderCheck} const input = decode_${suffix}_input(payload); execute_${suffix}({ sender }, input); return appliedResult(); } catch (error) { return caughtResult(error); } }`;
+  const authDecode = ownershipAuth
+    ? "const context = decodeOwnershipAuthContext(sender);"
+    : action.auth === "Wallet"
+      ? "if (sender.length !== 32) throw new Error(\"wallet sender length\"); const context = { sender };"
+      : "if (sender.length !== 0) throw new Error(\"public sender must be empty\"); const context = { sender };";
+  return `${decode}\nfunction execute_${suffix}(ctx: ${contextType}, input: ${inputType}): void ${body}\nexport function __jamscript_action_${action.name}_v1(payload: Uint8Array, sender: Uint8Array, stateView: Uint8Array): Uint8Array { try { initializeStateView(stateView); ${authDecode} const input = decode_${suffix}_input(payload); execute_${suffix}(context, input); return appliedResult(); } catch (error) { return caughtResult(error); } }`;
 }
 
 function decoderFunction(name, type) {
@@ -242,6 +257,7 @@ function decodeExpression(type, cursor, lines, next) {
   if (kind === "Bool") { const name = next(); lines.push(`const ${name} = jamU8(${cursor}); if (${name} > 1) throw new Error("invalid bool");`); return `${name} === 1`; }
   if (kind === "Address") return `jamTake(${cursor}, 32)`;
   if (kind === "FixedBytes") return `jamTake(${cursor}, ${data.len})`;
+  if (kind === "Ownership") return `decodeOwnershipAt(${cursor})`;
   if (kind === "Bytes" || kind === "String") {
     const length = next();
     const value = next();
@@ -277,6 +293,7 @@ function encodeExpression(type, value) {
   if (kind === "Bool") return `jamEncodeU8(${value} ? 1 : 0)`;
   if (kind === "Address") return `jamFixed(${value}, 32)`;
   if (kind === "FixedBytes") return `jamFixed(${value}, ${data.len})`;
+  if (kind === "Ownership") return `encodeOwnership(${value})`;
   if (kind === "Bytes") return `jamBounded(${value}, ${data.max})`;
   if (kind === "String") throw new Error("ScriptC M2 string execution is not implemented yet");
   if (kind === "Record") return `jamConcat([${data.fields.map((field) => encodeExpression(field.ty, `${value}.${field.name}`)).join(", ")}])`;
@@ -289,6 +306,7 @@ function tsType(type) {
   if (kind === "U64") return "JamU64";
   if (kind === "U128") return "JamU128";
   if (kind === "Bool") return "boolean";
+  if (kind === "Ownership") return "JamOwnership";
   if (["Address", "FixedBytes", "Bytes"].includes(kind)) return "Uint8Array";
   if (kind === "String") return "string";
   if (kind === "Unit") return "void";
@@ -304,7 +322,7 @@ function typeParts(type) {
 
 function numericType(type) {
   if (typeof type === "string") {
-    const names = { U8: "u8", U16: "u16", U32: "u32", U64: "u64", U128: "u128", Bool: "bool", Address: "bytes", Unit: "unit" };
+    const names = { U8: "u8", U16: "u16", U32: "u32", U64: "u64", U128: "u128", Bool: "bool", Address: "bytes", Ownership: "ownership", Unit: "unit" };
     return names[type] ?? type.toLowerCase();
   }
   const kind = Object.keys(type)[0];

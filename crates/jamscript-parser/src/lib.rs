@@ -80,9 +80,12 @@ fn parse_service_formal(
     let mut aliases = std::collections::BTreeMap::new();
     for item in module.body {
         match item {
-            ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
-                collect_import(&import, native_modules, &mut native_imports)?
-            }
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => collect_import(
+                &import,
+                native_modules,
+                &mut native_imports,
+                language_version,
+            )?,
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
                 decl: Decl::Fn(_),
                 ..
@@ -176,6 +179,7 @@ fn collect_import(
     import: &ImportDecl,
     native_modules: &[String],
     native_imports: &mut Vec<NativeImportIr>,
+    language_version: &str,
 ) -> Result<(), ParseError> {
     let source = import.src.value.to_string();
     let native_module = source.strip_prefix("native:");
@@ -238,6 +242,7 @@ fn collect_import(
                     | "wallet"
                     | "publicAction"
                     | "ownership"
+                    | "ownershipKey"
                     | "unit"
                     | "bool"
                     | "u8"
@@ -273,7 +278,9 @@ fn collect_import(
         {
             return Err(diag(
                 "1009",
-                format!("`{name}` is not part of the JamScript 0.2 standard library"),
+                format!(
+                    "`{name}` is not part of the JamScript {language_version} standard library"
+                ),
             ));
         }
     }
@@ -331,8 +338,12 @@ fn parse_scriptc_action(
 }
 
 fn parse_auth(expr: &Expr) -> Result<AuthKind, ParseError> {
-    let name =
-        call_name(expr).ok_or_else(|| diag("1019", "auth must be wallet() or publicAction()"))?;
+    let name = call_name(expr).ok_or_else(|| {
+        diag(
+            "1019",
+            "auth must be wallet(), ownership(), or publicAction()",
+        )
+    })?;
     let Expr::Call(call) = expr else {
         unreachable!()
     };
@@ -864,8 +875,8 @@ export const increment = action({ auth: wallet(), input: { value: u64 }, execute
 
     #[test]
     fn parses_ownership_auth_and_ownership_value_type() {
-        let source = r#"import { action, ownership } from "jam"; export const transfer = action({ auth: ownership(), input: { to: ownership }, execute(ctx, input) {} });"#;
-        let ir = parse_service_v02(source, "ownership", "1.0.0", &[]).unwrap();
+        let source = r#"import { action, ownership, ownershipKey } from "jam"; export const transfer = action({ auth: ownership(), input: { to: ownership }, execute(ctx, input) { ownershipKey(ctx.owner); ownershipKey(input.to); } });"#;
+        let ir = parse_service_v03(source, "ownership", "1.0.0", &[]).unwrap();
         assert_eq!(ir.actions[0].auth, AuthKind::Ownership);
         assert_eq!(ir.actions[0].input[0].ty, TypeIr::Ownership);
         let abi = jamscript_ir::abi_for(&ir).unwrap();
@@ -880,6 +891,13 @@ export const increment = action({ auth: wallet(), input: { value: u64 }, execute
             abi.actions[0].input[0].ty,
             jamscript_ir::AbiTypeDescriptor::Ownership
         );
+    }
+
+    #[test]
+    fn standard_library_diagnostic_uses_language_version() {
+        let source = r#"import { action, wallet, notAStandardLibrary } from "jam"; export const run = action({ auth: wallet(), input: {}, execute(ctx, input) {} });"#;
+        let error = parse_service_v03(source, "ownership", "1.0.0", &[]).unwrap_err();
+        assert!(error.to_string().contains("JamScript 0.3 standard library"));
     }
 
     #[test]

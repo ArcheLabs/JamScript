@@ -26,7 +26,7 @@ use std::{
 #[derive(Parser)]
 #[command(
     name = "jams",
-    version,
+    version = env!("JAMSCRIPT_RELEASE_VERSION"),
     about = "Deterministic TypeScript-like JAM Service toolchain"
 )]
 struct Cli {

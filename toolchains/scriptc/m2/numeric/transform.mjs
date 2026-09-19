@@ -369,7 +369,7 @@ class NumericContext {
 
 function fromIrType(type) {
   if (typeof type === "string") {
-    const map = { U8: "u8", U16: "u16", U32: "u32", U64: "u64", U128: "u128", Bool: "bool", Address: "bytes", Unit: "unit" };
+    const map = { U8: "u8", U16: "u16", U32: "u32", U64: "u64", U128: "u128", Bool: "bool", Address: "bytes", Ownership: "ownership", Unit: "unit" };
     return map[type] ?? type.toLowerCase();
   }
   const kind = Object.keys(type)[0];

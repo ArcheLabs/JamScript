@@ -128,6 +128,7 @@ echo "K4_TOOLCHAIN_CHECKSUM=PASS"
 tar -xzf "${bootstrap}/${cli_asset}" -C "${install}"
 test -x "${install}/jams"
 test ! -e "${install}/jamscript"
+test "$("${install}/jams" --version)" = "jams ${release_version#v}"
 echo "K3_CLI_DOWNLOAD=PASS"
 zstd -q -d -c "${bootstrap}/${toolchain_asset}" | tar -tf - >/dev/null
 echo "K5_TOOLCHAIN_DOWNLOAD=PASS"
@@ -167,7 +168,9 @@ EOF
   printf '%s\n' 'PVM_EXECUTION=PASS' >"${fixture_dir}/expected-output.txt"
 fi
 test -f "${fixture_dir}/jamscript.toml"
-test -f "${fixture_dir}/hello.ts"
+entry_file="$(sed -n 's/^entry[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' "${fixture_dir}/jamscript.toml" | head -n 1)"
+[[ -n "${entry_file}" ]] || { echo "fixture jamscript.toml has no entry" >&2; exit 1; }
+test -f "${fixture_dir}/${entry_file}"
 expected_output="${fixture_dir}/expected-output.txt"
 if [[ ! -f "${expected_output}" ]]; then
   expected_output="${work_dir}/expected-output.txt"
@@ -211,6 +214,19 @@ grep -q "${JAMSCRIPT_TOOLCHAIN_HOME}" <("${install}/jams" toolchain path)
 test ! -e "${install}/jamscript-service-backend"
 echo "K7_TOOLCHAIN_VERIFY=PASS"
 echo "K8_CLI_BACKEND_BOUNDARY=PASS"
+
+managed_root="$("${install}/jams" toolchain path)"
+if grep -Fq 'ownershipKey' "${fixture_dir}/${entry_file}"; then
+  "${managed_root}/bin/node" "${managed_root}/scriptc/m2/ownership-conformance.mjs" >"${work_dir}/ownership-key.log"
+  grep -q '^JAMSCRIPT_OWNERSHIP_KEY_SCRIPTC_PARITY=PASS$' "${work_dir}/ownership-key.log"
+  echo "JAMSCRIPT_OWNERSHIP_KEY_SCRIPTC_PARITY=PASS"
+fi
+
+"${install}/jams" check "${fixture_dir}" >"${work_dir}/check.log"
+"${install}/jams" abi "${fixture_dir}" >"${work_dir}/abi.json"
+test -s "${work_dir}/abi.json"
+echo "JAMSCRIPT_CONSUMER_CHECK=PASS"
+echo "JAMSCRIPT_CONSUMER_ABI=PASS"
 
 apple_sdk_status="not-applicable"
 if [[ "${target}" == "macos-arm64" ]]; then

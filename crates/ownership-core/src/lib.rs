@@ -156,6 +156,56 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    fn hex(value: &str) -> Vec<u8> {
+        let value = value.strip_prefix("0x").unwrap_or(value);
+        assert_eq!(value.len() % 2, 0);
+        (0..value.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&value[index..index + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn ownership_key_matches_shared_v1_vectors() {
+        let vectors = [
+            (
+                OwnershipKind::Ed25519Key,
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                "01002000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                "76ded8286e67ea442e884ab7d79d5ba42534f5368b866430199de51fd4cbad19",
+            ),
+            (
+                OwnershipKind::Sr25519Key,
+                "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+                "01012000202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+                "8b2dba2c0a2016616f8178d4100808009d2d2e3fd962a9d67c9c48d8ccfb0e81",
+            ),
+            (
+                OwnershipKind::Secp256k1Key,
+                "02404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+                "0102210002404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+                "eab5ba0f8f4f88daed79dffe70d1a652799fb689528a377373e3ed5d76b391b4",
+            ),
+            (
+                OwnershipKind::Secp256k1Keccak20,
+                "606162636465666768696a6b6c6d6e6f70717273",
+                "01031400606162636465666768696a6b6c6d6e6f70717273",
+                "6c0e402a3030ea26b717d56db0bbe8d25c4b70dcaceece84a2860f9e6e1c59ec",
+            ),
+            (
+                OwnershipKind::MulticryptoAccount32,
+                "7475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f90919293",
+                "010420007475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f90919293",
+                "c86d314201f5257882179547191990558e378743decf6d2c478ad53c3a1c6522",
+            ),
+        ];
+        for (kind, public, canonical, key) in vectors {
+            let ownership = Ownership::new(kind, hex(public)).unwrap();
+            assert_eq!(ownership.encode().unwrap(), hex(canonical));
+            assert_eq!(ownership.key().unwrap().as_slice(), hex(key));
+        }
+    }
+
     #[test]
     fn canonical_ed25519_round_trips() {
         let value = Ownership::from_array(OwnershipKind::Ed25519Key, [7; 32]).unwrap();

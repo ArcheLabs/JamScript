@@ -86,6 +86,31 @@ service identity, then run:
 `run` executes the generated PVM artifact with the deterministic local
 interpreter and prints `PVM_EXECUTION=PASS` on success.
 
+## Ownership services
+
+Released JamScript CLI and managed ScriptC toolchains support Ownership-native
+services without a source checkout, host ScriptC, or local Rust installation:
+
+```typescript
+import { action, ownership, ownershipKey, u128 } from "jam";
+
+export const transfer = action({
+  auth: ownership(),
+  input: { to: ownership, amount: u128 },
+  execute(ctx, input) {
+    const sender = ownershipKey(ctx.owner);
+    const recipient = ownershipKey(input.to);
+    // Use sender and recipient as canonical fixedBytes(32) state-map keys.
+  },
+});
+```
+
+`ctx.owner` is the effective owner (`act_as` when delegated, otherwise the
+controller). `ctx.controller` is the actual signing controller. Both retain
+the full Ownership version, kind, and public value. `ownershipKey()` derives a
+canonical 32-byte index from the complete Ownership value; it is not a public
+key, address, or account identifier.
+
 ## Build
 
 The canonical build installs the managed bundle once and then compiles without

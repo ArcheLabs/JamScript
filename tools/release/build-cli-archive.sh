@@ -17,7 +17,7 @@ target_dir="${OUT}/cargo-target"
 stage="${OUT}/cli-stage"
 rm -rf "${target_dir}" "${stage}"
 mkdir -p "${stage}"
-(cd "${SOURCE_ROOT}" && CARGO_TARGET_DIR="${target_dir}" cargo build --release --locked \
+(cd "${SOURCE_ROOT}" && JAMSCRIPT_RELEASE_VERSION="${VERSION#v}" CARGO_TARGET_DIR="${target_dir}" cargo build --release --locked \
   --bin jams)
 test -x "${target_dir}/release/jams"
 test ! -e "${target_dir}/release/jamscript"

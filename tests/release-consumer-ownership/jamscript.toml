@@ -1,0 +1,11 @@
+[package]
+name = "release-consumer-ownership"
+version = "0.1.0"
+entry = "ownership.ts"
+language = "0.3"
+
+[compiler]
+backend = "scriptc"
+
+[management]
+mode = "immutable"
