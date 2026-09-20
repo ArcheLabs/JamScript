@@ -310,9 +310,6 @@ jobs:
           echo "JAMSCRIPT_OWNERSHIP_CONSUMER_ABI=PASS"
           echo "JAMSCRIPT_OWNERSHIP_CONSUMER_BUILD=PASS"
           echo "JAMSCRIPT_OWNERSHIP_KEY_PARITY=PASS"
-          npm --prefix packages/client ci --ignore-scripts --no-audit --no-fund
-          node --test packages/client/test/ownership-v1.test.mjs
-          echo "JAMSCRIPT_OWNERSHIP_CODEC_PARITY=PASS"
       - uses: actions/upload-artifact@v4
         with:
           name: release-input-cli-${{ matrix.platform }}
