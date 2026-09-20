@@ -1,304 +1,92 @@
-# JamScript
+<div align="center">
+  <img src="https://docs.minijam.xyz/zh-CN/img/logo.svg" width="96" alt="MiniJAM logo" />
 
-JamScript is a deterministic TypeScript-like application runtime for JAM
-services. It compiles an external service project to a canonical PolkaVM/JAM
-artifact and keeps MiniJAM and Jambda out of the compiler and release path.
+  # JamScript
 
-## Supported platforms
+  **Build JAM services with a TypeScript-like developer experience.**
 
-The v0.1 release target matrix supports native `linux-x86_64` and native
-`macos-arm64` (Apple Silicon). `windows-x86_64` is explicitly outside the v0.1
-scope. macOS uses the official LLVM 20.1.8 ARM64 distribution and is produced
-and validated on a native Apple Silicon runner; Rosetta is not part of the
-support contract.
+  [English](README.md) · [简体中文](README.zh-CN.md) · [Documentation](https://docs.minijam.xyz/zh-CN/docs/jamscript)
 
-## Quick install
+  ![Release](https://img.shields.io/github/v/release/ArcheLabs/JamScript?include_prereleases&sort=semver)
+  ![License](https://img.shields.io/github/license/ArcheLabs/JamScript)
+</div>
 
-Choose an existing published version from the repository's GitHub Releases.
-The failed `v0.1.0-rc.2` tag is retained for provenance and has no release
-assets.
+JamScript hides the low-level JAM/PVM plumbing behind a small language, a deterministic build pipeline, and the `jams` CLI. You write services; JamScript handles the compiler toolchain, PVM artifacts, deployment flow, and local backend.
+
+## ⚡ Install
 
 ```bash
-VERSION='v0.1.0-rc.N'
-curl -fsSL \
-  "https://raw.githubusercontent.com/ArcheLabs/JamScript/${VERSION}/install.sh" \
-  | bash -s -- --version "${VERSION}"
+curl -fsSL https://install.minijam.xyz/jamscript | bash
 ```
 
-Then:
+The installer automatically selects the latest published JamScript release and installs:
+
+- `jams` — the JamScript CLI
+- the managed compiler/toolchain
+- the matching native `jamscript-service-backend`
+
+Supported today: **Linux x86_64** and **macOS Apple Silicon**.
+
+To pin an exact release:
 
 ```bash
-jams toolchain verify
-jams --help
+curl -fsSL https://install.minijam.xyz/jamscript \
+  | bash -s -- --version v0.1.0-rc.7
 ```
 
-The installer does not modify shell profiles. If `~/.local/bin` is not on the
-current shell's `PATH`, export it as shown by the installer.
-
-## Local product installation
-
-Before a public release is available, Linux x86_64 contributors can build the
-local product once from this repository:
-
-```bash
-./tools/local-install.sh
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-This installs `jams`, imports the managed toolchain into the normal immutable
-cache, and verifies it. The backend is released independently; consumer
-projects use the installed `jams` command without compiling this repository.
-
-## Manual installation
-
-Download the target-specific CLI archive, managed toolchain bundle, and
-`SHA256SUMS` from the immutable GitHub Release tag. Verify the checksums,
-extract the CLI, and install the pinned bundle:
-
-```bash
-sha256sum -c SHA256SUMS
-tar -xzf jamscript-v0.1.0-linux-x86_64.tar.gz
-./jams toolchain install
-./jams toolchain verify
-```
-
-On macOS, use `shasum -a 256 -c SHA256SUMS` and the matching
-`jamscript-v0.1.0-macos-arm64.tar.gz` archive. The managed toolchain remains a
-`.tar.zst` release asset, but the end-user CLI bootstrap does not require zstd.
-
-The release archive embeds the exact toolchain URL and digest; no repository
-checkout or developer toolchain is needed. The public executable is `jams`; the
-release does not provide a `jamscript` compatibility alias.
-
-See [`docs/installation.md`](docs/installation.md) for custom destinations,
-PATH handling, retry, and manual uninstall details.
-
-## Hello World
-
-Create a project containing an entry TypeScript file and a `.jamscript`
-service identity, then run:
-
-```bash
-./jams build ./hello --offline --output ./dist
-./jams run ./dist/service.pvm
-```
-
-`run` executes the generated PVM artifact with the deterministic local
-interpreter and prints `PVM_EXECUTION=PASS` on success.
-
-## Ownership services
-
-Released JamScript CLI and managed ScriptC toolchains support Ownership-native
-services without a source checkout, host ScriptC, or local Rust installation:
+## 🧩 Example
 
 ```typescript
-import { action, ownership, ownershipKey, u128 } from "jam";
+import { action, wallet, u64 } from "jam";
 
-export const transfer = action({
-  auth: ownership(),
-  input: { to: ownership, amount: u128 },
+export const increment = action({
+  auth: wallet(),
+  input: { value: u64 },
   execute(ctx, input) {
-    const sender = ownershipKey(ctx.owner);
-    const recipient = ownershipKey(input.to);
-    // Use sender and recipient as canonical fixedBytes(32) state-map keys.
+    return input.value + 1;
   },
 });
 ```
 
-`ctx.owner` is the effective owner (`act_as` when delegated, otherwise the
-controller). `ctx.controller` is the actual signing controller. Both retain
-the full Ownership version, kind, and public value. `ownershipKey()` derives a
-canonical 32-byte index from the complete Ownership value; it is not a public
-key, address, or account identifier.
-
-## Build
-
-The canonical build installs the managed bundle once and then compiles without
-network access. `jams toolchain verify` checks the immutable managed bundle
-before a canonical build can use it.
-
-The release ABI uses a single typed descriptor for actions, managed state,
-queries, and clients.
-
-The supported path uses imports from the `jam` standard library, bounded
-primitive input schemas, ABI generation, and generated `no_std` Rust for the
-canonical JAM target. JamScript manages its compiler toolchain automatically: the
-first canonical build installs the exact platform bundle and verifies its
-checksum. `build` emits `service.blob`,
-`service.polkavm`, `service.pvm`, and a portable Builder host artifact. The
-production backend consumes the linked `service.pvm` through its persistent
-PVM loader; the generated Builder artifact remains a legacy compatibility
-artifact and is not a backend deployment dependency.
-
-The v0 release boundary uses `SignedActionV1`: canonical bounded encoding,
-payload commitments, ServiceKey identity, domain-separated sr25519
-verification, sender derivation, expiry, and nonce-context validation.
-Formal V1 is the first supported wire/runtime protocol; development generations
-before it are not compatibility contracts.
-
-The release ABI uses one typed descriptor and the canonical JAM `jam-codec
-0.1.1` encoding rules; JamScript does not maintain an independent binary
-codec. See
-[`docs/release-conformance.md`](docs/release-conformance.md) for the type
-system and canonical vectors.
-
-The runtime layer provides a language-independent managed-state foundation:
-SDK LayoutV1 trie roots and proofs, canonical diffs/transitions, managed wallet
-nonce keys, proof-backed guest interfaces, and a reference host provider.
-`jamscript-runtime` exposes the formal runtime wrapper.
+Build and deploy:
 
 ```bash
-cargo build --locked --bin jams
-cargo run --locked --bin jams -- new hello-jam
-cargo run --locked --bin jams -- check examples/counter
-cargo run --locked --bin jams -- build examples/counter
-cargo run --locked --bin jams -- toolchain status
-cargo run --locked --bin jams -- toolchain verify
+jams build
+jams deploy --network local
 ```
 
-## Run
-
-The `run` command is a release validation aid for the generated
-`service.pvm`.
-
-## Deploy
-
-Deployment is a separate, explicit step after artifact creation. Configure
-named MiniJAM networks in `jamscript.toml`:
-
-```toml
-[deployment]
-default_network = "local"
-
-[networks.local]
-kind = "minijam"
-deployment_rpc = "http://127.0.0.1:8080"
-node_rpc = "http://127.0.0.1:9944"
-# Optional but recommended for identity verification.
-genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-```
-
-Then inspect and deploy a verified artifact:
-
-```bash
-jams network list
-jams build ./hello --output ./hello/dist
-jams deploy ./hello --network local --artifact ./hello/dist
-jams backend start --network local
-```
-
-`jams deploy` supports MiniJAM Stage-1 `minijam_createServiceV1` only. It
-verifies `service.blob`, `build.json`, and `checksums.json` before submitting,
-checks the configured genesis identity before mutation, and writes a local
-record under `.jamscript/deployments/`. JAM deployment is reserved for a
-future release. See [`docs/deployment.md`](docs/deployment.md) for custom
-RPCs, precedence rules, records, and the real-network E2E workflow.
-
-## Optional backend
-
-The JamScript Backend is optional: `jams check`, `jams build`, and `jams deploy`
-do not require a backend binary. If `backend_rpc` is configured, deployment
-registration is a separate retryable prewarm step; a backend outage never
-undoes a finalized chain deployment.
-
-For local development, configure `[networks.local]` with `node_rpc` and
-`deployment_rpc`, then run the backend in the foreground:
+Run the local backend when the application needs it:
 
 ```bash
 jams backend start --network local
 ```
 
-The backend stores current materialized state in a genesis-bound RocksDB under
-`<data-dir>/db` and PVM artifacts under `<data-dir>/artifacts`. It compares its
-durable head with the canonical JAM/MiniJAM managed-state commitment before
-serving a state query. `/healthz` is liveness; `/readinessz` includes database,
-artifact-store, and network readiness. Stop the backend before backing up the
-entire data directory; do not copy a live RocksDB directory.
+## ✨ What JamScript handles
 
-The TypeScript client uses the neutral `jamscript_getStateV1` proofless API by
-default. For independent verification, pass
-`{ stateVerification: "proof" }`; refine and cross-Service runtime execution
-always retain proof verification regardless of frontend mode. A third-party
-provider uses the same `backend_rpc` field and protocol.
+- deterministic JamScript → PVM builds
+- managed compiler and toolchain installation
+- JAM-compatible typed ABI and managed state
+- Ownership-based authorization
+- MiniJAM deployment
+- local backend lifecycle through the `jams` CLI
 
-For Docker, use a versioned image and a persistent volume:
+You do not need to work directly with Refine/Accumulate internals for normal application development.
 
-```bash
-docker run --rm \
-  -p 8090:8090 \
-  -e JAMSCRIPT_NODE_RPC=http://host.docker.internal:9944 \
-  -e JAMSCRIPT_FORMAL_RPC=http://host.docker.internal:8080 \
-  -e JAMSCRIPT_BACKEND_CORS_ORIGINS='*' \
-  -v jamscript-backend:/var/lib/jamscript \
-  ghcr.io/archelabs/jamscript-backend:v0.1.0
-```
+## 📚 Documentation
 
-`docker-compose.backend.yml` provides the equivalent persistent-volume setup.
-Backend images are published by the independent `Release Backend` workflow;
-its GitHub tag is `backend-v<version>` while the image tag is `v<version>`.
-The frontend trusts the selected backend for convenience data; consensus,
-refine witnesses, and accumulate root revalidation remain chain-authoritative.
+For guides, architecture, language details, deployment, and examples:
 
-## Toolchain model
+**[JamScript Documentation →](https://docs.minijam.xyz/zh-CN/docs/jamscript)**
 
-JamScript owns Node, ScriptC, Rust, rust-src/compiler-builtins, LLVM/Clang,
-PolkaVM linker inputs, vendored Cargo dependencies, and the JAM target SDK in
-one digest-addressed, platform-specific bundle. The user does not need to
-install Rust, Node, LLVM, Docker, or zstd for the canonical `jams build` path.
-The separately compiled native Builder host adapter uses Apple's SDK / Command
-Line Tools ABI boundary; the native release gate is the proof of that separate
-host-linkage contract.
+## ⚠️ Limitations
 
-## Limitations
+JamScript `v0.1` is currently an RC/testnet developer preview.
 
-The v0.1 boundary is a testnet developer preview. Windows remains unsupported.
-Mainnet economics, distributed providers, and generic PVM witness discovery
-remain out of scope.
+- The current implementation builds on the mature PolkaVM toolchain. This gives JamScript a reliable execution foundation, but also introduces efficiency overhead that we intend to reduce as the toolchain becomes more JamScript-specific.
+- In the current ScriptC execution path, ordinary numeric computation still uses floating-point `number` representation by default in some paths. Fixed-width ABI types such as `u64` and `u128` remain explicit at service boundaries, but the internal numeric lowering is not yet fully optimized. This will be improved before the stable release.
+- Windows is not supported in the current release.
+- Generic JAM mainnet deployment remains future work.
 
-## Development and contribution
+## 📄 License
 
-To run the canonical downstream MiniJAM compatibility path (it pulls the
-exact aggregate image pinned in `toolchains/minijam.lock`):
-
-    ./scripts/minijam-network-e2e.sh
-
-The consumer assertions can also target an already-running canonical local
-endpoint by setting `JAMSCRIPT_NODE_RPC` and `JAMSCRIPT_FORMAL_RPC_URL`; the
-canonical network script owns the aggregate image lifecycle by default.
-
-To validate contributor guest dependency acquisition with a fresh Cargo home
-(this is an acceptance check, not a cache-warmup prerequisite):
-
-    ./scripts/test-contributor-cold-guest.sh
-
-The checked-in guest dependency graph is maintained explicitly with
-`tools/update-polkavm-guest-lock`; normal builds copy that lock and use
-`--locked`.
-
-If the default npm registry is unreachable, set `JAMSCRIPT_NPM_REGISTRY` for
-that run, for example `https://registry.npmmirror.com`.
-
-For contributors building from this repository, use
-`JAMSCRIPT_DEV_TOOLCHAIN=1` with the repository's target SDK. Canonical user
-builds use the managed bundle and do not require host Node, LLVM, Rust, Docker,
-or a MiniJAM checkout. See
-[`docs/toolchain-distribution.md`](docs/toolchain-distribution.md).
-
-Managed-state architecture details are in
-[`docs/service-runtime-architecture.md`](docs/service-runtime-architecture.md),
-[`docs/managed-state.md`](docs/managed-state.md), and
-[`docs/state-recovery.md`](docs/state-recovery.md).
-
-The public type and codec references are in [`docs/type-system.md`](docs/type-system.md)
-and [`docs/codec.md`](docs/codec.md).
-
-Real applications built with JamScript are maintained in their product
-repositories. JAM OS's canonical JNS service is one downstream consumer;
-JamScript's own release gates use generic compiler and runtime fixtures.
-
-The v0 testnet release boundary and operator workflow are documented in
-[`docs/releasing.md`](docs/releasing.md).
-
-The MiniJamSpec compatibility audit, including the pinned revisions and the
-Refine/Accumulate ABI decision, is documented in
-[`docs/minijam-spec-compatibility.md`](docs/minijam-spec-compatibility.md).
+Apache-2.0

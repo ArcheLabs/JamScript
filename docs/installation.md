@@ -1,120 +1,129 @@
 # JamScript installation
 
+## Quick install
+
+```bash
+curl -fsSL https://install.minijam.xyz/jamscript | bash
+```
+
+With no arguments, the installer selects the newest published JamScript release,
+including RC/prerelease releases. It then installs three matching components:
+
+1. `jams`, the JamScript CLI;
+2. the managed compiler/toolchain used by `jams build`;
+3. the native `jamscript-service-backend` from the matching
+   `backend-<JamScript version>` release.
+
+The CLI and backend remain independently released artifacts. The installer only
+combines them into one developer-facing installation flow.
+
+The installer verifies the SHA-256 checksum published with each release before
+installing an executable.
+
 ## Supported platforms
 
-JamScript v0.1 provides native release assets for:
+JamScript v0.1 currently provides native release assets for:
 
 - Linux x86_64 (`linux-x86_64`)
 - macOS Apple Silicon (`macos-arm64`)
 
-Windows x86_64 is explicitly outside the v0.1 release scope. macOS support
-means a native arm64 process on Apple Silicon; Rosetta is not a supported
-release path.
+Windows is outside the current v0.1 release scope.
 
-## Quick install
+## Pin a version
 
-Choose an existing published version from GitHub Releases and keep the
-installer URL and requested release on that same immutable tag. The failed
-`v0.1.0-rc.2` tag is retained for provenance and has no release assets.
+For reproducible environments, pass an immutable release tag:
 
 ```bash
-VERSION='v0.1.0-rc.N'
-curl -fsSL \
-  "https://raw.githubusercontent.com/ArcheLabs/JamScript/${VERSION}/install.sh" \
-  | bash -s -- --version "${VERSION}"
+curl -fsSL https://install.minijam.xyz/jamscript \
+  | bash -s -- --version v0.1.0-rc.7
 ```
 
-The installer detects the host platform, downloads the matching gzip CLI
-archive, verifies its SHA-256 entry, installs `jams` atomically, then runs:
+The matching backend release is resolved as `backend-v0.1.0-rc.7`.
+
+A custom binary directory can be selected with:
 
 ```bash
-jams toolchain install
+curl -fsSL https://install.minijam.xyz/jamscript \
+  | bash -s -- --bin-dir "$HOME/bin"
 ```
 
-The user-facing bootstrap needs Bash, curl, tar, gzip, and either `sha256sum`
-or macOS `shasum`. It does not require Rust, Cargo, Node, LLVM, zstd, Docker,
-or a repository checkout. The managed compiler bundle is downloaded and
-verified by JamScript itself.
+The default destination is `~/.local/bin`. The installer does not use `sudo`
+and does not edit shell profiles.
 
-The installer does not modify shell profiles. If `~/.local/bin` is not on the
-current shell's `PATH`, export it as shown by the installer:
+## Requirements
+
+The bootstrap installer needs Bash, curl, tar, gzip, awk, and either
+`sha256sum` or macOS `shasum`.
+
+It does **not** require a repository checkout or a preinstalled Rust, Cargo,
+Node, LLVM, Docker, or zstd toolchain. JamScript installs and verifies its
+managed compiler/toolchain itself.
+
+## Verify
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+jams --help
+jams toolchain verify
 ```
 
-Before a public release is available, Linux x86_64 contributors can build the
-local product once from the JamScript repository:
+For a configured local MiniJAM network:
 
 ```bash
-./tools/local-install.sh
+jams backend start --network local
 ```
 
-The producer utility installs the CLI and verified managed toolchain. The
-backend is an independently released deployable service and is not installed
-by the JamScript CLI installer. Consumer projects do not compile the JamScript
-repository.
+`jams backend start` finds the backend installed next to the `jams` executable.
+The existing `PATH` and `JAMSCRIPT_BACKEND_BIN` overrides remain available for
+custom backend installations.
 
 ## Manual installation
 
-For users who do not want to pipe a script into Bash:
+Users who do not want to pipe a script into Bash can install manually:
 
-1. Download the target-specific CLI archive, managed toolchain bundle, and
-   `SHA256SUMS` from the same immutable GitHub Release tag.
-2. Verify the downloaded files with `sha256sum -c SHA256SUMS` on Linux or
-   `shasum -a 256 -c SHA256SUMS` on macOS.
-3. Extract the CLI archive with `tar -xzf jamscript-<VERSION>-<TARGET>.tar.gz`.
-4. Install the extracted `jams` into a directory on `PATH`, for example
-   `~/.local/bin`, without creating a `jamscript` compatibility alias.
-5. Run `jams toolchain install`, then `jams toolchain verify`.
+1. Download the target-specific JamScript CLI archive and `SHA256SUMS` from the
+   chosen `v...` GitHub Release.
+2. Download the target-specific backend archive and `SHA256SUMS` from the
+   matching `backend-v...` GitHub Release.
+3. Verify both checksums.
+4. Install `jams` and `jamscript-service-backend` into a directory on `PATH`.
+5. Run `jams toolchain install` and `jams toolchain verify`.
 
-The managed toolchain release asset remains `.tar.zst` because it is an
-internal, digest-addressed bundle consumed by the CLI. End users do not need
-to invoke zstd or unpack that bundle manually.
+The managed toolchain remains a digest-addressed `.tar.zst` release asset
+consumed by the CLI; users do not need to unpack it manually.
 
-## Options and cache
+## Retry and uninstall
 
-The installer accepts `--version VERSION`, `--bin-dir DIR`, and `--help`. The
-default CLI destination is `~/.local/bin/jams`; no `sudo` is used and no shell
-profile is changed. A custom destination can be selected with:
+If the CLI/backend installation succeeds but toolchain installation fails:
 
 ```bash
-./install.sh --version <VERSION> --bin-dir "$HOME/bin"
+jams toolchain install
+jams toolchain verify
 ```
 
-The managed bundle is cached under a platform-specific, SHA-256-addressed
-directory. `JAMSCRIPT_TOOLCHAIN_HOME` can relocate it for CI or enterprise
-installations. `jams toolchain path` prints the selected cache path.
+Re-running the installer is safe and replaces the installed executables only
+after downloaded artifacts pass checksum and archive validation.
 
-## Retry, reinstall, and uninstall
-
-If the CLI is installed but the managed toolchain download fails, retry with:
+To remove the installed executables from the default location:
 
 ```bash
-~/.local/bin/jams toolchain install
-~/.local/bin/jams toolchain verify
-```
-
-Re-running the installer is safe and re-verifies the CLI before replacement.
-To uninstall the CLI manually:
-
-```bash
-rm -f ~/.local/bin/jams
+rm -f ~/.local/bin/jams ~/.local/bin/jamscript-service-backend
 ```
 
 The managed toolchain cache can be removed separately after checking its path
-with `jams toolchain path`.
+with:
+
+```bash
+jams toolchain path
+```
 
 ## macOS SDK boundary
 
 `jams build` compiles the canonical JAM guest/service path with the managed
 LLVM, Rust, ScriptC, vendored dependencies, and JAM SDK in the bundle. It does
-not compile the generated Builder host application. The generated Builder and
-its native adapter are legacy compatibility/test artifacts; they are not
-required by the production backend. If a user separately compiles
-`generated_builder_application.rs` into that adapter, the host binary links against Apple's arm64 ABI and therefore needs
-the macOS SDK / Xcode Command Line Tools (or an explicitly supplied `SDKROOT`).
-Those Apple components are not bundled or redistributable by JamScript. The
-CI build-smoke job exercises the canonical JamScript compiler path on a native
-macOS runner; JamScript does not claim that the separate host adapter has zero
-OS SDK prerequisites.
+not compile the generated Builder host application.
+
+The generated Builder/native host adapter remains a compatibility/test artifact.
+If a user separately compiles that adapter, the host binary links against the
+Apple arm64 ABI and therefore needs the macOS SDK/Xcode Command Line Tools (or
+an explicitly supplied `SDKROOT`). Those Apple components are not bundled by
+JamScript.
