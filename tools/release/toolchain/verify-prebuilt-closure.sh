@@ -3,7 +3,7 @@ set -euo pipefail
 
 BUNDLE_ROOT="${1:?usage: verify-prebuilt-closure.sh bundle-root}"
 
-for binary in node clang llvm-ar guest-linker; do
+for binary in node clang llvm-ar ar guest-linker; do
   path="${BUNDLE_ROOT}/bin/${binary}"
   test -x "${path}" || { echo "missing consumer executable: ${path}" >&2; exit 1; }
   if [[ "${binary}" == "guest-linker" ]]; then
@@ -38,7 +38,7 @@ printf '%s\n' 'int jamscript_consumer_probe(void) { return 0; }' >"${run_root}/p
   --target=riscv64-unknown-elf -march=rv64emac -mabi=lp64e \
   -ffreestanding -fno-builtin -fPIC -ffunction-sections -Os \
   -c "${run_root}/probe.c" -o "${run_root}/probe.o"
-"${BUNDLE_ROOT}/bin/llvm-ar" rcsD "${run_root}/probe.a" "${run_root}/probe.o"
+"${BUNDLE_ROOT}/bin/ar" rcsD "${run_root}/probe.a" "${run_root}/probe.o"
 test -s "${run_root}/probe.a"
 echo "CONSUMER_CLANG_ARCHIVE=PASS"
 echo "PREBUILT_CONSUMER_CLOSURE=PASS"

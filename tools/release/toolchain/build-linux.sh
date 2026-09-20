@@ -54,6 +54,7 @@ copy_tree() {
 copy_file "${NODE_BIN}" bin/node
 copy_file "${CLANG_BIN}" bin/clang
 copy_file "${LLVM_AR_BIN}" bin/llvm-ar
+copy_file "${LLVM_AR_BIN}" bin/ar
 copy_file "${LLD_BIN}" bin/guest-linker
 copy_tree "${ROOT}/toolchains/scriptc" scriptc
 copy_file "${SCRIPTC_LINUX_RANDOM}" scriptc/node_modules/@scriptc/runtime/src/scr_linux.c
@@ -136,7 +137,7 @@ for binary in bin/node; do
   fi
 done
 if [[ "${JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING:-0}" != "1" && "$(command -v patchelf || true)" ]]; then
-  for binary in bin/clang bin/llvm-ar bin/guest-linker; do
+  for binary in bin/clang bin/llvm-ar bin/ar bin/guest-linker; do
     patchelf --set-rpath '$ORIGIN/../lib' "${STAGE}/${binary}"
   done
 fi
@@ -158,7 +159,6 @@ rm -rf -- \
   "${STAGE}/bin/rustc" \
   "${STAGE}/bin/cargo" \
   "${STAGE}/bin/jamscript-host-linker" \
-  "${STAGE}/bin/ar" \
   "${STAGE}/bin/llvm-readelf" \
   "${STAGE}/Cargo.lock" \
   "${STAGE}/toolchains/polkavm.lock"
