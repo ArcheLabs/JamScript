@@ -12,10 +12,11 @@ use jamscript_runtime_core::{
     ownership_nonce_key, verify_signed_action_v1, verify_signed_action_v2,
 };
 use service_runtime_core::{
-    BackendMetadataV1, ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV1,
-    ScriptActionResultV1, ServiceApplication, ServiceKeyV1, StateAccessError, StateRoot,
-    MANAGED_STATE_COMMITMENT_KEY_V1, MAX_SCRIPT_ACTION_RESULT_BYTES,
+    BackendMetadataV1, RuntimeRefineInputV1, RuntimeRefineOutputV1, ScriptActionResultV1,
+    ServiceApplication, ServiceKeyV1, StateAccessError, MAX_SCRIPT_ACTION_RESULT_BYTES,
 };
+#[cfg(target_env = "polkavm")]
+use service_runtime_core::{ManagedStateCommitmentV1, StateRoot, MANAGED_STATE_COMMITMENT_KEY_V1};
 
 const DESCRIPTOR_VERSION: u32 = 1;
 const AUTH_PUBLIC: u8 = 0;
@@ -82,6 +83,10 @@ unsafe extern "C" {
     static jamscript_service_descriptor_v1: JamScriptServiceDescriptorV1;
 
     fn minijam_payload(output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
+}
+
+#[cfg(target_env = "polkavm")]
+unsafe extern "C" {
     fn minijam_result_count() -> usize;
     fn minijam_result(
         index: usize,
@@ -113,6 +118,7 @@ unsafe extern "C" {
 }
 
 static mut INPUT: [u8; 1_048_576] = [0; 1_048_576];
+#[cfg(target_env = "polkavm")]
 static mut RESULT: [u8; 2_097_152] = [0; 2_097_152];
 static mut OUTPUT: [u8; 2_097_152] = [0; 2_097_152];
 
@@ -585,6 +591,7 @@ pub extern "C" fn minijam_accumulate() {
 #[no_mangle]
 pub extern "C" fn minijam_accumulate() {}
 
+#[cfg(target_env = "polkavm")]
 fn read_current_commitment() -> Result<StateRoot, ()> {
     let key = MANAGED_STATE_COMMITMENT_KEY_V1;
     let mut bytes = [0u8; 34];
@@ -607,6 +614,7 @@ fn read_current_commitment() -> Result<StateRoot, ()> {
     }
 }
 
+#[cfg(target_env = "polkavm")]
 fn read_service_commitment(service_id: u32) -> Result<StateRoot, ()> {
     let key = MANAGED_STATE_COMMITMENT_KEY_V1;
     let mut bytes = [0u8; 34];
@@ -629,6 +637,7 @@ fn read_service_commitment(service_id: u32) -> Result<StateRoot, ()> {
     }
 }
 
+#[cfg(target_env = "polkavm")]
 fn decode_accumulate_init_input(input: &[u8]) -> Result<(u64, u64, u64), ()> {
     let mut offset = 0usize;
     let tick = read_fnencode(input, &mut offset)?;
@@ -640,6 +649,7 @@ fn decode_accumulate_init_input(input: &[u8]) -> Result<(u64, u64, u64), ()> {
     Ok((tick, service_id, items_count))
 }
 
+#[cfg(target_env = "polkavm")]
 fn read_fnencode(input: &[u8], offset: &mut usize) -> Result<u64, ()> {
     let first = *input.get(*offset).ok_or(())?;
     *offset += 1;
