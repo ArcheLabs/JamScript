@@ -155,8 +155,11 @@ run_expect_failure env PATH="$fake_bin:$test_path" HOME="$home_dir" \
   JAMSCRIPT_TEST_LOG="$log_file" bash "$ROOT/install.sh" --version "$version" --bin-dir "$bin_dir"
 rm -f "${fake_bin}/uname"
 
-# I4 and I5: required and validated release versions.
-run_expect_failure env HOME="$home_dir" bash "$ROOT/install.sh" --bin-dir "$bin_dir"
+# I4 and I5: latest release resolution and validated explicit versions.
+HOME="$home_dir" PATH="$test_path" JAMSCRIPT_INSTALL_TEST=1 JAMSCRIPT_INSTALL_TEST_ASSET_DIR="$asset_dir" \
+  JAMSCRIPT_INSTALL_TEST_LATEST_VERSION="$version" JAMSCRIPT_TEST_LOG="$log_file" \
+  bash "$ROOT/install.sh" --bin-dir "$bin_dir" >/dev/null
+test -x "$bin_dir/jams"
 run_expect_failure env HOME="$home_dir" bash "$ROOT/install.sh" --version 'v0.1.0/rc.1' --bin-dir "$bin_dir"
 
 # I6: checksum entry is required.
