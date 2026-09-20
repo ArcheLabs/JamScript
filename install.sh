@@ -50,7 +50,7 @@ while (($# > 0)); do
   esac
 done
 
-required_tools=(bash curl tar gzip mktemp mkdir install mv rm uname awk)
+required_tools=(bash curl tar gzip mktemp mkdir install mv rm uname grep awk)
 missing_tools=()
 for tool in "${required_tools[@]}"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -92,14 +92,9 @@ resolve_latest_version() {
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$RELEASES_API")" || fail 'could not query JamScript releases'
 
-  printf '%s\n' "$releases" | awk -F'"' '
-    $2 == "tag_name" &&
-    $4 ~ /^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/ &&
-    !found {
-      print $4
-      found = 1
-    }
-  '
+  printf '%s\n' "$releases" |
+    grep -Eo '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?"' |
+    awk -F'"' 'NR == 1 { value = $4 } END { print value }'
 }
 
 if [[ -z "$version" ]]; then
