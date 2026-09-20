@@ -1,0 +1,13 @@
+[package]
+name = "jamscript-guest-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+jamscript-runtime-core = { path = "../../crates/jamscript-runtime-core", default-features = false }
+service-runtime-core = { path = "../../crates/service-runtime-core", default-features = false }
+service-runtime-guest = { path = "../../crates/service-runtime-guest", default-features = false }

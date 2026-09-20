@@ -3,6 +3,9 @@ use jamscript_ir::{
     TypeIr,
 };
 
+mod descriptor;
+pub use descriptor::generate_service_descriptor_c;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ManagementPolicyConfig {
     #[default]
@@ -1050,6 +1053,50 @@ mod tests {
         assert!(!source.contains("NETWORK_DOMAIN"));
         assert!(!source.contains("ACTION_SELECTOR"));
     }
+
+    #[test]
+    fn descriptor_codegen_keeps_service_data_out_of_generated_rust() {
+        let ir = ServiceIr {
+            package_name: "descriptor".into(),
+            package_version: "0.1.0".into(),
+            language_version: "0.3".into(),
+            source: String::new(),
+            states: vec![jamscript_ir::StateIr {
+                name: "balances".into(),
+                schema: "ledger.balances/v1".into(),
+                kind: jamscript_ir::StateKind::Map,
+                key_type: TypeIr::Address,
+                value_type: TypeIr::U64,
+            }],
+            actions: vec![ActionIr {
+                name: "transfer".into(),
+                auth: AuthKind::Ownership,
+                input: Vec::new(),
+                body: ActionBodyIr::ScriptC {
+                    symbol: "transfer".into(),
+                    source_unit: "service.ts".into(),
+                    state_effect: None,
+                },
+            }],
+            queries: Vec::new(),
+            native_imports: Vec::new(),
+        };
+        let descriptor = generate_service_descriptor_c(
+            &ir,
+            ArtifactBuildContext {
+                service_key: [7; 32],
+                service_instance_id: [8; 32],
+                management_policy: ManagementPolicyConfig::Immutable,
+                diagnostic: false,
+            },
+        )
+        .unwrap();
+        assert!(descriptor.contains("jamscript_service_descriptor_v1"));
+        assert!(descriptor.contains("JAMSCRIPT_AUTH_OWNERSHIP_V1"));
+        assert!(descriptor.contains("jamscript_namespace_0"));
+        assert!(descriptor.contains("jamscript_scriptc_transfer_entry_v1"));
+    }
+
     #[test]
     fn emits_canonical_bounded_bytes_and_native_abi() {
         let source = generate_no_std_rust(&ServiceIr {

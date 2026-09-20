@@ -1045,15 +1045,18 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         output.join("service.abi.json"),
         serde_json::to_vec_pretty(&abi)?,
     )?;
-    fs::write(
-        output.join("generated_service.rs"),
-        jamscript_codegen_rust::generate_no_std_rust_with_scriptc_context(&ir, context)
-            .map_err(|e| anyhow::anyhow!(e))?,
-    )?;
-    fs::write(
-        output.join("generated_builder_application.rs"),
-        generate_builder_application_rust(&ir, context).map_err(|e| anyhow::anyhow!(e))?,
-    )?;
+    let legacy_cargo_guest = std::env::var("JAMSCRIPT_GUEST_BUILD_MODE").as_deref() == Ok("cargo");
+    if managed_toolchain.is_none() || legacy_cargo_guest {
+        fs::write(
+            output.join("generated_service.rs"),
+            jamscript_codegen_rust::generate_no_std_rust_with_scriptc_context(&ir, context)
+                .map_err(|e| anyhow::anyhow!(e))?,
+        )?;
+        fs::write(
+            output.join("generated_builder_application.rs"),
+            generate_builder_application_rust(&ir, context).map_err(|e| anyhow::anyhow!(e))?,
+        )?;
+    }
     let project_root = path
         .canonicalize()
         .with_context(|| format!("canonicalizing project root {}", path.display()))?;

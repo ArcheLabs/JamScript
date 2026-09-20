@@ -54,15 +54,7 @@ copy_tree() {
 copy_file "${NODE_BIN}" bin/node
 copy_file "${CLANG_BIN}" bin/clang
 copy_file "${LLVM_AR_BIN}" bin/llvm-ar
-copy_file "${LLVM_AR_BIN}" bin/ar
-copy_file "${LLD_BIN}" bin/ld.lld
-copy_file "${LLVM_ROOT}/bin/llvm-readelf" bin/llvm-readelf
-copy_file "${ROOT}/tools/release/toolchain/jamscript-host-linker" bin/jamscript-host-linker
-copy_file "${RUSTC_BIN}" bin/rustc
-copy_file "${CARGO_BIN}" bin/cargo
-copy_file "${ROOT}/Cargo.lock" Cargo.lock
-copy_file "${ROOT}/toolchains/polkavm.lock" toolchains/polkavm.lock
-copy_tree "${ROOT}/toolchains/polkavm-guest" toolchains/polkavm-guest
+copy_file "${LLD_BIN}" bin/guest-linker
 copy_tree "${ROOT}/toolchains/scriptc" scriptc
 copy_file "${SCRIPTC_LINUX_RANDOM}" scriptc/node_modules/@scriptc/runtime/src/scr_linux.c
 test -f "${SCRIPTC_LINUX_PATCH}"
@@ -91,60 +83,27 @@ echo "SCRIPTC_LINUX_COMPAT_PATCH=PASS"
 copy_tree "${ROOT}/crates/jamscript-runtime-scriptc" runtime-scriptc
 copy_tree "${ROOT}/crates/jamscript-target-jam/sdk" targets/jam/sdk
 
-LLVM_RESOURCE_DIR="$(${CLANG_BIN} -print-resource-dir)"
+TARGET_JSON="$(RUSTC="${RUSTC_BIN}" JAMSCRIPT_CARGO="${CARGO_BIN}" \
+  "${CARGO_BIN}" run --quiet --locked \
+    --manifest-path "${ROOT}/tools/release/toolchain/Cargo.toml" \
+    --bin polkavm-target-json)"
+JAMSCRIPT_CARGO="${CARGO_BIN}" \
+JAMSCRIPT_RUSTC="${RUSTC_BIN}" \
+JAMSCRIPT_CLANG="${CLANG_BIN}" \
+JAMSCRIPT_LLVM_AR="${LLVM_AR_BIN}" \
+JAMSCRIPT_POLKAVM_TARGET_JSON="${TARGET_JSON}" \
+  "${ROOT}/tools/release/toolchain/build-runtime-archives.sh" "${STAGE}"
+copy_file "${TARGET_JSON}" targets/polkavm/riscv64emac-unknown-none-polkavm.json
+
+LLVM_RESOURCE_DIR="$("${CLANG_BIN}" -print-resource-dir)"
 case "${LLVM_RESOURCE_DIR}" in
   "${LLVM_ROOT}"/*) copy_tree "${LLVM_RESOURCE_DIR}" "${LLVM_RESOURCE_DIR#"${LLVM_ROOT}"/}" ;;
   *) echo "clang resource directory is outside the locked LLVM root: ${LLVM_RESOURCE_DIR}" >&2; exit 1 ;;
 esac
 
-mkdir -p "${STAGE}/runtime/crates"
-for crate in jamscript-crypto jamscript-runtime-core ownership-core service-runtime-core service-runtime-state service-runtime-guest; do
-  copy_tree "${ROOT}/crates/${crate}" "runtime/crates/${crate}"
-done
-cp -L "${ROOT}/Cargo.lock" "${STAGE}/runtime/Cargo.lock"
-cat > "${STAGE}/runtime/Cargo.toml" <<'EOF'
-[workspace]
-resolver = "2"
-members = ["crates/jamscript-crypto", "crates/jamscript-runtime-core", "crates/ownership-core", "crates/service-runtime-core", "crates/service-runtime-state", "crates/service-runtime-guest"]
-
-[workspace.package]
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
-
-[workspace.dependencies]
-base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
-blake2b_simd = { version = "1.0.4", default-features = false }
-ed25519-dalek = { version = "2.1.1", default-features = false, features = ["alloc"] }
-k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
-polkavm-derive = "=0.30.0"
-sha3 = { version = "0.10.9", default-features = false }
-schnorrkel = { version = "0.11.5", default-features = false }
-thiserror = { version = "2.0.17", default-features = false }
-EOF
-
-mkdir -p "${STAGE}/cargo/vendor"
-(cd "${ROOT}" && "${CARGO_BIN}" vendor --locked --versioned-dirs "${STAGE}/cargo/vendor" >/dev/null)
-(cd "${ROOT}" && "${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --sync crates/jamscript-runtime-core/Cargo.toml "${STAGE}/cargo/vendor" >/dev/null)
-RUST_SYSROOT="$(${RUSTC_BIN} --print sysroot)"
-(cd "${RUST_SYSROOT}/lib/rustlib/src/rust" && "${CARGO_BIN}" vendor --locked --versioned-dirs --no-delete --manifest-path library/Cargo.toml "${STAGE}/cargo/vendor" >/dev/null)
-cat > "${STAGE}/cargo/config.toml" <<'EOF'
-[source.crates-io]
-replace-with = "vendored-sources"
-
-[source.vendored-sources]
-directory = "cargo/vendor"
-EOF
-
-copy_tree "${RUST_SYSROOT}/lib/rustlib" lib/rustlib
-while read -r runtime_library; do
-  copy_file "${runtime_library}" "lib/$(basename -- "${runtime_library}")"
-done < <(find "${RUST_SYSROOT}/lib" -maxdepth 1 -type f -name '*.so*' -print | sort)
-test -d "${RUST_SYSROOT}/share" && copy_tree "${RUST_SYSROOT}/share" share || true
-
-declare -a dependency_queue=("${NODE_BIN}" "${CLANG_BIN}" "${LLVM_AR_BIN}" "${LLD_BIN}" "${RUSTC_BIN}" "${CARGO_BIN}")
+declare -a dependency_queue=("${NODE_BIN}" "${CLANG_BIN}" "${LLVM_AR_BIN}" "${LLD_BIN}")
 declare -A seen_dependencies=()
-RUNTIME_LIBRARY_PATH="${RUST_SYSROOT}/lib:${LLVM_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+RUNTIME_LIBRARY_PATH="${LLVM_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 while ((${#dependency_queue[@]})); do
   binary="${dependency_queue[0]}"
   dependency_queue=("${dependency_queue[@]:1}")
@@ -171,13 +130,13 @@ while ((${#dependency_queue[@]})); do
     esac
   done < <(awk '$3 ~ /^\// {print $3}' <<<"${ldd_output}" | sort -u)
 done
-for binary in bin/node bin/rustc bin/cargo; do
+for binary in bin/node; do
   if command -v patchelf >/dev/null 2>&1; then
     patchelf --set-rpath '$ORIGIN/../lib' "${STAGE}/${binary}"
   fi
 done
 if [[ "${JAMSCRIPT_TOOLCHAIN_RELEASE_ENGINEERING:-0}" != "1" && "$(command -v patchelf || true)" ]]; then
-  for binary in bin/clang bin/llvm-ar bin/ld.lld; do
+  for binary in bin/clang bin/llvm-ar bin/guest-linker; do
     patchelf --set-rpath '$ORIGIN/../lib' "${STAGE}/${binary}"
   done
 fi
@@ -186,8 +145,33 @@ test "$("${NODE_BIN}" --version | tr -d '\r\n' | sed 's/^v//')" = "$(tr -d '\r\n
 test "$("${CLANG_BIN}" --version | sed -n '1s/.*clang version \([0-9.]*\).*/\1/p')" = "${LLVM_VERSION}"
 test -d "${STAGE}/targets/jam/sdk"
 
-rm -f -- "${STAGE}/cargo/.global-cache" "${STAGE}/cargo/.package-cache" \
-  "${STAGE}/cargo/.package-cache-mutate"
+# The Rust/Cargo tree above exists only inside this release-engineering build.
+# Consumer builds link the immutable archives and never receive the producer
+# compiler, sysroot, vendor tree, host linker, or generated Rust guest.
+rm -rf -- \
+  "${STAGE}/cargo" \
+  "${STAGE}/lib/rustlib" \
+  "${STAGE}/runtime/crates" \
+  "${STAGE}/runtime/Cargo.toml" \
+  "${STAGE}/runtime/Cargo.lock" \
+  "${STAGE}/toolchains/polkavm-guest" \
+  "${STAGE}/bin/rustc" \
+  "${STAGE}/bin/cargo" \
+  "${STAGE}/bin/jamscript-host-linker" \
+  "${STAGE}/bin/ar" \
+  "${STAGE}/bin/llvm-readelf" \
+  "${STAGE}/Cargo.lock" \
+  "${STAGE}/toolchains/polkavm.lock"
+rm -rf -- \
+  "${STAGE}/runtime-scriptc/src" \
+  "${STAGE}/runtime-scriptc/Cargo.toml" \
+  "${STAGE}/targets/jam/sdk/src"
+test ! -e "${STAGE}/bin/rustc"
+test ! -e "${STAGE}/bin/cargo"
+test ! -e "${STAGE}/cargo"
+test ! -e "${STAGE}/lib/rustlib"
+test ! -e "${STAGE}/toolchains/polkavm-guest"
+echo "CONSUMER_RUST_REMOVED=PASS"
 
 python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
   --root "${STAGE}" --output "${STAGE}/manifest.json" \
@@ -212,7 +196,8 @@ else
   # through its Rust implementation.
   python3 "${ROOT}/tools/release/toolchain/create-deterministic-archive.py" \
     --root "${STAGE}" --source-date-epoch "${SOURCE_DATE_EPOCH}" | \
-    CARGO_TARGET_DIR="${OUT}/.cargo-target" "${CARGO_BIN}" run --quiet --locked \
+    CARGO_TARGET_DIR="${OUT}/.cargo-target" RUSTC="${RUSTC_BIN}" \
+      JAMSCRIPT_ZSTD_LEVEL="${JAMSCRIPT_ZSTD_LEVEL:-19}" "${CARGO_BIN}" run --quiet --locked \
       --manifest-path "${ROOT}/tools/release/toolchain/Cargo.toml" \
       --bin compress-zstd -- "${ARCHIVE}"
 fi

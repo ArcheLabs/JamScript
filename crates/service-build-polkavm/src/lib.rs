@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use object::{Object, ObjectSection, ObjectSymbol};
 use polkavm_linker::{target_json_path, RustcVersion, TargetJsonArgs};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -13,8 +14,16 @@ pub enum CargoNetworkPolicy {
     OfflineRequired,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GuestBuildMode {
+    #[default]
+    Cargo,
+    Prebuilt,
+}
+
 #[derive(Clone, Debug)]
 pub struct PolkaVmBuildConfig {
+    pub build_mode: GuestBuildMode,
     pub rust_toolchain: String,
     pub is_64_bit: bool,
     pub diagnostic: bool,
@@ -32,11 +41,15 @@ pub struct PolkaVmBuildConfig {
     pub cargo_home: Option<PathBuf>,
     pub cargo_network_policy: CargoNetworkPolicy,
     pub canonical_guest_lock: Option<PathBuf>,
+    pub guest_linker_path: Option<PathBuf>,
+    pub guest_target_json: Option<PathBuf>,
+    pub guest_runtime_archive: Option<PathBuf>,
 }
 
 impl Default for PolkaVmBuildConfig {
     fn default() -> Self {
         Self {
+            build_mode: GuestBuildMode::Cargo,
             rust_toolchain: default_toolchain(),
             is_64_bit: true,
             diagnostic: false,
@@ -52,6 +65,9 @@ impl Default for PolkaVmBuildConfig {
             cargo_home: None,
             cargo_network_policy: CargoNetworkPolicy::OnlineAllowed,
             canonical_guest_lock: None,
+            guest_linker_path: None,
+            guest_target_json: None,
+            guest_runtime_archive: None,
         }
     }
 }
@@ -114,6 +130,9 @@ impl PolkaVmBuilder {
     }
 
     pub fn build(&self, request: &PolkaVmBuildRequest) -> Result<GuestBuildArtifacts> {
+        if self.config.build_mode == GuestBuildMode::Prebuilt {
+            return self.build_prebuilt(request);
+        }
         let lock = ToolchainLock::load(&self.config.lock_path)?;
         if self.config.rust_toolchain != lock.rust {
             bail!(
@@ -281,6 +300,119 @@ impl PolkaVmBuilder {
                 guest_abi: "lp64e".into(),
                 c_compiler: None,
                 final_elf_linker: "rust-lld".into(),
+                target_environment: "polkavm".into(),
+                minimum_stack_bytes: 2 * 1024 * 1024,
+            },
+        })
+    }
+
+    fn build_prebuilt(&self, request: &PolkaVmBuildRequest) -> Result<GuestBuildArtifacts> {
+        if !self.config.is_64_bit {
+            bail!(
+                "PolkaVM service backend currently supports only the pinned riscv64/lp64e domain"
+            );
+        }
+        fs::create_dir_all(&request.output_dir)?;
+        let runtime = self
+            .config
+            .guest_runtime_archive
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("managed JamScript runtime artifact is missing"))?;
+        if !runtime.is_file() {
+            bail!(
+                "managed JamScript runtime artifact is missing: {}",
+                runtime.display()
+            );
+        }
+        let linker = self
+            .config
+            .guest_linker_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("managed JamScript guest linker is missing"))?;
+        if !linker.is_file() {
+            bail!(
+                "managed JamScript guest linker is missing: {}",
+                linker.display()
+            );
+        }
+
+        let target_json = self
+            .config
+            .guest_target_json
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("managed PolkaVM target specification is missing"))?
+            .canonicalize()
+            .context("canonicalizing managed PolkaVM target specification")?;
+        let target_variant = target_json
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let target_hash = hash_file(&target_json)?;
+        let output_elf = request.output_dir.join("service.elf");
+        let mut command = Command::new(linker);
+        command.args([
+            "-flavor",
+            "gnu",
+            "--emit-relocs",
+            "--unique",
+            "--apply-dynamic-relocs",
+            "--no-allow-shlib-undefined",
+            "-Bsymbolic",
+            "--gc-sections",
+            "-shared",
+            "-z",
+            "relro",
+            "-z",
+            "now",
+            "-z",
+            "notext",
+            "-O1",
+            "--strip-debug",
+        ]);
+        for export in &request.required_exports {
+            command.arg("--undefined").arg(export);
+        }
+        command.arg("-o").arg(&output_elf);
+        command.arg("--start-group").arg(runtime);
+        for archive in &request.native_archives {
+            if !archive.path.is_file() {
+                bail!(
+                    "managed JamScript runtime artifact is missing: {}",
+                    archive.path.display()
+                );
+            }
+            command.arg(&archive.path);
+        }
+        command.arg("--end-group");
+        run(&mut command, "linking the prebuilt PolkaVM guest")?;
+        let diagnostics = validate_prebuilt_elf(
+            &output_elf,
+            &request.required_exports,
+            request.require_relocations,
+        )?;
+        if self.config.diagnostic {
+            fs::write(request.output_dir.join("readelf.txt"), &diagnostics.header)?;
+            fs::write(
+                request.output_dir.join("relocations.txt"),
+                &diagnostics.relocations,
+            )?;
+            fs::write(request.output_dir.join("symbols.txt"), &diagnostics.symbols)?;
+        }
+        Ok(GuestBuildArtifacts {
+            elf: output_elf,
+            target_json,
+            metadata: GuestToolchainMetadata {
+                rust_toolchain: "precompiled-runtime".into(),
+                rustc_version: "precompiled-runtime".into(),
+                polkavm_linker_version: "0.30.0".into(),
+                polkavm_target_variant: target_variant,
+                polkavm_target_hash: target_hash,
+                guest_architecture: "riscv64".into(),
+                guest_abi: "lp64e".into(),
+                c_compiler: None,
+                final_elf_linker: "guest-linker".into(),
                 target_environment: "polkavm".into(),
                 minimum_stack_bytes: 2 * 1024 * 1024,
             },
@@ -460,6 +592,68 @@ fn validate_elf(
         header,
         relocations,
         symbols,
+    })
+}
+
+fn validate_prebuilt_elf(
+    path: &Path,
+    required_exports: &[String],
+    require_relocations: bool,
+) -> Result<ElfDiagnostics> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if bytes.len() < 64 || &bytes[..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
+        bail!(
+            "canonical guest ELF is not a little-endian ELF64: {}",
+            path.display()
+        );
+    }
+    let read_u16 = |offset: usize| {
+        bytes
+            .get(offset..offset + 2)
+            .map(|value| u16::from_le_bytes([value[0], value[1]]))
+    };
+    let read_u32 = |offset: usize| {
+        bytes
+            .get(offset..offset + 4)
+            .map(|value| u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+    };
+    if read_u16(16) != Some(3) || read_u16(18) != Some(243) {
+        bail!(
+            "canonical guest ELF is not a RISC-V shared object: {}",
+            path.display()
+        );
+    }
+    if read_u32(48).is_none_or(|flags| flags & 0x8 == 0) {
+        bail!(
+            "canonical guest ELF is not lp64e/RVE compatible: {}",
+            path.display()
+        );
+    }
+    let file = object::File::parse(bytes.as_slice())
+        .map_err(|error| anyhow::anyhow!("parse canonical guest ELF: {error}"))?;
+    for export in required_exports {
+        if !file
+            .symbols()
+            .any(|symbol| symbol.name() == Ok(export.as_str()))
+        {
+            bail!("canonical guest ELF is missing required export {export}");
+        }
+    }
+    if require_relocations {
+        let has_relocations = file.sections().any(|section| {
+            section
+                .name()
+                .map(|name| name.starts_with(".rela") || name.starts_with(".rel"))
+                .unwrap_or(false)
+        });
+        if !has_relocations {
+            bail!("canonical guest ELF has no PolkaVM relocations");
+        }
+    }
+    Ok(ElfDiagnostics {
+        header: "validated by embedded ELF parser".into(),
+        relocations: "validated by embedded ELF parser".into(),
+        symbols: required_exports.join("\n"),
     })
 }
 

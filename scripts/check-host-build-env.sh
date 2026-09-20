@@ -24,7 +24,7 @@ test "${setup_file_count}" -gt 0
 
 for file in "${CLOSURE_FILES[@]}"; do
   test -f "${file}"
-  grep -Eq 'unset .*RUSTFLAGS' "${file}"
+  grep -Eq 'verify-prebuilt-closure\.sh' "${file}"
 done
 
 for file in "${WORKFLOW_FILES[@]}"; do
@@ -49,3 +49,4 @@ echo "GLOBAL_DYLD_LIBRARY_PATH=ABSENT"
 echo "GLOBAL_DYLD_FALLBACK_LIBRARY_PATH=ABSENT"
 echo "HOST_ENVIRONMENT_ISOLATED=YES"
 echo "HOST_BUILD_RPATH=SCOPED"
+echo "PREBUILT_CONSUMER_CLOSURE=SCOPED"

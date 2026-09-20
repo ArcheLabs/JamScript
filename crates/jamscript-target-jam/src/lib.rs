@@ -3,19 +3,20 @@ use jam_program_blob_common::ProgramBlob;
 use jamscript_backend_scriptc::{ScriptcArtifact, ScriptcBuildMetadata, ScriptcCompiler};
 use jamscript_codegen_rust::{
     generate_builder_application_rust, generate_no_std_rust_with_scriptc_context,
-    ArtifactBuildContext, ManagementPolicyConfig,
+    generate_service_descriptor_c, ArtifactBuildContext, ManagementPolicyConfig,
 };
 use jamscript_deployment::{DEFAULT_MIN_ITEM_GAS, DEFAULT_MIN_MEMO_GAS};
 use jamscript_ir::{abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
 use jamscript_toolchain::InstalledToolchain;
 use serde::{Deserialize, Serialize};
 use service_build_polkavm::{
-    CargoNetworkPolicy, GuestBuildArtifacts, NativeArchive, PolkaVmBuildConfig,
+    CargoNetworkPolicy, GuestBuildArtifacts, GuestBuildMode, NativeArchive, PolkaVmBuildConfig,
     PolkaVmBuildRequest, PolkaVmBuilder,
 };
 use service_runtime_core::{
     MANAGED_STATE_LAYOUT_VERSION, MANAGED_STATE_PROTOCOL_VERSION, RECOVERY_FORMAT_VERSION,
 };
+use sha2::{Digest, Sha256};
 use std::{
     borrow::Cow,
     collections::BTreeMap,
@@ -92,8 +93,24 @@ pub struct BuildMetadata {
     pub min_memo_gas: u64,
     pub native_abi_version: u32,
     pub native_modules: Vec<NativeModuleMetadata>,
+    #[serde(rename = "guestRuntime")]
+    pub guest_runtime: Option<RuntimeArtifactMetadata>,
+    #[serde(rename = "scriptcRuntimeArchive")]
+    pub scriptc_runtime_archive: Option<RuntimeArtifactMetadata>,
+    #[serde(rename = "jamRuntimeArchive")]
+    pub jam_runtime_archive: Option<RuntimeArtifactMetadata>,
     #[serde(flatten)]
     pub scriptc: Option<ScriptcBuildMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RuntimeArtifactMetadata {
+    pub format: u8,
+    pub sha256: String,
+    #[serde(rename = "sourceRevision")]
+    pub source_revision: String,
+    pub target: String,
+    pub abi: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -244,19 +261,41 @@ impl JamTarget {
         scriptc: ScriptcArtifact,
     ) -> Result<BuildMetadata> {
         fs::create_dir_all(output_dir)?;
+        let prebuilt = guest_build_mode(self.toolchain.is_some()) == GuestBuildMode::Prebuilt;
         let generated = output_dir.join("generated_service.rs");
-        let generated_source = generate_no_std_rust_with_scriptc_context(ir, context)
-            .map_err(|error| anyhow::anyhow!(error))?;
-        fs::write(&generated, generated_source)
-            .with_context(|| format!("writing {}", generated.display()))?;
+        if !prebuilt {
+            let generated_source = generate_no_std_rust_with_scriptc_context(ir, context)
+                .map_err(|error| anyhow::anyhow!(error))?;
+            fs::write(&generated, generated_source)
+                .with_context(|| format!("writing {}", generated.display()))?;
+        }
         fs::write(
-            output_dir.join("generated_builder_application.rs"),
-            generate_builder_application_rust(ir, context)
-                .map_err(|error| anyhow::anyhow!(error))?,
+            output_dir.join("service_descriptor.c"),
+            generate_service_descriptor_c(ir, context).map_err(|error| anyhow::anyhow!(error))?,
         )?;
+        if !prebuilt {
+            fs::write(
+                output_dir.join("generated_builder_application.rs"),
+                generate_builder_application_rust(ir, context)
+                    .map_err(|error| anyhow::anyhow!(error))?,
+            )?;
+        }
+        let source_hash = if prebuilt {
+            hash_file(&scriptc.generated_c)?
+        } else {
+            hash_file(&generated)?
+        };
         fs::write(
             output_dir.join("builder.json"),
-            serde_json::to_vec_pretty(&builder_metadata(project_root, native_modules))?,
+            serde_json::to_vec_pretty(&builder_metadata(
+                project_root,
+                native_modules,
+                if prebuilt {
+                    "service_descriptor.c"
+                } else {
+                    "generated_builder_application.rs"
+                },
+            ))?,
         )?;
         fs::write(
             output_dir.join("protocol-v0.json"),
@@ -278,8 +317,20 @@ impl JamTarget {
             output_dir.join("service.abi.json"),
             serde_json::to_vec_pretty(&abi)?,
         )?;
-        let source_hash = hash_file(&generated)?;
         let abi_hash = hash_file(&output_dir.join("service.abi.json"))?;
+
+        if prebuilt {
+            return self.build_probe_prebuilt(
+                project_root,
+                ir,
+                context,
+                output_dir,
+                native_modules,
+                scriptc,
+                source_hash,
+                abi_hash,
+            );
+        }
 
         let guest_project = tempdir().context("creating Rust guest project")?;
         fs::create_dir_all(guest_project.path().join("src"))?;
@@ -464,40 +515,101 @@ impl JamTarget {
             output_dir.join("build.json"),
             serde_json::to_vec_pretty(&metadata)?,
         )?;
-        let mut checksum_files = vec![
-            "service.blob",
-            "service.polkavm",
-            "service.pvm",
-            "service.elf",
-            "service.abi.json",
-            "generated_service.rs",
-            "generated_builder_application.rs",
-            "builder.json",
-            "protocol-v0.json",
-            "build.json",
-        ];
-        checksum_files.extend([
-            "scriptc/scriptc_service.ts",
-            "scriptc/scriptc_service.json",
-            "scriptc/scriptc_service.transformed.ts",
-            "scriptc/scriptc_runtime.ts",
-            "scriptc/jamscript_numeric_runtime.ts",
-            "scriptc/scriptc_service.profile.json",
-            "scriptc/scriptc_service.lib.c",
-            "scriptc/scriptc_service_adapter.c",
-        ]);
-        let files = checksum_files
-            .into_iter()
-            .map(|name| Ok((name.to_owned(), hash_file(&output_dir.join(name))?)))
-            .collect::<Result<BTreeMap<_, _>>>()?;
+        write_checksums(output_dir)?;
+        Ok(metadata)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_probe_prebuilt(
+        &self,
+        project_root: &Path,
+        ir: &ServiceIr,
+        context: ArtifactBuildContext,
+        output_dir: &Path,
+        native_modules: &[NativeModule],
+        scriptc: ScriptcArtifact,
+        source_hash: String,
+        abi_hash: String,
+    ) -> Result<BuildMetadata> {
+        let toolchain = self
+            .toolchain
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("managed JamScript runtime artifact is missing"))?;
+        let work = tempdir().context("creating prebuilt JAM target native build directory")?;
+        let clang = pinned_clang(Some(toolchain))?;
+        let ar = Some(toolchain.llvm_ar.as_path());
+        let scriptc_root = toolchain.scriptc.clone();
+        let mut archives = vec![compile_scriptc_application_archive(
+            &scriptc,
+            &scriptc_root,
+            Some(toolchain.runtime_scriptc.as_path()),
+            &clang,
+            ar,
+            work.path(),
+        )?];
+        archives.push(compile_descriptor_archive(
+            &self.sdk_root,
+            &output_dir.join("service_descriptor.c"),
+            &clang,
+            ar,
+            work.path(),
+        )?);
+        for module in native_modules {
+            archives.push(compile_native_archive(module, &clang, ar, work.path())?);
+        }
+        archives.push(prebuilt_archive(
+            "jam_runtime",
+            &toolchain.jam_runtime_archive,
+        )?);
+        archives.push(prebuilt_archive(
+            "scriptc_runtime",
+            &toolchain.scriptc_runtime_archive,
+        )?);
+        let backend_output = work.path().join("polkavm");
+        let artifacts = PolkaVmBuilder::new(PolkaVmBuildConfig {
+            build_mode: GuestBuildMode::Prebuilt,
+            diagnostic: context.diagnostic,
+            guest_linker_path: Some(toolchain.lld.clone()),
+            guest_target_json: Some(toolchain.guest_target_json.clone()),
+            guest_runtime_archive: Some(toolchain.guest_runtime_archive.clone()),
+            ..Default::default()
+        })
+        .build(&PolkaVmBuildRequest {
+            manifest_path: self.sdk_root.join("include/jam/service-descriptor-v1.h"),
+            output_dir: backend_output,
+            native_archives: archives,
+            required_exports: vec![
+                "minijam_refine".into(),
+                "minijam_accumulate".into(),
+                "jamscript_plan_v1".into(),
+                "jamscript_backend_metadata_v1".into(),
+            ],
+            require_relocations: true,
+        })?;
+        fs::copy(&artifacts.elf, output_dir.join("service.elf"))?;
+        let blob = output_dir.join("service.blob");
+        let polkavm = output_dir.join("service.polkavm");
+        link_elf_to_jam(&artifacts.elf, &blob, &polkavm)?;
+        fs::copy(&polkavm, output_dir.join("service.pvm"))?;
+        let clang_version = command_version(&clang)?;
+        let native_metadata = native_metadata(project_root, native_modules)?;
+        let metadata = build_metadata(
+            context,
+            source_hash,
+            abi_hash,
+            hash_file(&blob)?,
+            clang_version,
+            native_metadata,
+            artifacts,
+            Some(scriptc.metadata.clone()),
+            &ir.language_version,
+            Some(toolchain),
+        );
         fs::write(
-            output_dir.join("checksums.json"),
-            serde_json::to_vec_pretty(&BundleChecksums {
-                version: 1,
-                algorithm: "blake2b-256".into(),
-                files,
-            })?,
+            output_dir.join("build.json"),
+            serde_json::to_vec_pretty(&metadata)?,
         )?;
+        write_checksums(output_dir)?;
         Ok(metadata)
     }
 }
@@ -609,8 +721,8 @@ fn build_metadata(
         jam_blob_encoder: "jam-program-blob-common".into(),
         jam_blob_encoder_version: "0.1.28".into(),
         pvm_toolchain: format!(
-            "official polkavm-linker {} target + rust-lld",
-            toolchain.polkavm_linker_version
+            "official polkavm-linker {} target + {}",
+            toolchain.polkavm_linker_version, toolchain.final_elf_linker
         ),
         rust_toolchain: toolchain.rust_toolchain,
         rustc_version: toolchain.rustc_version,
@@ -632,6 +744,12 @@ fn build_metadata(
         min_memo_gas: DEFAULT_MIN_MEMO_GAS,
         native_abi_version: NATIVE_ABI_VERSION,
         native_modules,
+        guest_runtime: managed_toolchain
+            .and_then(|toolchain| runtime_artifact_metadata(&toolchain.guest_runtime_archive)),
+        scriptc_runtime_archive: managed_toolchain
+            .and_then(|toolchain| runtime_artifact_metadata(&toolchain.scriptc_runtime_archive)),
+        jam_runtime_archive: managed_toolchain
+            .and_then(|toolchain| runtime_artifact_metadata(&toolchain.jam_runtime_archive)),
         scriptc,
     }
 }
@@ -728,6 +846,94 @@ fn pinned_clang(toolchain: Option<&InstalledToolchain>) -> Result<PathBuf> {
         );
     }
     Ok(clang)
+}
+
+fn guest_build_mode(has_managed_toolchain: bool) -> GuestBuildMode {
+    match std::env::var("JAMSCRIPT_GUEST_BUILD_MODE").as_deref() {
+        Ok("prebuilt") => GuestBuildMode::Prebuilt,
+        Ok("cargo") => GuestBuildMode::Cargo,
+        _ if has_managed_toolchain => GuestBuildMode::Prebuilt,
+        _ => GuestBuildMode::Cargo,
+    }
+}
+
+fn prebuilt_archive(name: &str, path: &Path) -> Result<NativeArchive> {
+    if !path.is_file() {
+        bail!(
+            "managed JamScript runtime artifact is missing: {}",
+            path.display()
+        );
+    }
+    Ok(NativeArchive {
+        name: name.into(),
+        path: path.to_path_buf(),
+    })
+}
+
+fn compile_descriptor_archive(
+    sdk_root: &Path,
+    source: &Path,
+    clang: &Path,
+    ar: Option<&Path>,
+    work: &Path,
+) -> Result<NativeArchive> {
+    compile_archive(
+        "service_descriptor",
+        &[source.to_path_buf()],
+        &[sdk_root.join("include")],
+        clang,
+        ar,
+        work,
+    )
+}
+
+fn compile_scriptc_application_archive(
+    artifact: &ScriptcArtifact,
+    toolchain_root: &Path,
+    managed_runtime_root: Option<&Path>,
+    clang: &Path,
+    ar: Option<&Path>,
+    work: &Path,
+) -> Result<NativeArchive> {
+    let runtime = toolchain_root.join("node_modules/@scriptc/runtime/src");
+    let runtime_include = managed_runtime_root
+        .map(|root| root.join("include"))
+        .unwrap_or_else(|| workspace_root().join("crates/jamscript-runtime-scriptc/include"));
+    let common = [
+        "--target=riscv64-unknown-elf",
+        "-march=rv64emac",
+        "-mabi=lp64e",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-fPIC",
+        "-fdata-sections",
+        "-ffunction-sections",
+        "-Os",
+        "-DSCR_LIB",
+    ];
+    let mut objects = Vec::new();
+    for (index, source) in [artifact.generated_c.clone(), artifact.adapter_c.clone()]
+        .iter()
+        .enumerate()
+    {
+        let object = work.join(format!("scriptc_application_{index}.o"));
+        let mut command = Command::new(clang);
+        command.args(common).arg("-std=c11");
+        command.arg("-I").arg(&runtime_include);
+        command.arg("-I").arg(&runtime);
+        command.args([
+            "-c",
+            source.to_str().unwrap(),
+            "-o",
+            object.to_str().unwrap(),
+        ]);
+        run(
+            &mut command,
+            &format!("compiling ScriptC application {}", source.display()),
+        )?;
+        objects.push(object);
+    }
+    archive_objects("scriptc_application", &objects, ar, work)
 }
 
 fn compile_jam_archive(
@@ -908,6 +1114,69 @@ fn compile_archive(
     })
 }
 
+fn archive_objects(
+    name: &str,
+    objects: &[PathBuf],
+    ar: Option<&Path>,
+    work: &Path,
+) -> Result<NativeArchive> {
+    let ar = match ar.map(Path::to_path_buf) {
+        Some(path) if path.is_file() => path,
+        Some(path) => bail!("managed llvm-ar is missing at {}", path.display()),
+        None => std::env::var_os("JAMSCRIPT_LLVM_AR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("ar")),
+    };
+    let archive = work.join(format!("lib{name}.a"));
+    let mut command = Command::new(ar);
+    command.arg("crs").arg(&archive).args(objects);
+    run(&mut command, &format!("archiving {name}"))?;
+    Ok(NativeArchive {
+        name: name.into(),
+        path: archive,
+    })
+}
+
+fn write_checksums(output_dir: &Path) -> Result<()> {
+    let mut checksum_files = vec![
+        "service.blob",
+        "service.polkavm",
+        "service.pvm",
+        "service.elf",
+        "service.abi.json",
+        "generated_service.rs",
+        "service_descriptor.c",
+        "generated_builder_application.rs",
+        "builder.json",
+        "protocol-v0.json",
+        "build.json",
+    ];
+    checksum_files.extend([
+        "scriptc/scriptc_service.ts",
+        "scriptc/scriptc_service.json",
+        "scriptc/scriptc_service.transformed.ts",
+        "scriptc/scriptc_runtime.ts",
+        "scriptc/jamscript_numeric_runtime.ts",
+        "scriptc/scriptc_service.profile.json",
+        "scriptc/scriptc_service.lib.c",
+        "scriptc/scriptc_service_adapter.c",
+    ]);
+    let files = checksum_files
+        .into_iter()
+        .filter(|name| output_dir.join(name).is_file())
+        .map(|name| Ok((name.to_owned(), hash_file(&output_dir.join(name))?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    fs::write(
+        output_dir.join("checksums.json"),
+        serde_json::to_vec_pretty(&BundleChecksums {
+            version: 1,
+            algorithm: "blake2b-256".into(),
+            files,
+        })?,
+    )?;
+    Ok(())
+}
+
 fn native_metadata(
     project_root: &Path,
     modules: &[NativeModule],
@@ -937,7 +1206,11 @@ fn native_metadata(
         .collect()
 }
 
-fn builder_metadata(project_root: &Path, modules: &[NativeModule]) -> BuilderArtifactMetadata {
+fn builder_metadata(
+    project_root: &Path,
+    modules: &[NativeModule],
+    application: &str,
+) -> BuilderArtifactMetadata {
     let relative = |path: &Path| {
         path.strip_prefix(project_root)
             .unwrap_or(path)
@@ -946,7 +1219,7 @@ fn builder_metadata(project_root: &Path, modules: &[NativeModule]) -> BuilderArt
     };
     BuilderArtifactMetadata {
         version: 1,
-        application: "generated_builder_application.rs".into(),
+        application: application.into(),
         native_modules: modules
             .iter()
             .map(|module| BuilderNativeModuleMetadata {
@@ -998,6 +1271,22 @@ fn hash_file(path: &Path) -> Result<String> {
             .map(|b| format!("{b:02x}"))
             .collect::<String>()
     ))
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn runtime_artifact_metadata(path: &Path) -> Option<RuntimeArtifactMetadata> {
+    Some(RuntimeArtifactMetadata {
+        format: 1,
+        sha256: sha256_file(path).ok()?,
+        source_revision: std::env::var("JAMSCRIPT_RUNTIME_SOURCE_REVISION")
+            .unwrap_or_else(|_| "managed-bundle".into()),
+        target: "riscv64-unknown-none-polkavm".into(),
+        abi: "rv64emac/lp64e".into(),
+    })
 }
 
 #[cfg(test)]

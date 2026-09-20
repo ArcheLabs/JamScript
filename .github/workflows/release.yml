@@ -177,9 +177,20 @@ jobs:
           zstd -q -t "${bundle}"
           listing="${RUNNER_TEMP}/toolchain-members.txt"
           zstd -q -d -c "${bundle}" | tar -tf - > "${listing}"
-          for required in bin/node bin/clang bin/rustc bin/cargo scriptc runtime targets/jam/sdk; do
+          for required in \
+            bin/node bin/clang bin/llvm-ar bin/guest-linker scriptc runtime runtime-scriptc targets/jam/sdk \
+            targets/polkavm/riscv64emac-unknown-none-polkavm.json \
+            runtime/libjamscript_guest_runtime.a \
+            runtime/libjamscript_scriptc_runtime.a \
+            runtime/libjamscript_jam_runtime.a; do
             grep -Eq "(^|/)${required}(/|$)" "${listing}"
           done
+          bundle_root="${RUNNER_TEMP}/toolchain-root"
+          mkdir -p "${bundle_root}"
+          zstd -q -d -c "${bundle}" | tar -xf - -C "${bundle_root}"
+          ./tools/release/toolchain/verify-prebuilt-closure.sh "${bundle_root}"
+          python3 ./tools/release/toolchain/verify-bundle.py \
+            --root "${bundle_root}" --source-root "${GITHUB_WORKSPACE}"
           echo "TOOLCHAIN_${{ matrix.platform == 'linux-x86_64' && 'LINUX' || 'MACOS' }}_BUILT=PASS"
       - uses: actions/upload-artifact@v4
         with:
