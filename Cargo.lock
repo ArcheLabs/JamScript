@@ -2028,6 +2028,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jamscript-guest-runtime"
+version = "0.1.0"
+dependencies = [
+ "jamscript-runtime-core",
+ "service-runtime-core",
+ "service-runtime-guest",
+]
+
+[[package]]
 name = "jamscript-ir"
 version = "0.1.0"
 dependencies = [
@@ -2131,6 +2140,7 @@ dependencies = [
  "serde_json",
  "service-build-polkavm",
  "service-runtime-core",
+ "sha2 0.10.9",
  "tempfile",
 ]
 
@@ -3401,6 +3411,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake2b_simd",
+ "object 0.36.7",
  "polkavm-linker",
  "serde",
  "toml",

@@ -76,6 +76,10 @@ pub struct InstalledToolchain {
     pub scriptc: PathBuf,
     pub runtime: PathBuf,
     pub runtime_scriptc: PathBuf,
+    pub guest_runtime_archive: PathBuf,
+    pub scriptc_runtime_archive: PathBuf,
+    pub jam_runtime_archive: PathBuf,
+    pub guest_target_json: PathBuf,
     pub cargo_home: PathBuf,
     pub polkavm_lock: PathBuf,
     pub jam_target: PathBuf,
@@ -455,6 +459,10 @@ impl ToolchainManager {
             scriptc: root.join("scriptc"),
             runtime: root.join("runtime"),
             runtime_scriptc: root.join("runtime-scriptc"),
+            guest_runtime_archive: root.join("runtime/libjamscript_guest_runtime.a"),
+            scriptc_runtime_archive: root.join("runtime/libjamscript_scriptc_runtime.a"),
+            jam_runtime_archive: root.join("runtime/libjamscript_jam_runtime.a"),
+            guest_target_json: root.join("targets/polkavm/riscv64emac-unknown-none-polkavm.json"),
             cargo_home: root.join("cargo"),
             polkavm_lock: root.join("toolchains/polkavm.lock"),
             jam_target: root.join("targets/jam/sdk"),
@@ -503,11 +511,7 @@ impl ToolchainManager {
             &installed.clang,
             &installed.llvm_ar,
             &installed.lld,
-            &installed.readelf,
-            &installed.host_linker,
-            &installed.rustc,
-            &installed.cargo,
-            &root.join("bin/ar"),
+            &installed.guest_target_json,
         ] {
             if !required.is_file() {
                 bail!(
@@ -533,13 +537,15 @@ impl ToolchainManager {
             }
         }
         for required in [
-            &root.join("Cargo.lock"),
-            &installed.polkavm_lock,
-            &root.join("toolchains/polkavm-guest/Cargo.toml"),
-            &root.join("toolchains/polkavm-guest/Cargo.lock"),
+            &installed.guest_runtime_archive,
+            &installed.scriptc_runtime_archive,
+            &installed.jam_runtime_archive,
         ] {
             if !required.is_file() {
-                bail!("managed toolchain lock is missing: {}", required.display());
+                bail!(
+                    "managed JamScript runtime artifact is missing: {}",
+                    required.display()
+                );
             }
         }
         Ok(())
@@ -595,11 +601,8 @@ pub fn platform_for(os: &str, arch: &str) -> Result<String> {
 }
 
 pub fn lld_executable_name(platform: &str) -> &'static str {
-    if platform == "macos-arm64" {
-        "ld64.lld"
-    } else {
-        "ld.lld"
-    }
+    let _ = platform;
+    "guest-linker"
 }
 
 fn cache_home() -> Result<PathBuf> {
@@ -977,8 +980,8 @@ mod tests {
 
     #[test]
     fn lld_driver_matches_platform() {
-        assert_eq!(lld_executable_name("linux-x86_64"), "ld.lld");
-        assert_eq!(lld_executable_name("macos-arm64"), "ld64.lld");
+        assert_eq!(lld_executable_name("linux-x86_64"), "guest-linker");
+        assert_eq!(lld_executable_name("macos-arm64"), "guest-linker");
     }
 
     #[test]

@@ -13,9 +13,9 @@ def read_text(path):
     return path.read_text(encoding="utf-8").strip()
 
 
-def run_version(path):
+def run_version(path, *args):
     result = subprocess.run(
-        [str(path), "--version"],
+        [str(path), *args, "--version"],
         check=True,
         capture_output=True,
         text=True,
@@ -47,7 +47,7 @@ manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
 if not isinstance(manifest, dict):
     raise SystemExit("internal manifest is not an object")
 platform = manifest.get("platform")
-lld_binary = "bin/ld64.lld" if platform == "macos-arm64" else "bin/ld.lld"
+lld_binary = "bin/guest-linker"
 lock_match = re.search(
     rf'"{re.escape(platform)}"\s*=\s*"([^"]+)"',
     re.search(r"^llvm_locks\s*=\s*\{([^}]*)\}$", distribution_text, re.MULTILINE).group(0)
@@ -149,23 +149,17 @@ required_files = [
     "bin/node",
     "bin/clang",
     "bin/llvm-ar",
-    "bin/ar",
     lld_binary,
-    "bin/llvm-readelf",
-    "bin/jamscript-host-linker",
-    "bin/rustc",
-    "bin/cargo",
-    "Cargo.lock",
-    "toolchains/polkavm.lock",
-    "toolchains/polkavm-guest/Cargo.toml",
-    "toolchains/polkavm-guest/Cargo.lock",
+    "runtime/libjamscript_guest_runtime.a",
+    "runtime/libjamscript_scriptc_runtime.a",
+    "runtime/libjamscript_jam_runtime.a",
+    "targets/polkavm/riscv64emac-unknown-none-polkavm.json",
 ]
 required_directories = [
     "scriptc",
     "runtime",
     "runtime-scriptc",
     "targets/jam/sdk",
-    "cargo/vendor",
 ]
 for name in required_files:
     if not (root / name).is_file():
@@ -189,18 +183,15 @@ if node_version != distribution["node_version"]:
 clang_version = run_version(root / "bin/clang").splitlines()[0]
 if distribution["clang_version"] not in clang_version:
     raise SystemExit(f"Clang identity mismatch: {clang_version}")
-for name in ["bin/llvm-ar", lld_binary, "bin/llvm-readelf", "bin/rustc", "bin/cargo"]:
-    if not run_version(root / name):
+for name in ["bin/llvm-ar", lld_binary]:
+    version_args = ("-flavor", "gnu") if name == lld_binary else ()
+    if not run_version(root / name, *version_args):
         raise SystemExit(f"tool version query returned no output: {name}")
-if not os.access(root / "bin/jamscript-host-linker", os.X_OK):
-    raise SystemExit("managed host linker is not executable")
 ar_expected_hash = llvm_lock_values["llvm_ar_sha256"]
 if ar_expected_hash == "0" * 64:
     ar_expected_hash = manifest_llvm["llvmArSha256"]
-if sha256(root / "bin/ar") != ar_expected_hash:
-    raise SystemExit("LLVM archiver lock hash mismatch: bin/ar")
-if "nightly" not in run_version(root / "bin/rustc"):
-    raise SystemExit("Rust identity is not a nightly toolchain")
+if sha256(root / "bin/llvm-ar") != ar_expected_hash:
+    raise SystemExit("LLVM archiver lock hash mismatch: bin/llvm-ar")
 
 scriptc_revision = read_text(root / "scriptc/REVISION")
 if f"commit={distribution['scriptc_revision']}" not in scriptc_revision:
@@ -214,7 +205,6 @@ print("TOOLCHAIN_BUNDLE_STRUCTURE=PASS")
 print("TOOLCHAIN_INTERNAL_MANIFEST=PASS")
 print("TOOLCHAIN_NODE=PASS")
 print("TOOLCHAIN_LLVM=PASS")
-print("TOOLCHAIN_RUST=PASS")
 print("TOOLCHAIN_SCRIPTC=PASS")
 print("TOOLCHAIN_JAM_TARGET=PASS")
 print("TOOLCHAIN_FORBIDDEN_PATHS=PASS")

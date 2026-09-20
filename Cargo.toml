@@ -22,6 +22,7 @@ members = [
   "crates/jamscript-deployment",
   "crates/jamscript-service-backend",
   "crates/service-build-polkavm",
+  "toolchains/polkavm-guest-runtime",
   "crates/jamscript-cli",
   "examples/rust-managed-state",
   "tools/managed-state-network-adapter",
@@ -40,6 +41,7 @@ blake2b_simd = { version = "1.0.4", default-features = false }
 bounded-collections = { version = "0.2.4", default-features = false }
 jam-program-blob-common = { version = "=0.1.28", default-features = false, features = ["std", "polkavm"] }
 jam-codec = { version = "0.1.1", default-features = false }
+object = { version = "0.36.7", default-features = false, features = ["read", "std"] }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
 polkavm = "=0.30.0"
 polkavm-linker = "=0.30.0"

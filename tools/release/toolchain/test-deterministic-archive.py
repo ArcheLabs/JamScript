@@ -14,7 +14,7 @@ PACKER = ROOT / "tools/release/toolchain/create-deterministic-archive.py"
 def write_tree(root, reverse):
     entries = [
         ("bin/clang", b"clang\n", 0o755),
-        ("bin/ld64.lld", b"lld\n", 0o755),
+        ("bin/guest-linker", b"lld\n", 0o755),
         ("lib/rustlib/target/libstd.dylib", b"rust\n", 0o644),
         ("manifest.json", b'{"files": {}}\n', 0o644),
     ]
@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix="jamscript-deterministic-archive-") as d
             ".",
             "bin",
             "bin/clang",
-            "bin/ld64.lld",
+            "bin/guest-linker",
             "lib",
             "lib/rustlib",
             "lib/rustlib/target",

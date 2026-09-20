@@ -8,7 +8,11 @@ fn main() -> anyhow::Result<()> {
     let stdout = io::stdin();
     let mut input = stdout.lock();
     let file = File::create(&output)?;
-    let mut encoder = zstd::Encoder::new(file, 19)?;
+    let level = env::var("JAMSCRIPT_ZSTD_LEVEL")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(19);
+    let mut encoder = zstd::Encoder::new(file, level)?;
     io::copy(&mut input, &mut encoder)?;
     encoder.finish()?.sync_all().map_err(anyhow::Error::from)
 }

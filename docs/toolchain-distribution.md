@@ -9,12 +9,14 @@ JamScript CLI + source + target
   -> deterministic service artifact
 ```
 
-The distribution owns Node, LLVM/Clang, `llvm-ar` (also exposed as the
-ScriptC-compatible `ar` command), the native LLD driver (`ld.lld` on Linux or
-`ld64.lld` on macOS), `llvm-readelf`, Rust, rust-src and
-compiler-builtins, ScriptC's prepared npm tree, compiler/runtime source crates,
-Cargo's vendored dependencies, and the JAM target SDK. It is described by
+The distribution owns managed Node, LLVM/Clang, `llvm-ar`, one guest linker,
+ScriptC's prepared npm tree, precompiled guest/runtime archives, the locked
+PolkaVM target specification, and the JAM target SDK. It is described by
 [`toolchains/distribution-v1.toml`](../toolchains/distribution-v1.toml).
+
+Release engineering may use Rust and Cargo to produce the immutable guest
+runtime archives. They are producer-only inputs and are not shipped to
+consumer projects.
 
 ## Platform boundary
 
@@ -106,15 +108,31 @@ distribution URL.
 
 The managed bundle is compiler-toolchain self-contained on both supported
 targets. It does not require host-installed Rust, Cargo, Node, LLVM, Clang,
-LLD, ScriptC, or a MiniJAM checkout.
+LLD, ScriptC, or a MiniJAM checkout. A consumer build uses only managed Node,
+Clang, `llvm-ar`, the guest linker, ScriptC, and these immutable archives:
+
+```text
+runtime/libjamscript_guest_runtime.a
+runtime/libjamscript_scriptc_runtime.a
+runtime/libjamscript_jam_runtime.a
+```
+
+The consumer path is therefore:
+
+```text
+service.ts -> ScriptC -> generated C + descriptor C -> managed clang
+           -> precompiled runtime archives + guest linker -> service.pvm
+```
+
+It does not invoke `cargo`, `rustc`, `rust-src`, Cargo vendor, host Rust
+linkers, GCC, or host development libraries. The legacy Cargo guest path is
+retained only for contributor/migration parity and is not selected for an
+installed managed toolchain.
 
 The guest/service path uses the managed target SDK and managed tools. `jams
-build` does not compile the separate generated Builder host application. When
-that host adapter is compiled, native host binaries still use the host ABI:
-Linux uses the Ubuntu/glibc boundary and macOS uses the Apple arm64 loader,
-system frameworks, and SDK / Xcode Command Line Tools for host linkage. Those
-Apple components are not copied into the bundle. The CI build-smoke job and
-host-toolchain checks prove this boundary before release publication.
+build` emits a bounded Service Descriptor C object and compiles only
+service-specific C before the final guest link. No host Builder application,
+host proc-macro, or host Rust linkage is part of the consumer build.
 
 The bundle contains only the JamScript-owned JAM target SDK under
 `targets/jam/sdk`; MiniJAM, Jambda, and deployment services are not bundled.
@@ -129,6 +147,6 @@ engineering metadata, Backend archives, Docker, and GHCR are not part of the
 public JamScript release. Backend artifacts are owned by
 [`backend-release.yml`](../.github/workflows/backend-release.yml).
 
-The release refuses to replace an existing GitHub Release and does not rerun
-consumer validation. The retained release kill test is a manual diagnostic;
-consumer correctness is proved by CI.
+The release refuses to replace an existing GitHub Release. CI validates the
+installed-bundle closure and the released consumer topology without exposing
+the producer Rust/Cargo toolchain to the consumer environment.

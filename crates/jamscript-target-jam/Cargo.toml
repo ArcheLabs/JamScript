@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 blake2b_simd.workspace = true
 jam-program-blob-common.workspace = true
+sha2.workspace = true
 polkavm-linker.workspace = true
 jamscript-codegen-rust = { path = "../jamscript-codegen-rust" }
 jamscript-deployment = { path = "../jamscript-deployment" }
