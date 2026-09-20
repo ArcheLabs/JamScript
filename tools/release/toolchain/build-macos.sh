@@ -56,6 +56,7 @@ copy_tree() {
 copy_file "${NODE_BIN}" bin/node
 copy_file "${CLANG_BIN}" bin/clang
 copy_file "${LLVM_AR_BIN}" bin/llvm-ar
+copy_file "${LLVM_AR_BIN}" bin/ar
 copy_file "${LLD_BIN}" bin/guest-linker
 copy_tree "${ROOT}/toolchains/scriptc" scriptc
 copy_tree "${ROOT}/crates/jamscript-runtime-scriptc" runtime-scriptc
@@ -222,6 +223,7 @@ declare -a MACOS_ROOT_BINARIES=(
   "${STAGE}/bin/node"
   "${STAGE}/bin/clang"
   "${STAGE}/bin/llvm-ar"
+  "${STAGE}/bin/ar"
   "${STAGE}/bin/guest-linker"
 )
 for binary in "${MACOS_ROOT_BINARIES[@]}"; do
@@ -242,6 +244,7 @@ staged_version_gate() {
 staged_version_gate STAGED_NODE "${STAGE}/bin/node"
 staged_version_gate STAGED_CLANG "${STAGE}/bin/clang"
 staged_version_gate STAGED_LLVM_AR "${STAGE}/bin/llvm-ar"
+staged_version_gate STAGED_AR "${STAGE}/bin/ar"
 staged_version_gate STAGED_LLD "${STAGE}/bin/guest-linker"
 
 # The Rust/Cargo tree above exists only inside this release-engineering build.
@@ -257,7 +260,6 @@ rm -rf -- \
   "${STAGE}/bin/rustc" \
   "${STAGE}/bin/cargo" \
   "${STAGE}/bin/jamscript-host-linker" \
-  "${STAGE}/bin/ar" \
   "${STAGE}/bin/llvm-readelf" \
   "${STAGE}/Cargo.lock" \
   "${STAGE}/toolchains/polkavm.lock"

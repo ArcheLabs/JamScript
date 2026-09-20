@@ -178,7 +178,7 @@ jobs:
           listing="${RUNNER_TEMP}/toolchain-members.txt"
           zstd -q -d -c "${bundle}" | tar -tf - > "${listing}"
           for required in \
-            bin/node bin/clang bin/llvm-ar bin/guest-linker scriptc runtime runtime-scriptc targets/jam/sdk \
+            bin/node bin/clang bin/llvm-ar bin/ar bin/guest-linker scriptc runtime runtime-scriptc targets/jam/sdk \
             targets/polkavm/riscv64emac-unknown-none-polkavm.json \
             runtime/libjamscript_guest_runtime.a \
             runtime/libjamscript_scriptc_runtime.a \
