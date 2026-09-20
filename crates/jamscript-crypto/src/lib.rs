@@ -543,6 +543,14 @@ mod tests {
             .sign(&proof.canonical_device_keys_object().unwrap())
             .to_bytes();
         let encoded = proof.encode().unwrap();
+        let encoded_hex = encoded
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            encoded_hex,
+            "01120040616c6963653a6578616d706c652e6f72678139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b3944b46de57790ce84e2c308ff13e3078bdb8c20b7026b0ad22ab754f7a798e3292c87e72d01d1be3dad936ce1e1ec9ca3f4f6298a3a79dffdfbed94814a31c26070600444556494345011c006d2e6f6c6d2e76312e637572766532353531392d6165732d736861320404040404040404040404040404040404040404040404040404040404040404ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1024da97d568567c89a2b3fe71fe720122c3bbfff2873246d9ba6a3ff8a76fb97e6d82534a03eccaede5d81189bed267eb458b009f4a8c7c155c296832919450d"
+        );
         let decoded = MatrixControlClaimProofV1::decode(&encoded).unwrap();
         decoded.verify(&master.verifying_key().to_bytes()).unwrap();
         let mut tampered = decoded.clone();
