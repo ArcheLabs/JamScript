@@ -855,5 +855,4 @@ mod tests {
         assert_eq!(verified.controller, controller);
         assert_eq!(verified.payload, b"payload");
     }
-
 }
