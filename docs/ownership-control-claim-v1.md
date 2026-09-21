@@ -4,7 +4,9 @@ This document records the compatibility boundary for the former
 `ControlClaim(subject, controller)` design.
 
 The `SignedActionV2` envelope still carries `controller` and the optional
-`actAs` field so existing wire encodings remain readable. These fields do
+`actAs` field so existing wire encodings remain readable. A non-null `actAs`
+value is rejected as unsupported legacy delegation by the protocol/runtime;
+it is never resolved through reserved ControlClaim state. These fields do
 not create a network-scoped controller registry. In particular, a JamScript
 consumer must not infer authorization from an external Ownership Control
 service.
