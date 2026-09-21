@@ -186,6 +186,26 @@ impl MatrixControlClaimProofV1 {
     }
 }
 
+/// Verify the deterministic Matrix M→S→D cross-signing evidence for a
+/// subject master key and controller device key. This primitive is pure:
+/// it does not read state, access a network, or perform host calls.
+pub fn verify_matrix_cross_signing(
+    subject_public_key: &[u8],
+    controller_public_key: &[u8],
+    proof: &[u8],
+) -> bool {
+    let Ok(master) = <[u8; 32]>::try_from(subject_public_key) else {
+        return false;
+    };
+    let Ok(device) = <[u8; 32]>::try_from(controller_public_key) else {
+        return false;
+    };
+    let Ok(decoded) = MatrixControlClaimProofV1::decode(proof) else {
+        return false;
+    };
+    decoded.verify_for(&master, &device).is_ok()
+}
+
 fn put_text(output: &mut Vec<u8>, value: &str) -> Result<(), CryptoError> {
     put_text_bounded(output, value, MAX_MATRIX_TEXT_BYTES)
 }
