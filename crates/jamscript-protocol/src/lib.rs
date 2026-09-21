@@ -7,6 +7,27 @@ use ownership_core::{Ownership, OwnershipError, OwnershipKind};
 use service_runtime_core::ServiceKeyV1;
 use thiserror::Error;
 
+/// Pure Matrix M→S→D verifier used by application services. Controller
+/// authorization remains a Locus/application-state decision.
+pub fn verify_matrix_cross_signing(
+    subject: &Ownership,
+    controller: &Ownership,
+    proof: &[u8],
+) -> bool {
+    if subject.kind != OwnershipKind::Ed25519Key
+        || controller.kind != OwnershipKind::Ed25519Key
+        || subject.public.len() != 32
+        || controller.public.len() != 32
+    {
+        return false;
+    }
+    jamscript_crypto::verify_matrix_cross_signing(
+        &subject.public,
+        &controller.public,
+        proof,
+    )
+}
+
 pub const SIGNED_ACTION_VERSION_V1: u8 = 1;
 pub const SIGNING_DOMAIN_V1: &[u8] = b"JAMSCRIPT_ACTION_V1";
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
