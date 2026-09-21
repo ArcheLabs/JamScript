@@ -18,7 +18,6 @@ pub const ACTION_DOMAIN_V1: &[u8] = b"JAMSCRIPT_ACTION_V1";
 pub const STATE_KEY_DOMAIN_V1: &[u8] = b"jamscript/state/v1";
 pub const NONCE_SCHEMA_V1: &[u8] = b"__jamscript/runtime/auth/nonces/";
 pub const OWNERSHIP_NONCE_SCHEMA_V1: &[u8] = b"__jamscript/runtime/ownership/nonces/";
-pub const CONTROL_CLAIM_NAMESPACE_V1: &[u8] = b"__jamscript/runtime/ownership/control/";
 pub const ACTION_COMMITMENT_DOMAIN_V2: &[u8] = b"JAMSCRIPT_ACTION_V2";
 pub const MAX_AUTHORIZATION_PROOF_BYTES: usize = 65_536;
 pub const MANAGEMENT_DOMAIN_V1: &[u8] = b"jamscript/management/v1";
@@ -307,6 +306,7 @@ pub enum RuntimeError {
     MatrixDeviceNotCrossSigned = 31,
     MatrixBootstrapAlreadyCompleted = 32,
     MatrixUnsupportedDeviceProfile = 33,
+    ActAsUnsupported = 34,
 }
 
 impl RuntimeError {
@@ -479,7 +479,6 @@ pub fn verify_signed_action_v2<'a>(
     expected_service_key: ServiceKeyV1,
     expected_action_selector: [u8; 8],
     expected_nonce: Option<u64>,
-    active_control_claim: bool,
 ) -> Result<VerifiedOwnershipAction<'a>, RuntimeError> {
     if action.network_domain != expected_network_domain {
         return Err(RuntimeError::WrongNetwork);
@@ -498,8 +497,8 @@ pub fn verify_signed_action_v2<'a>(
             return Err(RuntimeError::OwnershipNonceMismatch);
         }
     }
-    if action.act_as.is_some() && !active_control_claim {
-        return Err(RuntimeError::ControlClaimNotFound);
+    if action.act_as.is_some() {
+        return Err(RuntimeError::ActAsUnsupported);
     }
     if action.authorization_proof.is_empty() {
         return Err(RuntimeError::InvalidOwnershipAuthorization);
@@ -550,10 +549,7 @@ pub fn verify_signed_action_v2<'a>(
             .map_err(map_ownership_auth_error)?,
     }
     Ok(VerifiedOwnershipAction {
-        owner: action
-            .act_as
-            .clone()
-            .unwrap_or_else(|| action.controller.clone()),
+        owner: action.controller.clone(),
         controller: action.controller,
         action_hash: blake2_256(action.encoded),
         action_selector: action.action_selector,
@@ -732,27 +728,6 @@ pub fn ownership_nonce_key(owner: &Ownership) -> Result<alloc::vec::Vec<u8>, Run
     output.extend_from_slice(OWNERSHIP_NONCE_SCHEMA_V1);
     output.extend_from_slice(&key);
     Ok(output)
-}
-
-pub fn control_claim_key(
-    subject: &Ownership,
-    controller: &Ownership,
-) -> Result<alloc::vec::Vec<u8>, RuntimeError> {
-    let subject_key = subject
-        .key()
-        .map_err(|_| RuntimeError::InvalidOwnershipEncoding)?;
-    let controller_key = controller
-        .key()
-        .map_err(|_| RuntimeError::InvalidOwnershipEncoding)?;
-    let mut key = alloc::vec::Vec::with_capacity(
-        3 + CONTROL_CLAIM_NAMESPACE_V1.len() + subject_key.len() + controller_key.len(),
-    );
-    key.push(service_runtime_core::RUNTIME_KEY_CLASS_V1);
-    key.push(service_runtime_core::WALLET_AUTH_MODULE_V1);
-    key.extend_from_slice(CONTROL_CLAIM_NAMESPACE_V1);
-    key.extend_from_slice(&subject_key);
-    key.extend_from_slice(&controller_key);
-    Ok(key)
 }
 
 struct Reader<'a> {
