@@ -21,6 +21,7 @@ pub struct ControlClaim {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlClaimError {
     InvalidOwnership,
+    InvalidBootstrap,
     Unauthorized,
     AlreadyExists,
     NotFound,
@@ -58,6 +59,20 @@ impl ControlClaimState {
         self.add_controller(subject, controller, effective_owner)?;
         self.initialized.insert(subject_key, true);
         Ok(())
+    }
+
+    /// Validate and apply the one-time Matrix bootstrap proof. `initialized`
+    /// is deliberately retained after revoke, so an old public M→S→D proof
+    /// cannot bootstrap the subject again.
+    pub fn bootstrap_matrix_controller(
+        &mut self,
+        bootstrap: &jamscript_protocol::MatrixControlBootstrapV1,
+        network_domain: [u8; 32],
+    ) -> Result<(), ControlClaimError> {
+        bootstrap
+            .verify(network_domain)
+            .map_err(|_| ControlClaimError::InvalidBootstrap)?;
+        self.bootstrap_controller(&bootstrap.subject, &bootstrap.controller, &bootstrap.subject)
     }
 
     pub fn is_active(&self, subject: &Ownership, controller: &Ownership) -> bool {
