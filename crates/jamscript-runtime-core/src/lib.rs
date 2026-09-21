@@ -19,6 +19,8 @@ pub const STATE_KEY_DOMAIN_V1: &[u8] = b"jamscript/state/v1";
 pub const NONCE_SCHEMA_V1: &[u8] = b"__jamscript/runtime/auth/nonces/";
 pub const OWNERSHIP_NONCE_SCHEMA_V1: &[u8] = b"__jamscript/runtime/ownership/nonces/";
 pub const CONTROL_CLAIM_NAMESPACE_V1: &[u8] = b"__jamscript/runtime/ownership/control/";
+pub const CONTROL_CLAIM_BOOTSTRAP_NAMESPACE_V1: &[u8] =
+    b"__jamscript/runtime/ownership/bootstrap-used/";
 pub const ACTION_COMMITMENT_DOMAIN_V2: &[u8] = b"JAMSCRIPT_ACTION_V2";
 pub const MAX_AUTHORIZATION_PROOF_BYTES: usize = 65_536;
 pub const MANAGEMENT_DOMAIN_V1: &[u8] = b"jamscript/management/v1";
@@ -752,6 +754,22 @@ pub fn control_claim_key(
     key.extend_from_slice(CONTROL_CLAIM_NAMESPACE_V1);
     key.extend_from_slice(&subject_key);
     key.extend_from_slice(&controller_key);
+    Ok(key)
+}
+
+pub fn control_claim_bootstrap_key(
+    subject: &Ownership,
+) -> Result<alloc::vec::Vec<u8>, RuntimeError> {
+    let subject_key = subject
+        .key()
+        .map_err(|_| RuntimeError::InvalidOwnershipEncoding)?;
+    let mut key = alloc::vec::Vec::with_capacity(
+        2 + CONTROL_CLAIM_BOOTSTRAP_NAMESPACE_V1.len() + subject_key.len(),
+    );
+    key.push(service_runtime_core::RUNTIME_KEY_CLASS_V1);
+    key.push(service_runtime_core::WALLET_AUTH_MODULE_V1);
+    key.extend_from_slice(CONTROL_CLAIM_BOOTSTRAP_NAMESPACE_V1);
+    key.extend_from_slice(&subject_key);
     Ok(key)
 }
 

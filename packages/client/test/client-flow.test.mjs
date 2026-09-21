@@ -5,6 +5,7 @@ import {
   RpcError,
   actionSelector,
   decodeSignedActionV1,
+  OWNERSHIP_KIND,
   toHex,
 } from "../dist/index.js";
 
@@ -233,6 +234,34 @@ test("query reads and decodes state at the finalized block", async () => {
   assert.equal(result.value, 42n);
   assert.equal(result.context.blockHash, initialContext.blockHash);
   assert.equal(result.stateRoot, queryManagedStateRoot);
+});
+
+test("ControlClaim queries validate the requested deployment service ID", async () => {
+  const controlRoot = queryManagedStateRoot;
+  const controlDeployment = {
+    ...deployment,
+    serviceId: 200,
+    serviceKey: "0x" + "bb".repeat(32),
+  };
+  const subject = { version: 1, kind: OWNERSHIP_KIND.ED25519_KEY, public: new Uint8Array(32).fill(7) };
+  const controller = { version: 1, kind: OWNERSHIP_KIND.ED25519_KEY, public: new Uint8Array(32).fill(8) };
+  const transport = {
+    async call(method, params = []) {
+      if (method === "chain_getBlockHash") return genesisHash;
+      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getServiceStorageAt") {
+        assert.equal(params[1], 200);
+        return managedCommitment(controlRoot);
+      }
+      if (method === "jamscript_getStateV1") {
+        assert.equal(params.serviceId, 200);
+        return { serviceId: 200, stateRoot: controlRoot, keyBase64: params.keyBase64, valueBase64: Buffer.from([1]).toString("base64") };
+      }
+      throw new Error("unexpected RPC method: " + method);
+    },
+  };
+  const client = new JamScriptClient(deployment, transport);
+  assert.equal(await client.isControllerActive(controlDeployment, subject, controller), true);
 });
 
 test("managed-state provider unavailability does not fall back to Service KV by default", async () => {

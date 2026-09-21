@@ -5,15 +5,18 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-jamscript-crypto = { path = "../jamscript-crypto" }
+jamscript-crypto = { path = "../jamscript-crypto", default-features = false }
 ownership-core = { path = "../ownership-core" }
 base64.workspace = true
-jamscript-ir = { path = "../jamscript-ir" }
-service-runtime-core = { path = "../service-runtime-core" }
+service-runtime-core = { path = "../service-runtime-core", default-features = false }
 thiserror.workspace = true
+
+[features]
+default = []
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+jamscript-ir = { path = "../jamscript-ir" }
 schnorrkel.workspace = true
 
 # SignedAction constructors intentionally mirror the protocol envelope fields.

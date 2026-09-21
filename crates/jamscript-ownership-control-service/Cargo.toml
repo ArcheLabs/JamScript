@@ -1,0 +1,16 @@
+[package]
+name = "jamscript-ownership-control-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jamscript-protocol = { path = "../jamscript-protocol", default-features = false }
+jamscript-runtime-core = { path = "../jamscript-runtime-core", default-features = false }
+service-runtime-core = { path = "../service-runtime-core", default-features = false }
+
+[dev-dependencies]
+ownership-core = { path = "../ownership-core" }
+ed25519-dalek.workspace = true
+jamscript-crypto = { path = "../jamscript-crypto" }
+service-runtime-state = { path = "../service-runtime-state" }

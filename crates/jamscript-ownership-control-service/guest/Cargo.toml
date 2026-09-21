@@ -1,0 +1,16 @@
+[package]
+name = "jamscript-ownership-control-service-guest"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jamscript-ownership-control-service = { path = ".." }
+service-runtime-core = { path = "../../service-runtime-core", default-features = false }
+service-runtime-guest = { path = "../../service-runtime-guest", default-features = false }
+
+[workspace]
+resolver = "2"

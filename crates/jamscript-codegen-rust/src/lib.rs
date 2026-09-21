@@ -495,13 +495,16 @@ fn generate_scriptc_application_rust(
             bytes if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?),
             _ => return Err(StateAccessError::Backend),
         }};
-        let claim_key = if let Some(owner) = signed.act_as.as_ref() {{
-            Some(jamscript_runtime_core::control_claim_key(owner, &signed.controller)
-                .map_err(|_| StateAccessError::Backend)?)
-        }} else {{ None }};
-        let active_control_claim = match claim_key.as_ref() {{
-            Some(key) => matches!(context.state().get(key)?.as_deref(), Some([1])),
+        let active_control_claim = match signed.act_as.as_ref() {{
             None => false,
+            Some(owner) => {{
+                let service_id = context.ownership_control_service_id().ok_or(
+                    StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::ControlClaimNotFound.code())
+                )?;
+                let key = jamscript_runtime_core::control_claim_key(owner, &signed.controller)
+                    .map_err(|_| StateAccessError::Backend)?;
+                matches!(context.external_get(service_id, &key)?.as_deref(), Some([1]))
+            }}
         }};
         let verified = jamscript_runtime_core::verify_signed_action_v2(
             signed, context.network_domain(), SERVICE_KEY, selected_selector,
@@ -901,8 +904,7 @@ fn application_body(
             "let nonce_key = jamscript_runtime_core::ownership_nonce_key(nonce_owner).map_err(|_| StateAccessError::Backend)?;",
             "let nonce_bytes = context.state().get(&nonce_key)?.unwrap_or_default();",
             "let expected_nonce = match nonce_bytes.as_slice() { [] => 0u64, bytes if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().map_err(|_| StateAccessError::Backend)?), _ => return Err(StateAccessError::Backend) };",
-            "let claim_key = if let Some(owner) = signed.act_as.as_ref() { Some(jamscript_runtime_core::control_claim_key(owner, &signed.controller).map_err(|_| StateAccessError::Backend)?) } else { None };",
-            "let active_control_claim = match claim_key.as_ref() { Some(key) => matches!(context.state().get(key)?.as_deref(), Some([1])), None => false };",
+            "let active_control_claim = match signed.act_as.as_ref() { None => false, Some(owner) => { let service_id = context.ownership_control_service_id().ok_or(StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::ControlClaimNotFound.code()))?; let key = jamscript_runtime_core::control_claim_key(owner, &signed.controller).map_err(|_| StateAccessError::Backend)?; matches!(context.external_get(service_id, &key)?.as_deref(), Some([1])) } };",
             "let verified = jamscript_runtime_core::verify_signed_action_v2(signed, context.network_domain(), SERVICE_KEY, ACTION_SELECTOR, Some(expected_nonce), active_control_claim).map_err(|_| StateAccessError::Rejected(jamscript_runtime_core::RuntimeError::InvalidOwnershipAuthorization.code()))?;",
             "context.set_ownership(verified.owner.clone(), verified.controller.clone());",
             "context.constrain_valid_until(verified.valid_until);",
@@ -1168,6 +1170,9 @@ mod tests {
         assert!(source.contains("decode_signed_action_v2"));
         assert!(source.contains("encode_scriptc_ownership_context"));
         assert!(source.contains("auth_context.as_ptr()"));
+        assert!(source.contains("ownership_control_service_id"));
+        assert!(source.contains("context.external_get(service_id, &key)"));
+        assert!(!source.contains("context.state().get(&key)"));
         let decoder = payload_decoder(&ir.actions[0]).unwrap();
         assert!(decoder.contains("let field_0 = reader.ownership()?;"));
         assert!(!decoder.contains("reader.bounded_bytes(4096usize)"));

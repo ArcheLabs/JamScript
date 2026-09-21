@@ -13,6 +13,7 @@ members = [
   "crates/jamscript-parser",
   "crates/jamscript-protocol",
   "crates/jamscript-runtime",
+  "crates/jamscript-ownership-control-service",
   "crates/jamscript-runtime-core",
   "crates/jamscript-codegen-rust",
   "crates/jamscript-backend-scriptc",
@@ -26,6 +27,7 @@ members = [
   "crates/jamscript-cli",
   "examples/rust-managed-state",
   "tools/managed-state-network-adapter",
+  "tools/ownership-control-service-build",
 ]
 
 [workspace.package]

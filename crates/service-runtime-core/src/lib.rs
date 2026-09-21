@@ -1466,6 +1466,10 @@ pub trait ExternalStateAccess {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionEnvironmentV1 {
     pub network_domain: [u8; 32],
+    /// The network-scoped Ownership Control service.  This is supplied by
+    /// the execution host; a consumer service must fail closed when it is
+    /// absent instead of falling back to local managed state.
+    pub ownership_control_service_id: Option<u32>,
 }
 
 pub struct ExecutionContext<'a> {
@@ -1570,6 +1574,10 @@ impl<'a> ExecutionContext<'a> {
 
     pub fn network_domain(&self) -> [u8; 32] {
         self.environment.network_domain
+    }
+
+    pub fn ownership_control_service_id(&self) -> Option<u32> {
+        self.environment.ownership_control_service_id
     }
 
     pub fn set_ownership(

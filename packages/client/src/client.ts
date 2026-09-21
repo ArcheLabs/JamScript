@@ -459,7 +459,7 @@ export class JamScriptClient {
   ): Promise<Uint8Array | null> {
     const response = await this.stateProvider.get({ serviceId: deployment.serviceId, serviceKey: deployment.serviceKey, stateRoot: toHex(root), key });
     if (
-      response.serviceId !== this.deployment.serviceId
+      response.serviceId !== deployment.serviceId
       || response.stateRoot.toLowerCase() !== toHex(root).toLowerCase()
       || !sameBytes(response.key, key)
     ) {

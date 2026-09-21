@@ -20,9 +20,9 @@ use rocksdb::{
 };
 use serde_json::{json, Value};
 use service_runtime_core::{
-    BackendMetadataV1, ExecutionContext, RuntimeRefineInputV1, RuntimeRefineOutputV1,
-    ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1, StateDiffV1,
-    StateQueryResponseV1, StateRecoveryV1, StateRoot, WireError, EMPTY_STATE_ROOT_V1,
+    BackendMetadataV1, ExecutionContext, ExecutionEnvironmentV1, RuntimeRefineInputV1,
+    RuntimeRefineOutputV1, ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1,
+    StateDiffV1, StateQueryResponseV1, StateRecoveryV1, StateRoot, WireError, EMPTY_STATE_ROOT_V1,
     MAX_RECOVERY_BYTES, RECOVERY_FORMAT_VERSION,
 };
 use service_runtime_host::{
@@ -860,7 +860,14 @@ impl PvmApplication {
     }
 
     pub fn metadata(&self) -> Result<BackendMetadataV1, BackendError> {
-        let bytes = self.invoke("jamscript_backend_metadata_v1", &[], [0; 32])?;
+        let bytes = self.invoke(
+            "jamscript_backend_metadata_v1",
+            &[],
+            ExecutionEnvironmentV1 {
+                network_domain: [0; 32],
+                ownership_control_service_id: None,
+            },
+        )?;
         BackendMetadataV1::decode(&bytes).map_err(BackendError::Wire)
     }
 
@@ -873,7 +880,21 @@ impl PvmApplication {
         input: &[u8],
         network_domain: StateRoot,
     ) -> Result<Vec<u8>, BackendError> {
-        self.invoke("jamscript_plan_v1", input, network_domain)
+        self.plan_encoded_with_environment(
+            input,
+            ExecutionEnvironmentV1 {
+                network_domain,
+                ownership_control_service_id: None,
+            },
+        )
+    }
+
+    pub fn plan_encoded_with_environment(
+        &self,
+        input: &[u8],
+        environment: ExecutionEnvironmentV1,
+    ) -> Result<Vec<u8>, BackendError> {
+        self.invoke("jamscript_plan_v1", input, environment)
     }
 
     pub fn plan_with_keys(
@@ -922,6 +943,24 @@ impl PvmApplication {
         external_state: Vec<service_runtime_core::ExternalStateWitnessV1>,
         network_domain: StateRoot,
     ) -> Result<PlannerResult, BackendError> {
+        self.plan_with_external_witness_and_environment(
+            actions,
+            managed_state,
+            external_state,
+            ExecutionEnvironmentV1 {
+                network_domain,
+                ownership_control_service_id: None,
+            },
+        )
+    }
+
+    pub fn plan_with_external_witness_and_environment(
+        &self,
+        actions: &[Vec<u8>],
+        managed_state: service_runtime_core::ManagedStateWitnessV1,
+        external_state: Vec<service_runtime_core::ExternalStateWitnessV1>,
+        environment: ExecutionEnvironmentV1,
+    ) -> Result<PlannerResult, BackendError> {
         let input = RuntimeRefineInputV1 {
             version: RuntimeRefineInputV1::VERSION,
             managed_state,
@@ -929,7 +968,7 @@ impl PvmApplication {
             actions: actions.to_vec(),
         };
         let encoded = input.encode().map_err(BackendError::Wire)?;
-        let output = self.plan_encoded_with_network_domain(&encoded, network_domain)?;
+        let output = self.plan_encoded_with_environment(&encoded, environment)?;
         if let Ok((service_id, key)) =
             service_runtime_core::decode_planner_need_external_state(&output)
         {
@@ -959,7 +998,21 @@ impl PvmApplication {
         input: &[u8],
         network_domain: StateRoot,
     ) -> Result<RuntimeRefineOutputV1, BackendError> {
-        let bytes = self.invoke("minijam_refine", input, network_domain)?;
+        self.refine_encoded_with_environment(
+            input,
+            ExecutionEnvironmentV1 {
+                network_domain,
+                ownership_control_service_id: None,
+            },
+        )
+    }
+
+    pub fn refine_encoded_with_environment(
+        &self,
+        input: &[u8],
+        environment: ExecutionEnvironmentV1,
+    ) -> Result<RuntimeRefineOutputV1, BackendError> {
+        let bytes = self.invoke("minijam_refine", input, environment)?;
         RuntimeRefineOutputV1::decode(&bytes).map_err(BackendError::Wire)
     }
 
@@ -967,7 +1020,7 @@ impl PvmApplication {
         &self,
         export: &str,
         payload: &[u8],
-        network_domain: StateRoot,
+        environment: ExecutionEnvironmentV1,
     ) -> Result<Vec<u8>, BackendError> {
         let mut config = PvmConfig::new();
         config.set_backend(Some(BackendKind::Interpreter));
@@ -1004,7 +1057,7 @@ impl PvmApplication {
                 Ok(())
             })
             .map_err(|error| BackendError::Pvm(error.to_string()))?;
-        let network_domain_for_host = network_domain;
+        let network_domain_for_host = environment.network_domain;
         linker
             .define_untyped("minijam_network_domain", move |caller| {
                 let output = caller.instance.reg(Reg::A0) as u32;
@@ -1021,6 +1074,33 @@ impl PvmApplication {
                     output_size,
                     &(network_domain_for_host.len() as u64).to_le_bytes(),
                 )?;
+                caller.instance.set_reg(Reg::A0, 0);
+                Ok(())
+            })
+            .map_err(|error| BackendError::Pvm(error.to_string()))?;
+        let control_service_id_for_host = environment.ownership_control_service_id;
+        linker
+            .define_untyped("minijam_ownership_control_service_id", move |caller| {
+                let output = caller.instance.reg(Reg::A0) as u32;
+                let capacity = caller.instance.reg(Reg::A1) as usize;
+                let output_size = caller.instance.reg(Reg::A2) as u32;
+                let Some(service_id) = control_service_id_for_host else {
+                    caller
+                        .instance
+                        .write_memory(output_size, &0u64.to_le_bytes())?;
+                    caller.instance.set_reg(Reg::A0, 1);
+                    return Ok(());
+                };
+                if capacity < 4 {
+                    caller.instance.set_reg(Reg::A0, u64::MAX);
+                    return Ok(());
+                }
+                caller
+                    .instance
+                    .write_memory(output, &service_id.to_le_bytes())?;
+                caller
+                    .instance
+                    .write_memory(output_size, &4u64.to_le_bytes())?;
                 caller.instance.set_reg(Reg::A0, 0);
                 Ok(())
             })
@@ -1254,6 +1334,18 @@ pub trait BackendWorkGateway: Send + Sync {
     fn work_status(&self, params: Value) -> Result<Value, BackendError>;
 }
 
+/// Network-scoped provenance for the first-party Ownership Control service.
+/// The logical service key is stable, while the id and code hash belong to a
+/// particular chain deployment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnershipControlDeployment {
+    pub genesis_hash: StateRoot,
+    pub network_domain: StateRoot,
+    pub service_key: ServiceKeyV1,
+    pub service_id: u32,
+    pub code_hash: StateRoot,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FinalizedContextV1 {
     pub block_hash: StateRoot,
@@ -1275,6 +1367,16 @@ pub trait BackendNetwork: Send + Sync {
     fn genesis_hash(&self) -> Result<StateRoot, BackendError>;
     fn network_domain(&self) -> Result<StateRoot, BackendError> {
         self.genesis_hash()
+    }
+    fn ownership_control_deployment(
+        &self,
+    ) -> Result<Option<OwnershipControlDeployment>, BackendError> {
+        Ok(None)
+    }
+    fn ownership_control_service_id(&self) -> Result<Option<u32>, BackendError> {
+        Ok(self
+            .ownership_control_deployment()?
+            .map(|deployment| deployment.service_id))
     }
     fn finalized_context(&self) -> Result<FinalizedContextV1, BackendError>;
     fn service_info(
@@ -1303,6 +1405,8 @@ pub struct MiniJamNetworkGateway<T> {
     pub node_rpc: String,
     pub formal_rpc: String,
     pub timeout: Duration,
+    pub ownership_control_service_id: Option<u32>,
+    pub ownership_control_deployment: Option<OwnershipControlDeployment>,
 }
 
 const DEFAULT_BATCH_MAX_ACTIONS: usize = 4;
@@ -1778,6 +1882,10 @@ impl BackendEngine {
         }
         let context = self.network.finalized_context()?;
         let network_domain = self.network.network_domain()?;
+        let environment = ExecutionEnvironmentV1 {
+            network_domain,
+            ownership_control_service_id: self.network.ownership_control_service_id()?,
+        };
         if let Some(request_context) = params.get("context").and_then(Value::as_object) {
             let requested_block = request_context
                 .get("blockHash")
@@ -1829,15 +1937,8 @@ impl BackendEngine {
                         keys.push(nonce_key);
                     }
                 }
-                if let Some(subject) = signed.act_as.as_ref() {
-                    if let Ok(claim_key) =
-                        jamscript_runtime_core::control_claim_key(subject, &signed.controller)
-                    {
-                        if !keys.contains(&claim_key) {
-                            keys.push(claim_key);
-                        }
-                    }
-                }
+                // Delegated authorization is read from the configured
+                // Ownership Control service via external proof state.
             }
         }
         let parent_root = match self.network.service_storage_at(
@@ -1864,11 +1965,11 @@ impl BackendEngine {
                 .map_err(BackendError::Provider)?;
             let external_witnesses =
                 build_external_witnesses(state, self.network.as_ref(), &context, &external_keys)?;
-            let planned = pvm.plan_with_external_witness_and_network_domain(
+            let planned = pvm.plan_with_external_witness_and_environment(
                 &actions,
                 witness,
                 external_witnesses.clone(),
-                network_domain,
+                environment,
             )?;
             let mut changed = false;
             for key in planned.local_access_keys {
@@ -1906,7 +2007,7 @@ impl BackendEngine {
         };
         let action_count = input.actions.len();
         let encoded = input.encode().map_err(BackendError::Wire)?;
-        let prediction = pvm.refine_encoded_with_network_domain(&encoded, network_domain)?;
+        let prediction = pvm.refine_encoded_with_environment(&encoded, environment)?;
         if prediction.receipts.len() != action_count {
             return Err(BackendError::Rpc(format!(
                 "PVM returned {} action receipts for {} actions",
@@ -2097,6 +2198,8 @@ impl<T> MiniJamNetworkGateway<T> {
             node_rpc: node_rpc.into(),
             formal_rpc: formal_rpc.into(),
             timeout: Duration::from_secs(30),
+            ownership_control_service_id: None,
+            ownership_control_deployment: None,
         }
     }
 
@@ -2104,9 +2207,33 @@ impl<T> MiniJamNetworkGateway<T> {
         self.timeout = timeout;
         self
     }
+
+    pub fn with_ownership_control_service_id(mut self, service_id: u32) -> Self {
+        self.ownership_control_service_id = Some(service_id);
+        self
+    }
+
+    pub fn with_ownership_control_deployment(
+        mut self,
+        deployment: OwnershipControlDeployment,
+    ) -> Self {
+        self.ownership_control_service_id = Some(deployment.service_id);
+        self.ownership_control_deployment = Some(deployment);
+        self
+    }
 }
 
 impl<T: JsonRpcTransport + Send + Sync> BackendNetwork for MiniJamNetworkGateway<T> {
+    fn ownership_control_deployment(
+        &self,
+    ) -> Result<Option<OwnershipControlDeployment>, BackendError> {
+        Ok(self.ownership_control_deployment)
+    }
+
+    fn ownership_control_service_id(&self) -> Result<Option<u32>, BackendError> {
+        Ok(self.ownership_control_service_id)
+    }
+
     fn genesis_hash(&self) -> Result<StateRoot, BackendError> {
         let value = self
             .transport

@@ -16,6 +16,11 @@ use service_runtime_state::ProofState;
 #[cfg(target_env = "polkavm")]
 unsafe extern "C" {
     fn minijam_network_domain(output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
+    fn minijam_ownership_control_service_id(
+        output: *mut u8,
+        capacity: usize,
+        output_size: *mut usize,
+    ) -> u32;
 }
 
 pub fn network_domain() -> Result<[u8; 32], GuestError> {
@@ -36,9 +41,36 @@ pub fn network_domain() -> Result<[u8; 32], GuestError> {
     }
 }
 
+fn ownership_control_service_id() -> Result<Option<u32>, GuestError> {
+    #[cfg(target_env = "polkavm")]
+    {
+        let mut output = [0u8; 4];
+        let mut output_size = 0usize;
+        let status = unsafe {
+            minijam_ownership_control_service_id(
+                output.as_mut_ptr(),
+                output.len(),
+                &mut output_size,
+            )
+        };
+        if status == 1 && output_size == 0 {
+            return Ok(None);
+        }
+        if status == 0 && output_size == output.len() {
+            return Ok(Some(u32::from_le_bytes(output)));
+        }
+        return Err(GuestError::Environment);
+    }
+    #[cfg(not(target_env = "polkavm"))]
+    {
+        Err(GuestError::Environment)
+    }
+}
+
 fn host_execution_environment() -> Result<ExecutionEnvironmentV1, GuestError> {
     Ok(ExecutionEnvironmentV1 {
         network_domain: network_domain()?,
+        ownership_control_service_id: ownership_control_service_id()?,
     })
 }
 
@@ -622,6 +654,7 @@ where
         input,
         ExecutionEnvironmentV1 {
             network_domain: [0; 32],
+            ownership_control_service_id: None,
         },
     )
 }
@@ -787,6 +820,7 @@ where
         None,
         ExecutionEnvironmentV1 {
             network_domain: [0; 32],
+            ownership_control_service_id: None,
         },
     )
 }
@@ -1271,6 +1305,26 @@ mod tests {
         }
     }
 
+    struct OwnershipControlReader;
+
+    impl ServiceApplication for OwnershipControlReader {
+        type Error = StateAccessError;
+
+        fn execute(
+            &self,
+            context: &mut ExecutionContext<'_>,
+            _input: &[u8],
+        ) -> Result<(), Self::Error> {
+            let service_id = context
+                .ownership_control_service_id()
+                .ok_or(StateAccessError::Backend)?;
+            let value = context
+                .external_get(service_id, b"claim")?
+                .ok_or(StateAccessError::Backend)?;
+            context.state().set(b"result", &value)
+        }
+    }
+
     struct SecondOrderReader;
 
     impl ServiceApplication for SecondOrderReader {
@@ -1389,6 +1443,59 @@ mod tests {
         );
         let recovery = StateRecoveryV1::decode(&output.recovery_payload).unwrap();
         assert_eq!(recovery.diff.changes[0].value, Some(b"value".to_vec()));
+    }
+
+    #[test]
+    fn ownership_control_service_id_selects_the_external_claim_state() {
+        let local = FullState::empty();
+        let control = FullState::from_pairs([(b"claim".as_slice(), b"active".as_slice())]).unwrap();
+        let input = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: ManagedStateWitnessV1 {
+                version: ManagedStateWitnessV1::VERSION,
+                parent_root: local.root(),
+                access_plan: StateAccessPlanV1::from_keys([b"result".as_slice()]).unwrap(),
+                storage_proof: local
+                    .proof_for(&[b"result"])
+                    .unwrap()
+                    .into_nodes()
+                    .into_iter()
+                    .collect(),
+            },
+            external_state: vec![service_runtime_core::ExternalStateWitnessV1 {
+                service_id: 42,
+                managed_state: ManagedStateWitnessV1 {
+                    version: ManagedStateWitnessV1::VERSION,
+                    parent_root: control.root(),
+                    access_plan: StateAccessPlanV1::from_keys([b"claim".as_slice()]).unwrap(),
+                    storage_proof: control
+                        .proof_for(&[b"claim"])
+                        .unwrap()
+                        .into_nodes()
+                        .into_iter()
+                        .collect(),
+                },
+            }],
+            actions: vec![vec![]],
+        };
+        let output = refine_with_environment(
+            &OwnershipControlReader,
+            &input,
+            ExecutionEnvironmentV1 {
+                network_domain: [0; 32],
+                ownership_control_service_id: Some(42),
+            },
+        )
+        .unwrap();
+        let recovery = StateRecoveryV1::decode(&output.recovery_payload).unwrap();
+        assert_eq!(recovery.diff.changes[0].value, Some(b"active".to_vec()));
+        assert_eq!(
+            output.external_dependencies,
+            vec![service_runtime_core::ExternalStateDependencyV1 {
+                service_id: 42,
+                state_root: control.root(),
+            }]
+        );
     }
 
     #[test]

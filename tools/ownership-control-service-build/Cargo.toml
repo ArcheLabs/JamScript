@@ -1,0 +1,13 @@
+[package]
+name = "ownership-control-service-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+jamscript-target-jam = { path = "../../crates/jamscript-target-jam" }
+jamscript-ownership-control-service = { path = "../../crates/jamscript-ownership-control-service" }
+service-build-polkavm = { path = "../../crates/service-build-polkavm" }
+service-runtime-core = { path = "../../crates/service-runtime-core" }
+tempfile.workspace = true

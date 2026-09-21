@@ -2,9 +2,10 @@ use clap::Parser;
 use jamscript_deployment::CurlJsonRpcTransport;
 use jamscript_service_backend::{
     ApplicationArtifactLoader, BackendDaemon, BackendDatabase, BackendRpcHandler, BackendState,
-    DiskArtifactStore, MiniJamNetworkGateway, PvmArtifactLoader, UnconfiguredWorkGateway,
+    DiskArtifactStore, MiniJamNetworkGateway, OwnershipControlDeployment, PvmArtifactLoader,
+    UnconfiguredWorkGateway,
 };
-use service_runtime_core::{StateRoot, EMPTY_STATE_ROOT_V1};
+use service_runtime_core::{ServiceKeyV1, StateRoot, EMPTY_STATE_ROOT_V1};
 use std::{env, path::PathBuf, sync::Arc, time::Duration};
 
 #[derive(Debug, Parser)]
@@ -25,6 +26,16 @@ struct Args {
     network: String,
     #[arg(long)]
     genesis_hash: Option<String>,
+    #[arg(long)]
+    ownership_control_service_id: Option<u32>,
+    #[arg(long)]
+    ownership_control_genesis_hash: Option<String>,
+    #[arg(long)]
+    ownership_control_network_domain: Option<String>,
+    #[arg(long)]
+    ownership_control_service_key: Option<String>,
+    #[arg(long)]
+    ownership_control_code_hash: Option<String>,
     #[arg(long = "cors-origin", action = clap::ArgAction::Append)]
     cors_origins: Vec<String>,
 }
@@ -48,13 +59,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let formal_rpc = args
         .formal_rpc
         .or_else(|| env::var("JAMSCRIPT_FORMAL_RPC").ok());
+    let ownership_control_service_id = args.ownership_control_service_id.or_else(|| {
+        env::var("JAMSCRIPT_OWNERSHIP_CONTROL_SERVICE_ID")
+            .ok()
+            .and_then(|value| value.parse().ok())
+    });
+    let ownership_control_genesis_hash = args
+        .ownership_control_genesis_hash
+        .or_else(|| env::var("JAMSCRIPT_OWNERSHIP_CONTROL_GENESIS_HASH").ok());
+    let ownership_control_network_domain = args
+        .ownership_control_network_domain
+        .or_else(|| env::var("JAMSCRIPT_OWNERSHIP_CONTROL_NETWORK_DOMAIN").ok());
+    let ownership_control_service_key = args
+        .ownership_control_service_key
+        .or_else(|| env::var("JAMSCRIPT_OWNERSHIP_CONTROL_SERVICE_KEY").ok());
+    let ownership_control_code_hash = args
+        .ownership_control_code_hash
+        .or_else(|| env::var("JAMSCRIPT_OWNERSHIP_CONTROL_CODE_HASH").ok());
+    let ownership_control_configured = ownership_control_service_id.is_some()
+        || ownership_control_genesis_hash.is_some()
+        || ownership_control_network_domain.is_some()
+        || ownership_control_service_key.is_some()
+        || ownership_control_code_hash.is_some();
+    let ownership_control_descriptor = if ownership_control_configured {
+        Some(OwnershipControlDeployment {
+            genesis_hash: parse_hash(
+                ownership_control_genesis_hash
+                    .as_deref()
+                    .ok_or("--ownership-control-genesis-hash is required")?,
+            )?,
+            network_domain: parse_hash(
+                ownership_control_network_domain
+                    .as_deref()
+                    .ok_or("--ownership-control-network-domain is required")?,
+            )?,
+            service_key: ServiceKeyV1::new(parse_hash(
+                ownership_control_service_key
+                    .as_deref()
+                    .ok_or("--ownership-control-service-key is required")?,
+            )?),
+            service_id: ownership_control_service_id
+                .ok_or("--ownership-control-service-id is required")?,
+            code_hash: parse_hash(
+                ownership_control_code_hash
+                    .as_deref()
+                    .ok_or("--ownership-control-code-hash is required")?,
+            )?,
+        })
+    } else {
+        None
+    };
     let node_rpc_for_log = node_rpc.clone();
     let formal_rpc_for_log = formal_rpc.clone();
     let network = match (node_rpc, formal_rpc) {
-        (Some(node_rpc), Some(formal_rpc)) => Some(Arc::new(
-            MiniJamNetworkGateway::new(CurlJsonRpcTransport, node_rpc, formal_rpc)
-                .with_timeout(Duration::from_secs(30)),
-        )
+        (Some(node_rpc), Some(formal_rpc)) => Some(Arc::new({
+            let gateway = MiniJamNetworkGateway::new(CurlJsonRpcTransport, node_rpc, formal_rpc)
+                .with_timeout(Duration::from_secs(30));
+            match ownership_control_descriptor {
+                Some(descriptor) => gateway.with_ownership_control_deployment(descriptor),
+                None => gateway,
+            }
+        })
             as Arc<dyn jamscript_service_backend::BackendNetwork>),
         (None, None) => None,
         _ => return Err("--node-rpc and --formal-rpc must be supplied together".into()),
@@ -69,6 +134,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         return Err("backend requires a network or --genesis-hash for database binding".into());
     };
+    if let (Some(descriptor), Some(network)) = (ownership_control_descriptor, &network) {
+        if descriptor.genesis_hash != genesis_hash {
+            return Err(
+                "ownership control descriptor genesis hash does not match the network".into(),
+            );
+        }
+        if descriptor.network_domain != network.network_domain()? {
+            return Err(
+                "ownership control descriptor network domain does not match the network".into(),
+            );
+        }
+    }
     let data_root = args
         .data_dir
         .or_else(|| env::var("JAMSCRIPT_BACKEND_DATA").ok().map(PathBuf::from))
@@ -91,6 +168,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Arc::new(PvmArtifactLoader::new(artifact_store.clone()));
 
     let mut state = BackendState::from_database(database.clone())?;
+    if let Some(descriptor) = ownership_control_descriptor {
+        let record = state
+            .registry
+            .get(descriptor.service_id)
+            .map_err(|_| "ownership control service is not registered in backend")?;
+        if record.service_key != descriptor.service_key {
+            return Err("ownership control service key does not match backend registry".into());
+        }
+        if record.code_hash != descriptor.code_hash {
+            return Err("ownership control code hash does not match backend registry".into());
+        }
+    }
     let known = state.registry.iter().cloned().collect::<Vec<_>>();
     for record in known {
         match loader.load(&record.application_artifact) {

@@ -186,6 +186,7 @@ where
             provider,
             environment: ExecutionEnvironmentV1 {
                 network_domain: [0; 32],
+                ownership_control_service_id: None,
             },
         }
     }
@@ -382,13 +383,6 @@ fn initial_runtime_keys(actions: &[Vec<u8>]) -> Vec<Vec<u8>> {
                 signed.act_as.as_ref().unwrap_or(&signed.controller),
             ) {
                 keys.push(key);
-            }
-            if let Some(subject) = signed.act_as.as_ref() {
-                if let Ok(key) =
-                    jamscript_runtime_core::control_claim_key(subject, &signed.controller)
-                {
-                    keys.push(key);
-                }
             }
         }
     }

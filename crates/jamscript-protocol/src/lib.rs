@@ -1,3 +1,8 @@
+#![no_std]
+
+extern crate alloc;
+
+use alloc::{vec, vec::Vec};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use jamscript_crypto::{
     blake2_256, verify_evm_ownership, verify_ownership, verify_polkadot_ownership, verify_sr25519,

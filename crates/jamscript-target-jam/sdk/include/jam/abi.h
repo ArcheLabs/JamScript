@@ -53,6 +53,9 @@ minijam_status minijam_storage_write(const void *key, size_t key_size,
                                      const void *value, size_t value_size);
 minijam_status minijam_network_domain(uint8_t *output, size_t capacity,
                                       size_t *output_size);
+minijam_status minijam_ownership_control_service_id(uint8_t *output,
+                                                    size_t capacity,
+                                                    size_t *output_size);
 minijam_status minijam_storage_delete(const void *key, size_t key_size);
 void minijam_log(const char *message, size_t message_size);
 void minijam_yield(const void *value, size_t value_size);

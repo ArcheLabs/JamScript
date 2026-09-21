@@ -2046,6 +2046,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jamscript-ownership-control-service"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "jamscript-crypto",
+ "jamscript-protocol",
+ "jamscript-runtime-core",
+ "ownership-core",
+ "service-runtime-core",
+ "service-runtime-state",
+]
+
+[[package]]
 name = "jamscript-parser"
 version = "0.1.0"
 dependencies = [
@@ -2576,6 +2589,18 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "ownership-control-service-build"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jamscript-ownership-control-service",
+ "jamscript-target-jam",
+ "service-build-polkavm",
+ "service-runtime-core",
+ "tempfile",
+]
 
 [[package]]
 name = "ownership-core"
