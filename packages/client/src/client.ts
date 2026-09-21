@@ -2,8 +2,6 @@ import { actionByName, queryByName, stateByName, type DeploymentDescriptor } fro
 import { decodeStateValue, decodeValue, encodeActionPayload, encodeValue, type CodecValue } from "./codec.js";
 import {
   actionSelector,
-  controlClaimBootstrapKey,
-  controlClaimKey,
   encodeSignedActionV1,
   encodeSignedActionV2,
   MANAGED_STATE_COMMITMENT_KEY_V1,
