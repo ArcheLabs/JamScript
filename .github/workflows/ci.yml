@@ -108,7 +108,7 @@ jobs:
       - working-directory: packages/client
         run: npm pack --dry-run
       - working-directory: packages/client
-        run: npm publish --dry-run --access public
+        run: npm publish --dry-run --access public --tag next
 
   native-producer-smoke:
     name: Native producer smoke (${{ matrix.platform }})
