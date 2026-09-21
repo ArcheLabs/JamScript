@@ -1,10 +1,12 @@
-import { OWNERSHIP_KIND, type Ownership } from "./crypto.js";
+import { blake2AsU8a } from "@polkadot/util-crypto";
+import { decodeOwnership, encodeOwnership, OWNERSHIP_KIND, type Ownership } from "./crypto.js";
 import type { JamScriptOwnershipSignRequest, OwnershipSigner } from "./signer.js";
 
 const MATRIX_PROOF_VERSION_V1 = 1;
 const MAX_MATRIX_TEXT_BYTES = 255;
 const MAX_MATRIX_ALGORITHMS = 8;
 const MAX_MATRIX_ALGORITHM_BYTES = 128;
+const MATRIX_BOOTSTRAP_DOMAIN = new TextEncoder().encode("JAMSCRIPT_MATRIX_CONTROL_BOOTSTRAP_V1");
 
 export type MatrixControlClaimProofV1 = {
   userId: string;
@@ -15,6 +17,14 @@ export type MatrixControlClaimProofV1 = {
   deviceCurve25519Key: Uint8Array;
   deviceEd25519Key: Uint8Array;
   selfSigningSignature: Uint8Array;
+};
+
+export type MatrixControlBootstrapV1 = {
+  networkDomain: Uint8Array;
+  subject: Ownership;
+  controller: Ownership;
+  matrixProof: Uint8Array;
+  controllerProof: Uint8Array;
 };
 
 function matrixText(value: string, limit: number, label: string): Uint8Array {
@@ -41,6 +51,87 @@ function concat(...parts: Uint8Array[]): Uint8Array {
     offset += part.length;
   }
   return output;
+}
+
+function u32(value: number): Uint8Array {
+  const output = new Uint8Array(4);
+  new DataView(output.buffer).setUint32(0, value, true);
+  return output;
+}
+
+function base64Url(bytes: Uint8Array): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let output = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const a = bytes[index];
+    const b = index + 1 < bytes.length ? bytes[index + 1] : 0;
+    const c = index + 2 < bytes.length ? bytes[index + 2] : 0;
+    output += alphabet[a >>> 2];
+    output += alphabet[((a & 3) << 4) | (b >>> 4)];
+    output += index + 1 < bytes.length ? alphabet[((b & 15) << 2) | (c >>> 6)] : "=";
+    output += index + 2 < bytes.length ? alphabet[c & 63] : "=";
+  }
+  return output.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function fixedBytes(value: Uint8Array, length: number, label: string): Uint8Array {
+  if (value.length !== length) throw new Error(`Matrix bootstrap ${label} must be ${length} bytes`);
+  return value.slice();
+}
+
+function variableBytes(value: Uint8Array, max: number, label: string): Uint8Array {
+  if (value.length > max) throw new Error(`Matrix bootstrap ${label} is too large`);
+  return concat(u32(value.length), value);
+}
+
+export function encodeMatrixControlBootstrapV1(value: MatrixControlBootstrapV1): Uint8Array {
+  const subject = encodeOwnership(value.subject);
+  const controller = encodeOwnership(value.controller);
+  return concat(
+    Uint8Array.of(1),
+    fixedBytes(value.networkDomain, 32, "network domain"),
+    u16(subject.length), subject,
+    u16(controller.length), controller,
+    variableBytes(value.matrixProof, 65536, "Matrix proof"),
+    variableBytes(value.controllerProof, 65536, "controller proof"),
+  );
+}
+
+export function decodeMatrixControlBootstrapV1(bytes: Uint8Array): MatrixControlBootstrapV1 {
+  let offset = 0;
+  const take = (length: number): Uint8Array => {
+    const end = offset + length;
+    if (end > bytes.length) throw new Error("truncated Matrix bootstrap");
+    const value = bytes.slice(offset, end);
+    offset = end;
+    return value;
+  };
+  const readU8 = (): number => take(1)[0];
+  const readU16 = (): number => { const value = take(2); return value[0] | (value[1] << 8); };
+  const readU32 = (): number => new DataView(take(4).buffer).getUint32(0, true);
+  if (readU8() !== 1) throw new Error("unsupported Matrix bootstrap version");
+  const networkDomain = take(32);
+  const subject = decodeOwnership(take(readU16()));
+  const controller = decodeOwnership(take(readU16()));
+  const matrixLength = readU32();
+  if (matrixLength > 65536) throw new Error("Matrix bootstrap proof is too large");
+  const matrixProof = take(matrixLength);
+  const controllerLength = readU32();
+  if (controllerLength > 65536) throw new Error("Matrix controller proof is too large");
+  const controllerProof = take(controllerLength);
+  if (offset !== bytes.length) throw new Error("trailing Matrix bootstrap bytes");
+  return { networkDomain, subject, controller, matrixProof, controllerProof };
+}
+
+export function matrixControlBootstrapCommitment(value: MatrixControlBootstrapV1): Uint8Array {
+  const subject = encodeOwnership(value.subject);
+  const controller = encodeOwnership(value.controller);
+  const proofHash = blake2AsU8a(value.matrixProof, 256);
+  return blake2AsU8a(concat(MATRIX_BOOTSTRAP_DOMAIN, fixedBytes(value.networkDomain, 32, "network domain"), subject, controller, proofHash), 256);
+}
+
+export function matrixControlBootstrapSigningMessage(value: MatrixControlBootstrapV1): Uint8Array {
+  return new TextEncoder().encode(`JAMSCRIPT_MATRIX_CONTROL_BOOTSTRAP_V1:${base64Url(matrixControlBootstrapCommitment(value))}`);
 }
 
 function proofText(value: string, limit: number, label: string): Uint8Array {
@@ -152,6 +243,10 @@ export class MatrixDeviceController implements OwnershipSigner {
 
   signJamScriptAction(request: JamScriptOwnershipSignRequest): Promise<Uint8Array> {
     return this.signing.sign(request.message);
+  }
+
+  signBootstrapMessage(message: Uint8Array): Promise<Uint8Array> {
+    return this.signing.sign(message);
   }
 }
 

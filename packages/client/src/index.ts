@@ -8,6 +8,7 @@ export * from "./runtime.js";
 export * from "./signer.js";
 export * from "./state-provider.js";
 export * from "./matrix.js";
+export * from "./control-claim.js";
 export * from "./signers/evm.js";
 export * from "./signers/polkadot.js";
 export * from "./signers/solana.js";
