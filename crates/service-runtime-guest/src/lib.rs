@@ -20,6 +20,13 @@ unsafe extern "C" {
 
 /// Deterministic static-library entrypoint used by the ScriptC Matrix
 /// verifier builtin. It only consumes bytes supplied by the guest.
+///
+/// # Safety
+///
+/// The caller must provide readable, non-null buffers for `subject_ptr`,
+/// `controller_ptr`, and `proof_ptr`. The subject and controller buffers must
+/// each contain at least 32 bytes, and the proof buffer must contain
+/// `proof_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn jamscript_verify_matrix_cross_signing(
     subject_ptr: *const u8,
