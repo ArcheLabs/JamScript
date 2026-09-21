@@ -18,7 +18,7 @@ export type MatrixControlClaimProofV1 = {
 };
 
 function matrixText(value: string, limit: number, label: string): Uint8Array {
-  if (value.length > limit || !/[\\x20-\\x7e]*$/.test(value) || value.includes('"') || value.includes("\\")) {
+  if (value.length > limit || !/^[\x20-\x7e]*$/.test(value) || value.includes('"') || value.includes("\\")) {
     throw new Error("invalid Matrix " + label);
   }
   return new TextEncoder().encode(value);
