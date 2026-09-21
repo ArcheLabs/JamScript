@@ -1,6 +1,6 @@
 {
   "name": "@jamscript/client",
-  "version": "0.1.0-rc.2",
+  "version": "0.1.0-rc.3",
   "description": "TypeScript client for JamScript services, managed state and Ownership.",
   "private": false,
   "type": "module",
