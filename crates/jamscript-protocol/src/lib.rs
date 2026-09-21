@@ -669,8 +669,8 @@ impl SignedActionV2 {
         if blake2_256(&self.payload) != self.payload_hash {
             return Err(ProtocolError::PayloadHashMismatch);
         }
-        if self.act_as.is_some() && !context.active_control_claim {
-            return Err(ProtocolError::ControlClaimNotFound);
+        if self.act_as.is_some() {
+            return Err(ProtocolError::ActAsUnsupported);
         }
         if self.authorization_proof.is_empty() {
             return Err(ProtocolError::InvalidOwnershipAuthorization);
@@ -835,6 +835,8 @@ pub enum ProtocolError {
     MatrixBootstrapAlreadyCompleted,
     #[error("unsupported Matrix device profile")]
     MatrixUnsupportedDeviceProfile,
+    #[error("act_as delegation is unsupported")]
+    ActAsUnsupported,
 }
 
 impl ProtocolError {
@@ -872,6 +874,7 @@ impl ProtocolError {
             Self::MatrixDeviceNotCrossSigned => 31,
             Self::MatrixBootstrapAlreadyCompleted => 32,
             Self::MatrixUnsupportedDeviceProfile => 33,
+            Self::ActAsUnsupported => 34,
         }
     }
 
