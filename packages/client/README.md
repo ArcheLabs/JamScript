@@ -111,7 +111,7 @@ Node built-ins, and cryptographic/network dependencies remain external npm
 dependencies so the application bundler can tree-shake them.
 
 This release candidate targets the JamScript Ownership v1 protocol,
-SignedActionV1, SignedActionV2, Matrix bootstrap proof, and the current
+SignedActionV1, SignedActionV2, Matrix M→S→D cross-signing proof, and the current
 MiniJAM Stage-1 deployment target. MiniJAM is a supported deployment target,
 not the package boundary.
 
