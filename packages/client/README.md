@@ -11,7 +11,7 @@ and using JamScript Ownership authentication.
 The first public release is planned as an RC:
 
 ```bash
-npm install @jamscript/client@0.1.0-rc.1
+npm install @jamscript/client@0.1.0-rc.3
 ```
 
 The package is network-neutral. Deployment and transport configuration are
