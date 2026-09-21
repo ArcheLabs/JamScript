@@ -72,7 +72,11 @@ impl ControlClaimState {
         bootstrap
             .verify(network_domain)
             .map_err(|_| ControlClaimError::InvalidBootstrap)?;
-        self.bootstrap_controller(&bootstrap.subject, &bootstrap.controller, &bootstrap.subject)
+        self.bootstrap_controller(
+            &bootstrap.subject,
+            &bootstrap.controller,
+            &bootstrap.subject,
+        )
     }
 
     pub fn is_active(&self, subject: &Ownership, controller: &Ownership) -> bool {
