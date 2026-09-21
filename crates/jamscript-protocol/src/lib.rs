@@ -478,7 +478,6 @@ pub struct VerifyContextV2 {
     pub action_selector: [u8; 8],
     pub current_tick: u64,
     pub expected_nonce: Option<u64>,
-    pub active_control_claim: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -850,7 +849,6 @@ mod tests {
                 action_selector: [5; 8],
                 current_tick: 10,
                 expected_nonce: Some(2),
-                active_control_claim: true,
             })
             .unwrap();
         assert_eq!(verified.owner, controller);
