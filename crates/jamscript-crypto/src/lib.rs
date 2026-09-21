@@ -573,6 +573,17 @@ mod tests {
         );
         let decoded = MatrixControlClaimProofV1::decode(&encoded).unwrap();
         decoded.verify(&master.verifying_key().to_bytes()).unwrap();
+        let encoded = decoded.encode().unwrap();
+        assert!(verify_matrix_cross_signing(
+            &master.verifying_key().to_bytes(),
+            &device.verifying_key().to_bytes(),
+            &encoded,
+        ));
+        assert!(!verify_matrix_cross_signing(
+            &master.verifying_key().to_bytes(),
+            &[9; 32],
+            &encoded,
+        ));
         let mut tampered = decoded.clone();
         tampered.device_id = "OTHER".into();
         assert_eq!(
