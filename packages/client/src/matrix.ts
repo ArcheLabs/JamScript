@@ -5,6 +5,44 @@ const MATRIX_PROOF_VERSION_V1 = 1;
 const MAX_MATRIX_TEXT_BYTES = 255;
 const MAX_MATRIX_ALGORITHMS = 8;
 const MAX_MATRIX_ALGORITHM_BYTES = 128;
+
+export type MatrixControlClaimProofV1 = {
+  userId: string;
+  selfSigningPublicKey: Uint8Array;
+  masterSignature: Uint8Array;
+  deviceId: string;
+  algorithms: string[];
+  deviceCurve25519Key: Uint8Array;
+  deviceEd25519Key: Uint8Array;
+  selfSigningSignature: Uint8Array;
+};
+
+function matrixText(value: string, limit: number, label: string): Uint8Array {
+  if (value.length > limit || !/[\\x20-\\x7e]*$/.test(value) || value.includes('"') || value.includes("\\")) {
+    throw new Error("invalid Matrix " + label);
+  }
+  return new TextEncoder().encode(value);
+}
+
+function matrixBytes(value: Uint8Array, length: number, label: string): Uint8Array {
+  if (value.length !== length) throw new Error("Matrix " + label + " must be " + length + " bytes");
+  return value.slice();
+}
+
+function u16(value: number): Uint8Array {
+  return Uint8Array.of(value & 0xff, (value >>> 8) & 0xff);
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const output = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.length;
+  }
+  return output;
+}
+
 function proofText(value: string, limit: number, label: string): Uint8Array {
   const encoded = matrixText(value, limit, label);
   if (encoded.length > 0xffff) throw new Error(`Matrix ${label} is too long`);
