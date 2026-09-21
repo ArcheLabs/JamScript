@@ -856,5 +856,4 @@ mod tests {
         assert_eq!(verified.payload, b"payload");
     }
 
-
 }
