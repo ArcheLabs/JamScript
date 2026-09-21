@@ -21,11 +21,7 @@ pub fn verify_matrix_cross_signing(
     {
         return false;
     }
-    jamscript_crypto::verify_matrix_cross_signing(
-        &subject.public,
-        &controller.public,
-        proof,
-    )
+    jamscript_crypto::verify_matrix_cross_signing(&subject.public, &controller.public, proof)
 }
 
 pub const SIGNED_ACTION_VERSION_V1: u8 = 1;
