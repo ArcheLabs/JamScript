@@ -274,6 +274,7 @@ fn collect_import(
                     | "state"
                     | "stateMap"
                     | "query"
+                    | "verifyMatrixCrossSigning"
             )
         {
             return Err(diag(
