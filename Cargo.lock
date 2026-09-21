@@ -3430,6 +3430,7 @@ dependencies = [
 name = "service-runtime-guest"
 version = "0.1.0"
 dependencies = [
+ "jamscript-crypto",
  "polkavm-derive",
  "service-runtime-core",
  "service-runtime-state",
