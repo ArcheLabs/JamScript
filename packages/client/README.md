@@ -100,7 +100,14 @@ proof-verified responses from the configured provider.
 `MatrixOwnershipResolver`, `MatrixDeviceController`, and
 `MatrixControlClaimBootstrapper` are exported as protocol-neutral Matrix
 primitives. The package does not depend on `matrix-js-sdk`; applications own
-their Matrix transport and device lifecycle.
+their Matrix transport and device lifecycle. The Matrix bootstrap codec binds
+the network domain, master Ownership, device controller, M→S→D proof, and
+device possession signature before a ControlClaim action is submitted.
+
+The client also exposes `bootstrapMatrixControlClaim`, `addController`,
+`revokeController`, `isControllerActive`, and `hasBootstrapCompleted` on
+`JamScriptClient`. These methods require the network's dedicated Ownership
+Control service descriptor; a consumer service descriptor is not sufficient.
 
 ## Runtime support
 
@@ -109,9 +116,10 @@ applications, and current Node.js consumers. Runtime source does not import
 Node built-ins, and cryptographic/network dependencies remain external npm
 dependencies so the application bundler can tree-shake them.
 
-The first RC targets the JamScript CLI/runtime v0.1.0-rc.5 generation, Ownership
-v1, SignedActionV1, SignedActionV2, and the current MiniJAM Stage-1 deployment
-target. MiniJAM is a supported deployment target, not the package boundary.
+This release candidate targets the JamScript Ownership v1 protocol,
+SignedActionV1, SignedActionV2, Matrix bootstrap proof, and the current
+MiniJAM Stage-1 deployment target. MiniJAM is a supported deployment target,
+not the package boundary.
 
 ## Package status
 
