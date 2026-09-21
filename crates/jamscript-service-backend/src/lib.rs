@@ -1823,19 +1823,11 @@ impl BackendEngine {
                 if signed.network_domain != network_domain {
                     return Err(BackendError::WrongNetwork);
                 }
-                let owner = signed.act_as.as_ref().unwrap_or(&signed.controller);
-                if let Ok(nonce_key) = jamscript_runtime_core::ownership_nonce_key(owner) {
+                if let Ok(nonce_key) =
+                    jamscript_runtime_core::ownership_nonce_key(&signed.controller)
+                {
                     if !keys.contains(&nonce_key) {
                         keys.push(nonce_key);
-                    }
-                }
-                if let Some(subject) = signed.act_as.as_ref() {
-                    if let Ok(claim_key) =
-                        jamscript_runtime_core::control_claim_key(subject, &signed.controller)
-                    {
-                        if !keys.contains(&claim_key) {
-                            keys.push(claim_key);
-                        }
                     }
                 }
             }
