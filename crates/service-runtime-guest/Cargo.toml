@@ -9,6 +9,7 @@ default = []
 diagnostic = []
 
 [dependencies]
+jamscript-crypto = { path = "../jamscript-crypto", default-features = false }
 service-runtime-core = { path = "../service-runtime-core", default-features = false }
 service-runtime-state = { path = "../service-runtime-state", default-features = false }
 polkavm-derive = "=0.30.0"
