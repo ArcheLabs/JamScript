@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decodeMatrixControlClaimProofV1, encodeMatrixControlClaimProofV1 } from "../dist/matrix.js";
+import {
+  decodeMatrixControlBootstrapV1,
+  decodeMatrixControlClaimProofV1,
+  encodeMatrixControlBootstrapV1,
+  encodeMatrixControlClaimProofV1,
+  matrixControlBootstrapCommitment,
+  matrixControlBootstrapSigningMessage,
+} from "../dist/matrix.js";
+import { OWNERSHIP_KIND } from "../dist/crypto.js";
 
 const bytes = (length, seed) => Uint8Array.from({ length }, (_, index) => (index + seed) & 0xff);
 const hexBytes = (value) => Uint8Array.from(value.match(/../g), (pair) => Number.parseInt(pair, 16));
@@ -33,4 +41,19 @@ test("MatrixControlClaimProofV1 rejects malformed text and lengths", () => {
   assert.throws(() => encodeMatrixControlClaimProofV1({ ...fixture, deviceEd25519Key: bytes(31, 4) }), /32 bytes/);
   const encoded = encodeMatrixControlClaimProofV1(fixture);
   assert.throws(() => decodeMatrixControlClaimProofV1(Uint8Array.from([...encoded, 0])), /trailing Matrix proof bytes/);
+});
+
+test("MatrixControlBootstrapV1 binds network, subject, controller and proof", () => {
+  const bootstrap = {
+    networkDomain: bytes(32, 9),
+    subject: { version: 1, kind: OWNERSHIP_KIND.ED25519_KEY, public: bytes(32, 1) },
+    controller: { version: 1, kind: OWNERSHIP_KIND.ED25519_KEY, public: bytes(32, 2) },
+    matrixProof: bytes(284, 3),
+    controllerProof: bytes(64, 4),
+  };
+  const encoded = encodeMatrixControlBootstrapV1(bootstrap);
+  assert.deepEqual(decodeMatrixControlBootstrapV1(encoded), bootstrap);
+  assert.equal(matrixControlBootstrapCommitment(bootstrap).length, 32);
+  const message = matrixControlBootstrapSigningMessage(bootstrap);
+  assert.match(new TextDecoder().decode(message), /^JAMSCRIPT_MATRIX_CONTROL_BOOTSTRAP_V1:/);
 });
