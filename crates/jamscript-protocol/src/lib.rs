@@ -17,8 +17,7 @@ pub const ACTION_COMMITMENT_DOMAIN_V2: &[u8] = b"JAMSCRIPT_ACTION_V2";
 pub const MAX_AUTHORIZATION_PROOF_BYTES: usize = 65_536;
 pub const CONTROL_CLAIM_FORMAT_VERSION_V1: u8 = 1;
 pub const MATRIX_CONTROL_BOOTSTRAP_FORMAT_VERSION_V1: u8 = 1;
-pub const MATRIX_CONTROL_BOOTSTRAP_DOMAIN_V1: &[u8] =
-    b"JAMSCRIPT_MATRIX_CONTROL_BOOTSTRAP_V1";
+pub const MATRIX_CONTROL_BOOTSTRAP_DOMAIN_V1: &[u8] = b"JAMSCRIPT_MATRIX_CONTROL_BOOTSTRAP_V1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlClaimActionV1 {
@@ -74,7 +73,9 @@ impl ControlClaimActionV1 {
         if tag == 2 {
             let payload = reader.bytes_u32_limited(MAX_AUTHORIZATION_PROOF_BYTES)?;
             if reader.offset != bytes.len() {
-                return Err(ProtocolError::InvalidEnvelope("trailing ControlClaim bytes"));
+                return Err(ProtocolError::InvalidEnvelope(
+                    "trailing ControlClaim bytes",
+                ));
             }
             return Ok(Self::BootstrapMatrix {
                 bootstrap: MatrixControlBootstrapV1::decode(&payload)?,
@@ -164,10 +165,10 @@ impl MatrixControlBootstrapV1 {
             ));
         }
         let network_domain = reader.array::<32>()?;
-        let subject = Ownership::decode(&reader.bytes_u16()?)
-            .map_err(ProtocolError::from_ownership_error)?;
-        let controller = Ownership::decode(&reader.bytes_u16()?)
-            .map_err(ProtocolError::from_ownership_error)?;
+        let subject =
+            Ownership::decode(&reader.bytes_u16()?).map_err(ProtocolError::from_ownership_error)?;
+        let controller =
+            Ownership::decode(&reader.bytes_u16()?).map_err(ProtocolError::from_ownership_error)?;
         let matrix_proof = reader.bytes_u32_limited(MAX_AUTHORIZATION_PROOF_BYTES)?;
         let controller_proof = reader.bytes_u32_limited(MAX_AUTHORIZATION_PROOF_BYTES)?;
         if reader.offset != bytes.len() {
@@ -1120,7 +1121,10 @@ mod tests {
         bootstrap.controller_proof = device.sign(&message).to_bytes().to_vec();
         bootstrap.verify([9; 32]).unwrap();
         let encoded = bootstrap.encode().unwrap();
-        assert_eq!(MatrixControlBootstrapV1::decode(&encoded).unwrap(), bootstrap);
+        assert_eq!(
+            MatrixControlBootstrapV1::decode(&encoded).unwrap(),
+            bootstrap
+        );
 
         let mut tampered = bootstrap.clone();
         tampered.controller_proof[0] ^= 1;
@@ -1128,7 +1132,10 @@ mod tests {
             tampered.verify([9; 32]),
             Err(ProtocolError::InvalidOwnershipAuthorization)
         );
-        assert_eq!(bootstrap.verify([8; 32]), Err(ProtocolError::InvalidControlClaim));
+        assert_eq!(
+            bootstrap.verify([8; 32]),
+            Err(ProtocolError::InvalidControlClaim)
+        );
     }
 
     #[test]
@@ -1136,11 +1143,8 @@ mod tests {
         let action = ControlClaimActionV1::BootstrapMatrix {
             bootstrap: MatrixControlBootstrapV1 {
                 network_domain: [1; 32],
-                subject: Ownership::from_array(
-                    ownership_core::OwnershipKind::Ed25519Key,
-                    [2; 32],
-                )
-                .unwrap(),
+                subject: Ownership::from_array(ownership_core::OwnershipKind::Ed25519Key, [2; 32])
+                    .unwrap(),
                 controller: Ownership::from_array(
                     ownership_core::OwnershipKind::Ed25519Key,
                     [3; 32],
@@ -1150,6 +1154,9 @@ mod tests {
                 controller_proof: vec![5; 64],
             },
         };
-        assert_eq!(ControlClaimActionV1::decode(&action.encode().unwrap()).unwrap(), action);
+        assert_eq!(
+            ControlClaimActionV1::decode(&action.encode().unwrap()).unwrap(),
+            action
+        );
     }
 }
