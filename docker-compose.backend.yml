@@ -6,15 +6,14 @@ services:
     image: ghcr.io/archelabs/jamscript-backend:${JAMSCRIPT_BACKEND_VERSION:-v0.1.0}
     restart: unless-stopped
     ports:
-      - "${JAMSCRIPT_BACKEND_PORT:-8090}:8090"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "${JAMSCRIPT_BACKEND_HOST:-127.0.0.1}:${JAMSCRIPT_BACKEND_PORT:-8090}:8090"
+    networks: [minijam-private-rpc]
     environment:
       JAMSCRIPT_BACKEND_BIND: 0.0.0.0:8090
       JAMSCRIPT_BACKEND_DATA: /var/lib/jamscript
-      JAMSCRIPT_NODE_RPC: ${JAMSCRIPT_NODE_RPC:-http://host.docker.internal:9944}
-      JAMSCRIPT_FORMAL_RPC: ${JAMSCRIPT_FORMAL_RPC:-http://host.docker.internal:8080}
-      JAMSCRIPT_BACKEND_CORS_ORIGINS: ${JAMSCRIPT_BACKEND_CORS_ORIGINS:-*}
+      JAMSCRIPT_NODE_RPC: ${JAMSCRIPT_NODE_RPC:-http://node:9944}
+      JAMSCRIPT_FORMAL_RPC: ${JAMSCRIPT_FORMAL_RPC:-http://formal-rpc:8080}
+      JAMSCRIPT_BACKEND_CORS_ORIGINS: "${JAMSCRIPT_BACKEND_CORS_ORIGINS:-http://127.0.0.1:5173,http://localhost:5173}"
     volumes:
       - jamscript-backend-data:/var/lib/jamscript
     healthcheck:
@@ -25,3 +24,8 @@ services:
 
 volumes:
   jamscript-backend-data:
+
+networks:
+  minijam-private-rpc:
+    external: true
+    name: ${MINIJAM_CHAIN_NETWORK:-minijam-testnet-chain}

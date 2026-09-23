@@ -5,8 +5,9 @@ use jamscript_codegen_rust::{
 };
 use jamscript_deployment::{
     load_service_artifact, redact_url, register_backend_service_with_network_domain,
-    resolve_network, validate_networks, CurlJsonRpcTransport, DeploymentConfig, DeploymentEngine,
-    JsonRpcTransport, NetworkConfig, NetworkOverrides,
+    resolve_network, resolve_network_with_default_profile, validate_networks, CurlJsonRpcTransport,
+    DeploymentConfig, DeploymentEngine, JsonRpcTransport, NetworkConfig, NetworkKind,
+    NetworkOverrides, ResolvedNetwork,
 };
 use jamscript_ir::abi_for_language;
 use jamscript_parser::{parse_service_v02, parse_service_v03};
@@ -137,8 +138,8 @@ enum BackendCommand {
     Start {
         #[arg(long, default_value = ".")]
         path: PathBuf,
-        #[arg(long, default_value = "local")]
-        network: String,
+        #[arg(long, help = "Network profile name (defaults to local)")]
+        network: Option<String>,
         #[arg(long)]
         bind: Option<String>,
         #[arg(long)]
@@ -303,7 +304,7 @@ fn main() -> Result<()> {
 
 struct BackendStartOptions {
     path: PathBuf,
-    network: String,
+    network: Option<String>,
     bind: Option<String>,
     data_dir: Option<PathBuf>,
     node_rpc: Option<String>,
@@ -312,82 +313,48 @@ struct BackendStartOptions {
 }
 
 fn backend_start(options: BackendStartOptions) -> Result<()> {
-    let project_root = options
-        .path
+    let BackendStartOptions {
+        path,
+        network,
+        bind,
+        data_dir,
+        node_rpc,
+        formal_rpc,
+        cors_origins,
+    } = options;
+    let project_root = path
         .canonicalize()
-        .with_context(|| format!("locating JamScript project {}", options.path.display()))?;
+        .with_context(|| format!("locating JamScript project {}", path.display()))?;
     let manifest = read_manifest(&project_root)?;
-    let config = manifest
-        .networks
-        .as_ref()
-        .and_then(|networks| networks.get(&options.network))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "NETWORK_NOT_FOUND: network '{}' is not configured",
-                options.network
-            )
-        })?;
-    if config.kind != "minijam" {
-        bail!(
-            "backend network '{}' must use kind = \"minijam\"",
-            options.network
-        );
-    }
-    let node_rpc = options
+    let resolved = resolve_backend_network(&manifest, network, node_rpc, formal_rpc)?;
+    let node_rpc = resolved
         .node_rpc
-        .or_else(|| config.node_rpc.clone())
-        .or_else(|| std::env::var("JAMSCRIPT_NODE_RPC").ok())
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("backend start requires node_rpc"))?;
-    let formal_rpc = options
-        .formal_rpc
-        .or_else(|| config.deployment_rpc.clone())
-        .or_else(|| std::env::var("JAMSCRIPT_FORMAL_RPC").ok())
-        .ok_or_else(|| anyhow::anyhow!("backend start requires deployment_rpc/formal_rpc"))?;
-    if let Some(expected) = config.genesis_hash.as_deref() {
-        let actual = CurlJsonRpcTransport
-            .call(
-                &node_rpc,
-                "chain_getBlockHash",
-                serde_json::json!([0]),
-                std::time::Duration::from_secs(10),
-                false,
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let actual = actual
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("node genesis RPC returned no hash"))?;
-        if parse_hash(expected)? != parse_hash(actual)? {
-            bail!("backend network genesis hash does not match jamscript.toml");
-        }
-    }
+    let formal_rpc = resolved.deployment_rpc.clone();
+    verify_backend_genesis_pin(
+        &CurlJsonRpcTransport,
+        &node_rpc,
+        resolved.genesis_hash.as_deref(),
+    )?;
     let binary = find_backend_binary()?;
-    let mut command = std::process::Command::new(&binary);
-    command
-        .arg("--network")
-        .arg("local")
-        .arg("--node-rpc")
-        .arg(node_rpc)
-        .arg("--formal-rpc")
-        .arg(formal_rpc);
-    if let Some(bind) = options
-        .bind
-        .or_else(|| std::env::var("JAMSCRIPT_BACKEND_BIND").ok())
-    {
-        command.arg("--bind").arg(bind);
-    }
-    if let Some(data_dir) = options.data_dir.or_else(|| {
+    let bind = bind.or_else(|| std::env::var("JAMSCRIPT_BACKEND_BIND").ok());
+    let data_dir = data_dir.or_else(|| {
         std::env::var("JAMSCRIPT_BACKEND_DATA")
             .ok()
             .map(PathBuf::from)
-    }) {
-        command.arg("--data-dir").arg(data_dir);
-    }
-    for origin in options.cors_origins {
-        command.arg("--cors-origin").arg(origin);
-    }
+    });
+    let mut command = backend_command(
+        &binary,
+        &node_rpc,
+        &formal_rpc,
+        bind,
+        data_dir,
+        &cors_origins,
+    );
     println!(
-        "Starting JamScript backend in the foreground using network '{}'",
-        options.network
+        "Starting JamScript backend in the foreground using network profile '{}'",
+        resolved.display_name()
     );
     #[cfg(unix)]
     {
@@ -408,6 +375,82 @@ fn backend_start(options: BackendStartOptions) -> Result<()> {
         }
         Ok(())
     }
+}
+
+fn resolve_backend_network(
+    manifest: &Manifest,
+    network: Option<String>,
+    node_rpc: Option<String>,
+    formal_rpc: Option<String>,
+) -> Result<ResolvedNetwork> {
+    let resolved = resolve_network_with_default_profile(
+        manifest.networks.as_ref(),
+        manifest.deployment.as_ref(),
+        NetworkOverrides {
+            network,
+            node_rpc,
+            deployment_rpc: formal_rpc,
+            ..NetworkOverrides::default()
+        },
+        Some("local"),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if resolved.kind != NetworkKind::MiniJam {
+        bail!("backend start requires a network profile with kind = \"minijam\"");
+    }
+    Ok(resolved)
+}
+
+fn verify_backend_genesis_pin<T: JsonRpcTransport>(
+    transport: &T,
+    node_rpc: &str,
+    expected: Option<&str>,
+) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = transport
+        .call(
+            node_rpc,
+            "chain_getBlockHash",
+            serde_json::json!([0]),
+            std::time::Duration::from_secs(10),
+            false,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let actual = actual
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("node genesis RPC returned no hash"))?;
+    if parse_hash(expected)? != parse_hash(actual)? {
+        bail!("backend network genesis hash does not match jamscript.toml");
+    }
+    Ok(())
+}
+
+fn backend_command(
+    binary: &Path,
+    node_rpc: &str,
+    formal_rpc: &str,
+    bind: Option<String>,
+    data_dir: Option<PathBuf>,
+    cors_origins: &[String],
+) -> std::process::Command {
+    let mut command = std::process::Command::new(binary);
+    command
+        .arg("--node-rpc")
+        .arg(node_rpc)
+        .arg("--formal-rpc")
+        .arg(formal_rpc);
+    if let Some(bind) = bind {
+        command.arg("--bind").arg(bind);
+    }
+    if let Some(data_dir) = data_dir {
+        command.arg("--data-dir").arg(data_dir);
+    }
+    for origin in cors_origins {
+        command.arg("--cors-origin").arg(origin);
+    }
+    command
 }
 
 fn find_backend_binary() -> Result<PathBuf> {
@@ -646,42 +689,40 @@ fn network_command(command: NetworkCommand) -> Result<()> {
         }
         NetworkCommand::Show { name, path, json } => {
             let manifest = read_manifest(&path)?;
-            let config = manifest
-                .networks
+            let resolved = resolve_network(
+                manifest.networks.as_ref(),
+                manifest.deployment.as_ref(),
+                NetworkOverrides {
+                    network: Some(name.clone()),
+                    ..NetworkOverrides::default()
+                },
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let is_default = manifest
+                .deployment
                 .as_ref()
-                .and_then(|networks| networks.get(&name))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("NETWORK_NOT_FOUND: network '{name}' is not configured")
-                })?;
+                .and_then(|deployment| deployment.default_network.as_deref())
+                == Some(name.as_str());
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "name": name,
-                        "kind": config.kind,
-                        "deploymentRpc": config.deployment_rpc.as_deref().map(redact_url),
-                        "nodeRpc": config.node_rpc.as_deref().map(redact_url),
-                        "backendRpc": config.backend_rpc.as_deref().map(redact_url),
-                        "genesisHash": config.genesis_hash,
-                        "default": manifest.deployment.as_ref()
-                            .and_then(|deployment| deployment.default_network.as_deref())
-                            == Some(name.as_str()),
+                        "kind": resolved.kind.to_string(),
+                        "deploymentRpc": redact_url(&resolved.deployment_rpc),
+                        "nodeRpc": resolved.node_rpc.as_deref().map(redact_url),
+                        "backendRpc": resolved.backend_rpc.as_deref().map(redact_url),
+                        "genesisHash": resolved.genesis_hash,
+                        "default": is_default,
                     }))?
                 );
             } else {
                 println!("Name\n  {name}");
-                println!("Kind\n  {}", config.kind);
-                println!(
-                    "Deployment RPC\n  {}",
-                    config
-                        .deployment_rpc
-                        .as_deref()
-                        .map(redact_url)
-                        .unwrap_or_else(|| "not configured".into())
-                );
+                println!("Kind\n  {}", resolved.kind);
+                println!("Deployment RPC\n  {}", redact_url(&resolved.deployment_rpc));
                 println!(
                     "Node RPC\n  {}",
-                    config
+                    resolved
                         .node_rpc
                         .as_deref()
                         .map(redact_url)
@@ -689,7 +730,7 @@ fn network_command(command: NetworkCommand) -> Result<()> {
                 );
                 println!(
                     "Backend RPC\n  {}",
-                    config
+                    resolved
                         .backend_rpc
                         .as_deref()
                         .map(redact_url)
@@ -697,7 +738,7 @@ fn network_command(command: NetworkCommand) -> Result<()> {
                 );
                 println!(
                     "Genesis pin\n  {}",
-                    config.genesis_hash.as_deref().unwrap_or("not configured")
+                    resolved.genesis_hash.as_deref().unwrap_or("not configured")
                 );
             }
             Ok(())
@@ -1005,7 +1046,12 @@ fn new_project(name: &str) -> Result<()> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    fs::write(root.join("jamscript.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.2.0\"\nentry = \"src/service.ts\"\nlanguage = \"0.2\"\n\n[compiler]\nbackend = \"scriptc\"\n\n[management]\nmode = \"deployer\"\n"))?;
+    fs::write(
+        root.join("jamscript.toml"),
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.2.0\"\nentry = \"src/service.ts\"\nlanguage = \"0.2\"\n\n[compiler]\nbackend = \"scriptc\"\n\n[management]\nmode = \"deployer\"\n\n[deployment]\ndefault_network = \"local\"\n\n[networks.local]\nkind = \"minijam\"\ndeployment_rpc = \"http://127.0.0.1:8080\"\nnode_rpc = \"http://127.0.0.1:9944\"\nbackend_rpc = \"http://127.0.0.1:8090\"\n"
+        ),
+    )?;
     fs::write(root.join("src/service.ts"), "import { action, wallet, u64 } from \"jam\";\n\nexport const increment = action({\n  auth: wallet(),\n  input: { value: u64 },\n  execute(ctx, input) {\n    return input.value + 1;\n  },\n});\n")?;
     fs::write(
         root.join(".jamscript/service.json"),
@@ -1182,4 +1228,206 @@ fn parse_hash(value: &str) -> Result<[u8; 32]> {
 
 fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn profile(
+        deployment_rpc: &str,
+        node_rpc: &str,
+        genesis_hash: Option<String>,
+    ) -> NetworkConfig {
+        NetworkConfig {
+            kind: "minijam".into(),
+            deployment_rpc: Some(deployment_rpc.into()),
+            node_rpc: Some(node_rpc.into()),
+            backend_rpc: None,
+            genesis_hash,
+        }
+    }
+
+    fn manifest() -> Manifest {
+        Manifest {
+            package: Package {
+                name: "network-fixture".into(),
+                version: "0.1.0".into(),
+                entry: "src/service.ts".into(),
+                language: "0.2".into(),
+            },
+            compiler: None,
+            native: None,
+            management: None,
+            networks: Some(BTreeMap::from([
+                (
+                    "local".into(),
+                    profile("http://127.0.0.1:8080", "http://127.0.0.1:9944", None),
+                ),
+                (
+                    "testnet".into(),
+                    profile("http://127.0.0.1:18080", "http://127.0.0.1:19944", None),
+                ),
+            ])),
+            deployment: Some(DeploymentConfig {
+                default_network: Some("local".into()),
+            }),
+        }
+    }
+
+    #[test]
+    fn backend_start_testnet_profile_resolves_to_concrete_endpoints() {
+        let resolved =
+            resolve_backend_network(&manifest(), Some("testnet".into()), None, None).unwrap();
+        assert_eq!(resolved.display_name(), "testnet");
+        assert_eq!(resolved.node_rpc.as_deref(), Some("http://127.0.0.1:19944"));
+        assert_eq!(resolved.deployment_rpc, "http://127.0.0.1:18080");
+
+        let command = backend_command(
+            Path::new("jamscript-service-backend"),
+            resolved.node_rpc.as_deref().unwrap(),
+            &resolved.deployment_rpc,
+            None,
+            None,
+            &[],
+        );
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--node-rpc", "http://127.0.0.1:19944"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--formal-rpc", "http://127.0.0.1:18080"]));
+        assert!(!args.iter().any(|value| value == "--network"));
+        assert!(!args
+            .iter()
+            .any(|value| value == "testnet" || value == "local"));
+    }
+
+    #[test]
+    fn backend_start_defaults_to_the_manifest_local_profile() {
+        let resolved = resolve_backend_network(&manifest(), None, None, None).unwrap();
+        assert_eq!(resolved.display_name(), "local");
+        assert_eq!(resolved.node_rpc.as_deref(), Some("http://127.0.0.1:9944"));
+        assert_eq!(resolved.deployment_rpc, "http://127.0.0.1:8080");
+
+        let command = backend_command(
+            Path::new("jamscript-service-backend"),
+            resolved.node_rpc.as_deref().unwrap(),
+            &resolved.deployment_rpc,
+            None,
+            None,
+            &[],
+        );
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--node-rpc", "http://127.0.0.1:9944"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--formal-rpc", "http://127.0.0.1:8080"]));
+        assert!(!args.iter().any(|value| value == "--network"));
+    }
+
+    #[test]
+    fn backend_profile_requires_a_configured_network_and_concrete_endpoints() {
+        let mut fixture = manifest();
+        fixture.networks = None;
+        let error = resolve_backend_network(&fixture, None, None, None).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("network 'local' is not configured"));
+
+        let mut fixture = manifest();
+        fixture.networks.as_mut().unwrap().remove("local");
+        let error = resolve_backend_network(&fixture, None, None, None).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("network 'local' is not configured"));
+    }
+
+    #[test]
+    fn backend_cli_endpoint_overrides_beat_profile_values() {
+        let resolved = resolve_backend_network(
+            &manifest(),
+            Some("testnet".into()),
+            Some("http://cli-node:19944".into()),
+            Some("http://cli-formal:18080".into()),
+        )
+        .unwrap();
+        assert_eq!(resolved.display_name(), "testnet");
+        assert_eq!(resolved.node_rpc.as_deref(), Some("http://cli-node:19944"));
+        assert_eq!(resolved.deployment_rpc, "http://cli-formal:18080");
+    }
+
+    struct MockGenesisTransport {
+        value: serde_json::Value,
+        calls: Mutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl JsonRpcTransport for MockGenesisTransport {
+        fn call(
+            &self,
+            endpoint: &str,
+            method: &str,
+            params: serde_json::Value,
+            _timeout: std::time::Duration,
+            mutating: bool,
+        ) -> Result<serde_json::Value, jamscript_deployment::DeploymentError> {
+            assert!(!mutating);
+            self.calls.lock().unwrap().push((
+                endpoint.to_owned(),
+                method.to_owned(),
+                params.clone(),
+            ));
+            Ok(self.value.clone())
+        }
+    }
+
+    #[test]
+    fn configured_genesis_pin_is_checked_against_node_rpc_before_backend_start() {
+        let transport = MockGenesisTransport {
+            value: serde_json::json!(format!("0x{}", "bb".repeat(32))),
+            calls: Mutex::new(Vec::new()),
+        };
+        let error = verify_backend_genesis_pin(
+            &transport,
+            "http://127.0.0.1:19944",
+            Some(&format!("0x{}", "aa".repeat(32))),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("backend network genesis hash does not match jamscript.toml"));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            vec![(
+                "http://127.0.0.1:19944".into(),
+                "chain_getBlockHash".into(),
+                serde_json::json!([0]),
+            )]
+        );
+    }
+
+    #[test]
+    fn backend_genesis_pin_accepts_the_node_identity_when_it_matches() {
+        let expected = format!("0x{}", "ab".repeat(32));
+        let transport = MockGenesisTransport {
+            value: serde_json::json!(expected),
+            calls: Mutex::new(Vec::new()),
+        };
+        verify_backend_genesis_pin(
+            &transport,
+            "http://127.0.0.1:19944",
+            Some(&format!("0x{}", "ab".repeat(32))),
+        )
+        .unwrap();
+    }
 }

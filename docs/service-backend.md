@@ -34,6 +34,20 @@ emits JAM `serviceId`/root dependencies. Accumulate performs the final
 ServiceId-scoped commitment checks. Local state is materialized only after the
 predicted root is observed canonically.
 
+Network profile names are a CLI/configuration concern. `jams backend start
+--network <name>` resolves `[networks.<name>]`, checks its configured genesis
+pin against Node RPC, and launches the backend with concrete Node and Formal
+RPC endpoints. The backend binary has no `--network` flag or local/testnet
+branching. Keep Node RPC, Formal RPC, and the backend's host-published port on
+loopback or trusted private infrastructure; do not expose Node RPC to the
+public Internet. For the backend Compose deployment on the same host as the
+MiniJAM compact profile, the backend container joins the internal
+`minijam-testnet-chain` Docker network and uses `node:9944` and
+`formal-rpc:8080`. The network can be overridden with `MINIJAM_CHAIN_NETWORK`
+for an operator-managed private network. The backend host port defaults to
+`127.0.0.1:8090`; its container process listens on `0.0.0.0:8090` so the
+loopback-published port can reach it.
+
 Production persistence is RocksDB `0.25.0` under `<data-dir>/db` with fixed
 `meta`, `services`, `heads`, `state`, and `transitions` column families. State
 keys are `[serviceId BE u32] || application key`; a finalized transition
