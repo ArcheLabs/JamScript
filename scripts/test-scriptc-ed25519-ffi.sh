@@ -40,4 +40,5 @@ echo "GENERIC_ED25519_NATIVE_SYMBOL_COUNT=${defined_count}"
 
 cargo run --locked --quiet \
   --manifest-path "${JAMSCRIPT_ROOT}/tools/pvm-scriptc-ed25519-ffi/Cargo.toml" \
+  --bin pvm-scriptc-ed25519-ffi \
   -- "${service_pvm}"
