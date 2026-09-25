@@ -9,7 +9,6 @@ default = ["std"]
 std = ["schnorrkel/std", "thiserror/std"]
 
 [dependencies]
-base64.workspace = true
 blake2b_simd.workspace = true
 ed25519-dalek.workspace = true
 k256.workspace = true

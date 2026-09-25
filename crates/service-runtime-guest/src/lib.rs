@@ -18,36 +18,29 @@ unsafe extern "C" {
     fn minijam_network_domain(output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
 }
 
-/// Deterministic static-library entrypoint used by the ScriptC Matrix
-/// verifier builtin. It only consumes bytes supplied by the guest.
+/// Deterministic static-library entrypoint for ScriptC's provider-neutral
+/// Ed25519 verification primitive. It only consumes supplied bytes.
 ///
 /// # Safety
 ///
-/// The caller must provide readable, non-null buffers for `subject_ptr`,
-/// `controller_ptr`, and `proof_ptr`. The subject and controller buffers must
-/// each contain at least 32 bytes, and the proof buffer must contain
-/// `proof_len` readable bytes.
+/// The caller must provide readable, non-null buffers for each pointer, with
+/// the corresponding length describing the readable region.
 #[no_mangle]
-pub unsafe extern "C" fn jamscript_verify_matrix_cross_signing(
-    subject_ptr: *const u8,
-    subject_len: usize,
-    controller_ptr: *const u8,
-    controller_len: usize,
-    proof_ptr: *const u8,
-    proof_len: usize,
+pub unsafe extern "C" fn jamscript_verify_ed25519(
+    public_key_ptr: *const u8,
+    public_key_len: usize,
+    message_ptr: *const u8,
+    message_len: usize,
+    signature_ptr: *const u8,
+    signature_len: usize,
 ) -> u32 {
-    if subject_ptr.is_null()
-        || controller_ptr.is_null()
-        || proof_ptr.is_null()
-        || subject_len != 32
-        || controller_len != 32
-    {
+    if public_key_ptr.is_null() || message_ptr.is_null() || signature_ptr.is_null() {
         return 0;
     }
-    let subject = core::slice::from_raw_parts(subject_ptr, subject_len);
-    let controller = core::slice::from_raw_parts(controller_ptr, controller_len);
-    let proof = core::slice::from_raw_parts(proof_ptr, proof_len);
-    jamscript_crypto::verify_matrix_cross_signing(subject, controller, proof) as u32
+    let public_key = core::slice::from_raw_parts(public_key_ptr, public_key_len);
+    let message = core::slice::from_raw_parts(message_ptr, message_len);
+    let signature = core::slice::from_raw_parts(signature_ptr, signature_len);
+    jamscript_crypto::verify_ed25519(public_key, signature, message).is_ok() as u32
 }
 
 pub fn network_domain() -> Result<[u8; 32], GuestError> {

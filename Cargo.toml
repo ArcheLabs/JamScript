@@ -7,6 +7,7 @@ members = [
   "crates/service-runtime-guest",
   "crates/service-runtime-host",
   "crates/jamscript-crypto",
+  "crates/ownership-matrix",
   "crates/ownership-core",
   "crates/jamscript-ir",
   "crates/jamscript-codec",

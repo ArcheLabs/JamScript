@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: backend-release-${{ inputs.version }}
@@ -65,6 +66,38 @@ jobs:
           else
             echo "BACKEND_RELEASE_OBJECT=AVAILABLE"
           fi
+          ci_runs="$(gh run list \
+            --workflow ci.yml \
+            --commit "${source_sha}" \
+            --event push \
+            --limit 20 \
+            --json databaseId,status,conclusion,headSha,event,createdAt)"
+          if ! jq -e --arg sha "${source_sha}" \
+            'any(.[]; .headSha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")' \
+            <<<"${ci_runs}" >/dev/null; then
+            echo "no successful source CI push run exists for ${source_sha}" >&2
+            echo "BACKEND_SOURCE_CI_STATUS=FAIL" >&2
+            exit 1
+          fi
+          echo "BACKEND_SOURCE_CI_STATUS=PASS"
+          consumer_runs="$(gh run list \
+            --workflow minijam-network-e2e.yml \
+            --commit "${source_sha}" \
+            --event workflow_dispatch \
+            --limit 20 \
+            --json databaseId,status,conclusion,headSha,event,createdAt)"
+          if ! jq -e --arg sha "${source_sha}" \
+            'any(.[]; .headSha == $sha and .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success")' \
+            <<<"${consumer_runs}" >/dev/null; then
+            echo "no successful canonical MiniJAM E2E exists for ${source_sha}" >&2
+            echo "BACKEND_MINIJAM_E2E=FAIL" >&2
+            exit 1
+          fi
+          consumer_run_id="$(jq -r --arg sha "${source_sha}" \
+            '.[] | select(.headSha == $sha and .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success") | .databaseId' \
+            <<<"${consumer_runs}" | head -n 1)"
+          echo "BACKEND_MINIJAM_E2E=PASS"
+          echo "BACKEND_MINIJAM_E2E_RUN_ID=${consumer_run_id}"
           {
             echo "source_sha=${source_sha}"
             echo "version=${VERSION}"

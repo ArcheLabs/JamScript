@@ -144,6 +144,11 @@ fn parse_service_formal(
                 // extracts JamScript metadata, so top-level helpers remain in
                 // `ServiceIr::source` and are deliberately opaque here.
             }
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(_)))
+            | ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(_))) => {
+                // Type-only declarations are erased by the ScriptC TypeScript
+                // transform and do not contribute service ABI or state.
+            }
             ModuleItem::Stmt(Stmt::Empty(..)) => {}
             _ => {
                 return Err(diag(
@@ -274,7 +279,7 @@ fn collect_import(
                     | "state"
                     | "stateMap"
                     | "query"
-                    | "verifyMatrixCrossSigning"
+                    | "verifyEd25519"
             )
         {
             return Err(diag(
@@ -860,6 +865,8 @@ mod tests {
     #[test]
     fn keeps_top_level_scriptc_helpers_in_original_source() {
         let source = r#"import { action, wallet, u64 } from "jam";
+type HelperValue = { value: number };
+interface HelperShape { value: number }
 export function bump(value: number): number { return value + 1; }
 export const increment = action({ auth: wallet(), input: { value: u64 }, execute(ctx, input) { return bump(input.value); } });"#;
         let ir = parse_service_v02(source, "counter", "0.2.0", &[]).unwrap();

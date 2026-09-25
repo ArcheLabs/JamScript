@@ -5,6 +5,13 @@ on:
   pull_request:
 
 jobs:
+  ownership-architecture-boundary:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: ./scripts/check-ownership-boundary.sh
+
   installer:
     strategy:
       fail-fast: false

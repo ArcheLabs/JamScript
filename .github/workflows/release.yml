@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: v0.1.0-rc.6 or v0.1.0
+        description: v0.1.0-rc.8 or v0.1.0
         required: true
         type: string
 
@@ -296,6 +296,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo build --locked --release --manifest-path tools/pvm-scriptc-ed25519-ffi/Cargo.toml
+          export JAMSCRIPT_GENERIC_ED25519_HARNESS="${GITHUB_WORKSPACE}/tools/pvm-scriptc-ed25519-ffi/target/release/pvm-scriptc-ed25519-ffi"
+          test -x "${JAMSCRIPT_GENERIC_ED25519_HARNESS}"
           assets="${RUNNER_TEMP}/ownership-assets"
           rm -rf -- "${assets}"
           mkdir -p "${assets}"
@@ -316,7 +319,7 @@ jobs:
             --fixture-dir "${GITHUB_WORKSPACE}/tests/release-consumer-ownership" \
             --result-json "${result}" \
             --work-dir "${RUNNER_TEMP}/ownership-consumer-${{ matrix.platform }}-work"
-          jq -e '.status == "PASS" and .offline_build == true and .execution == true' "${result}"
+          jq -e '.status == "PASS" and .offline_build == true and .execution == true and .generic_ed25519_build == true and .generic_ed25519_valid == true and .generic_ed25519_invalid == true and .generic_ed25519_fatal == false' "${result}"
           echo "JAMSCRIPT_OWNERSHIP_CONSUMER_CHECK=PASS"
           echo "JAMSCRIPT_OWNERSHIP_CONSUMER_ABI=PASS"
           echo "JAMSCRIPT_OWNERSHIP_CONSUMER_BUILD=PASS"

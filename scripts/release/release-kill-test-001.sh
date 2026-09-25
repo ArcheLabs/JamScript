@@ -248,6 +248,30 @@ echo "K9_OFFLINE=PASS"
 echo "K10_BUILD=PASS"
 echo "K11_PVM_ARTIFACT=PASS"
 
+generic_ed25519_build=false
+generic_ed25519_valid=false
+generic_ed25519_invalid=false
+generic_ed25519_fatal=true
+if grep -Fq 'verifyEd25519' "${fixture_dir}/${entry_file}"; then
+  harness="${JAMSCRIPT_GENERIC_ED25519_HARNESS:-}"
+  [[ -n "${harness}" && -x "${harness}" ]] || {
+    echo "generic Ed25519 release fixture requires JAMSCRIPT_GENERIC_ED25519_HARNESS" >&2
+    exit 1
+  }
+  generic_log="${work_dir}/generic-ed25519.log"
+  "${harness}" "${output_a}/service.pvm" | tee "${generic_log}"
+  grep -Fxq 'GENERIC_ED25519_PVM=PASS' "${generic_log}"
+  grep -Fxq 'GENERIC_ED25519_FATAL=false' "${generic_log}"
+  generic_ed25519_build=true
+  generic_ed25519_valid=true
+  generic_ed25519_invalid=true
+  generic_ed25519_fatal=false
+  echo "RELEASE_GENERIC_ED25519_BUILD=PASS"
+  echo "RELEASE_GENERIC_ED25519_VALID=PASS"
+  echo "RELEASE_GENERIC_ED25519_INVALID=PASS"
+  echo "RELEASE_GENERIC_ED25519_FATAL=false"
+fi
+
 run_result="${work_dir}/pvm-result.bin"
 run_result_b="${work_dir}/pvm-result-b.bin"
 run_log="${work_dir}/pvm-run.log"
@@ -287,6 +311,10 @@ cat >"${result_json}" <<EOF
   "offline_build": true,
   "execution": true,
   "output_match": true,
+  "generic_ed25519_build": ${generic_ed25519_build},
+  "generic_ed25519_valid": ${generic_ed25519_valid},
+  "generic_ed25519_invalid": ${generic_ed25519_invalid},
+  "generic_ed25519_fatal": ${generic_ed25519_fatal},
   "gates": {
     "R1_clean_consumer_e2e": true,
     "R2_managed_toolchain_published": $([[ -n "${release_url}" ]] && echo true || echo false),
