@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createPrivateKey, createPublicKey, verify as verifySignature } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { encodeMatrixControlClaimProofV1 } from "../dist/ownership/matrix/proof.js";
 import { createMatrixOwnershipAdapter } from "../dist/ownership/matrix/service.js";
@@ -37,6 +38,14 @@ test("Matrix Ownership adapter verifies M→S→D using generic Ed25519", () => 
   assert.equal(adapter.verify(subject, controller, encoded.slice(0, -1)), false);
   assert.equal(adapter.verify(subject, controller, Uint8Array.from([...encoded, 0])), false);
   assert.equal(adapter.verify(subject, controller, Uint8Array.of(2)), false);
+  assert.equal(adapter.verify(subject, controller, new Uint8Array(2049)), false);
+});
+
+test("ScriptC Matrix adapter calls the generic crypto primitive directly", () => {
+  const source = readFileSync(new URL("../src/ownership/matrix/service-scriptc.ts", import.meta.url), "utf8");
+  assert.match(source, /import \{ verifyEd25519 \} from "jam"/);
+  assert.equal((source.match(/verifyEd25519\(/g) ?? []).length, 2);
+  assert.doesNotMatch(source, /verifyEd25519\s*:\s*Ed25519Verifier/);
 });
 
 function verifyEd25519(publicKey, message, signature) {

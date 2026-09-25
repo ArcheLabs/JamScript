@@ -81,15 +81,27 @@ export function encodeMatrixControlClaimProofV1(proof: MatrixControlClaimProofV1
 /** Decode and validate the exact MatrixControlClaimProofV1 wire format used by Rust. */
 export function decodeMatrixControlClaimProofV1(bytes: Uint8Array): MatrixControlClaimProofV1 {
   const decoded = decodeMatrixControlClaimProofV1Bytes(bytes);
+  const userLength = decoded[0] | (decoded[1] << 8);
+  const deviceLength = decoded[2] | (decoded[3] << 8);
+  const algorithmsLength = decoded[4] | (decoded[5] << 8);
+  let offset = 6;
+  const userId = decoded.slice(offset, offset + userLength); offset += userLength;
+  const selfSigningPublicKey = decoded.slice(offset, offset + 32); offset += 32;
+  const masterSignature = decoded.slice(offset, offset + 64); offset += 64;
+  const deviceId = decoded.slice(offset, offset + deviceLength); offset += deviceLength;
+  const algorithms = decoded.slice(offset, offset + algorithmsLength); offset += algorithmsLength;
+  const deviceCurve25519Key = decoded.slice(offset, offset + 32); offset += 32;
+  const deviceEd25519Key = decoded.slice(offset, offset + 32); offset += 32;
+  const selfSigningSignature = decoded.slice(offset, offset + 64);
   return {
-    userId: asciiString(decoded.userId),
-    selfSigningPublicKey: decoded.selfSigningPublicKey,
-    masterSignature: decoded.masterSignature,
-    deviceId: asciiString(decoded.deviceId),
-    algorithms: decodeAlgorithms(decoded.algorithms, decoded.algorithmsLength),
-    deviceCurve25519Key: decoded.deviceCurve25519Key,
-    deviceEd25519Key: decoded.deviceEd25519Key,
-    selfSigningSignature: decoded.selfSigningSignature,
+    userId: asciiString(userId),
+    selfSigningPublicKey,
+    masterSignature,
+    deviceId: asciiString(deviceId),
+    algorithms: decodeAlgorithms(algorithms, algorithms.length),
+    deviceCurve25519Key,
+    deviceEd25519Key,
+    selfSigningSignature,
   };
 }
 
