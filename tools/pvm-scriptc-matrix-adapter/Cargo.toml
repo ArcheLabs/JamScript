@@ -1,0 +1,13 @@
+[package]
+name = "pvm-scriptc-matrix-adapter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.100"
+ed25519-dalek = "2.2.0"
+ownership-matrix = { path = "../../crates/ownership-matrix" }
+polkavm = "=0.30.0"
+service-runtime-core = { path = "../../crates/service-runtime-core" }
+
+[workspace]

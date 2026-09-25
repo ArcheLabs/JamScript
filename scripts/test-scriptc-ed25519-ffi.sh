@@ -15,7 +15,7 @@ trap 'rm -rf -- "${RUN_ROOT}"' EXIT
 }
 
 "${JAMSCRIPT_ROOT}/target/debug/jams" build \
-  "${JAMSCRIPT_ROOT}/tests/scriptc-ed25519-verifier" \
+  "${JAMSCRIPT_ROOT}/tests/release-consumer-ownership" \
   --output "${RUN_ROOT}/dist"
 
 generated_c="${RUN_ROOT}/dist/scriptc/scriptc_service.lib.c"

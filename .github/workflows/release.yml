@@ -319,7 +319,7 @@ jobs:
             --fixture-dir "${GITHUB_WORKSPACE}/tests/release-consumer-ownership" \
             --result-json "${result}" \
             --work-dir "${RUNNER_TEMP}/ownership-consumer-${{ matrix.platform }}-work"
-          jq -e '.status == "PASS" and .offline_build == true and .execution == true and .generic_ed25519_build == true and .generic_ed25519_valid == true and .generic_ed25519_invalid == true and .generic_ed25519_fatal == false' "${result}"
+          jq -e '.status == "PASS" and .offline_build == true and .execution == true and .generic_ed25519_build == true and .generic_ed25519_plain_action == true and .generic_ed25519_valid == true and .generic_ed25519_invalid == true and .generic_ed25519_fatal == false' "${result}"
           echo "JAMSCRIPT_OWNERSHIP_CONSUMER_CHECK=PASS"
           echo "JAMSCRIPT_OWNERSHIP_CONSUMER_ABI=PASS"
           echo "JAMSCRIPT_OWNERSHIP_CONSUMER_BUILD=PASS"

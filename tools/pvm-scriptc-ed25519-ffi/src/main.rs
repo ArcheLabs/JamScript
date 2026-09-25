@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signer, SigningKey};
-use jamscript_crypto::{blake2_256, verify_ed25519};
+use jamscript_crypto::verify_ed25519;
+use ownership_core::{Ownership, OwnershipKind};
 use polkavm::{BackendKind, Config, Engine, Linker, MemoryAccessError, Module, ModuleConfig, Reg};
 use service_runtime_core::{
     ManagedStateWitnessV1, RuntimeRefineInputV1, RuntimeRefineOutputV1, StateAccessPlanV1,
@@ -15,14 +16,13 @@ fn main() -> Result<()> {
         .nth(1)
         .map(PathBuf::from)
         .context("usage: pvm-scriptc-ed25519-ffi <service.pvm>")?;
-    let artifact = fs::read(&artifact).with_context(|| format!("reading {}", artifact.display()))?;
+    let artifact =
+        fs::read(&artifact).with_context(|| format!("reading {}", artifact.display()))?;
     let signing_key = SigningKey::from_bytes(&[11; 32]);
     let public_key = signing_key.verifying_key().to_bytes();
-    let subject = [33; 32];
-    let mut subject_preimage = b"OWNERSHIP_ABSTRACTION_KEY_V1".to_vec();
-    subject_preimage.extend_from_slice(&[1, 0, 32, 0]);
-    subject_preimage.extend_from_slice(&subject);
-    let message = blake2_256(&subject_preimage);
+    let subject = Ownership::from_array(OwnershipKind::Ed25519Key, [33; 32])?;
+    let subject_encoding = subject.encode()?;
+    let message = subject.key()?;
     let signature = signing_key.sign(&message).to_bytes();
     if verify_ed25519(&public_key, &signature, &message).is_err() {
         bail!("generic Ed25519 implementation rejected its valid signature");
@@ -33,23 +33,32 @@ fn main() -> Result<()> {
     invalid_signature[0] ^= 1;
     let c_abi_valid = unsafe {
         service_runtime_guest::jamscript_verify_ed25519(
-            public_key.as_ptr(), public_key.len(),
-            message.as_ptr(), message.len(),
-            signature.as_ptr(), signature.len(),
+            public_key.as_ptr(),
+            public_key.len(),
+            message.as_ptr(),
+            message.len(),
+            signature.as_ptr(),
+            signature.len(),
         )
     };
     let c_abi_invalid = unsafe {
         service_runtime_guest::jamscript_verify_ed25519(
-            public_key.as_ptr(), public_key.len(),
-            message.as_ptr(), message.len(),
-            invalid_signature.as_ptr(), invalid_signature.len(),
+            public_key.as_ptr(),
+            public_key.len(),
+            message.as_ptr(),
+            message.len(),
+            invalid_signature.as_ptr(),
+            invalid_signature.len(),
         )
     };
     let c_abi_bad_lengths = unsafe {
         service_runtime_guest::jamscript_verify_ed25519(
-            public_key.as_ptr(), public_key.len() - 1,
-            message.as_ptr(), message.len(),
-            signature.as_ptr(), signature.len(),
+            public_key.as_ptr(),
+            public_key.len() - 1,
+            message.as_ptr(),
+            message.len(),
+            signature.as_ptr(),
+            signature.len(),
         )
     };
     if c_abi_valid != 1 || c_abi_invalid != 0 || c_abi_bad_lengths != 0 {
@@ -58,18 +67,42 @@ fn main() -> Result<()> {
     println!("GENERIC_ED25519_C_ABI=PASS");
 
     let engine = make_engine()?;
-    let plain_code = run_probe(0, &engine, &artifact, &public_key, &message, &signature)?;
+    let plain_code = run_probe(
+        0,
+        &engine,
+        &artifact,
+        &subject_encoding,
+        &public_key,
+        &signature,
+    )?;
     if plain_code != 5098 {
         bail!("plain action returned {plain_code:#010x}; expected ordinary abort 5098");
     }
-    let invalid_code = run_probe(1, &engine, &artifact, &public_key, &message, &invalid_signature)?;
+    println!("GENERIC_ED25519_PLAIN_ACTION=PASS");
+    let invalid_code = run_probe(
+        1,
+        &engine,
+        &artifact,
+        &subject_encoding,
+        &public_key,
+        &invalid_signature,
+    )?;
     if invalid_code != 5005 {
         bail!("invalid signature returned {invalid_code:#010x}; expected ordinary abort 5005");
     }
-    let valid_code = run_probe(1, &engine, &artifact, &public_key, &message, &signature)?;
+    println!("GENERIC_ED25519_INVALID=PASS");
+    let valid_code = run_probe(
+        1,
+        &engine,
+        &artifact,
+        &subject_encoding,
+        &public_key,
+        &signature,
+    )?;
     if valid_code != 5098 {
         bail!("valid signature returned {valid_code:#010x}; expected ordinary probe abort 5098");
     }
+    println!("GENERIC_ED25519_VALID=PASS");
     println!("GENERIC_ED25519_PVM=PASS");
     println!("GENERIC_ED25519_FATAL=false");
     Ok(())
@@ -85,11 +118,11 @@ fn run_probe(
     stage: u8,
     engine: &Engine,
     artifact: &[u8],
+    subject: &[u8],
     public_key: &[u8; 32],
-    message: &[u8; 32],
     signature: &[u8; 64],
 ) -> Result<u32> {
-    let payload = encode_probe_action(stage, public_key, message, signature);
+    let payload = encode_probe_action(stage, subject, public_key, signature);
     let refine_input = RuntimeRefineInputV1 {
         version: RuntimeRefineInputV1::VERSION,
         managed_state: ManagedStateWitnessV1 {
@@ -134,7 +167,9 @@ fn run_probe(
             return Ok(());
         }
         caller.instance.write_memory(output, &[0u8; 32])?;
-        caller.instance.write_memory(output_size, &(32u64).to_le_bytes())?;
+        caller
+            .instance
+            .write_memory(output_size, &(32u64).to_le_bytes())?;
         caller.instance.set_reg(Reg::A0, 0);
         Ok(())
     })?;
@@ -155,20 +190,25 @@ fn run_probe(
     let decoded = RuntimeRefineOutputV1::decode(&output).map_err(|error| {
         anyhow::anyhow!("decoding PVM receipt (a fatal output is not an application rejection): {error:?}; ptr={output_ptr:#x}, len={output_len}, bytes={output:?}")
     })?;
-    let receipt = decoded.receipts.first().context("PVM refine output has no action receipt")?;
-    receipt.error_code.context("probe action unexpectedly applied without its expected abort")
+    let receipt = decoded
+        .receipts
+        .first()
+        .context("PVM refine output has no action receipt")?;
+    receipt
+        .error_code
+        .context("probe action unexpectedly applied without its expected abort")
 }
 
 fn encode_probe_action(
     stage: u8,
+    subject: &[u8],
     public_key: &[u8; 32],
-    message: &[u8; 32],
     signature: &[u8; 64],
 ) -> Vec<u8> {
-    let mut action = Vec::with_capacity(1 + public_key.len() + message.len() + signature.len());
+    let mut action = Vec::with_capacity(1 + subject.len() + public_key.len() + signature.len());
     action.push(stage);
+    action.extend_from_slice(subject);
     action.extend_from_slice(public_key);
-    action.extend_from_slice(message);
     action.extend_from_slice(signature);
     action
 }

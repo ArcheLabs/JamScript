@@ -7,7 +7,7 @@ edition = "2021"
 anyhow = "1.0.100"
 ed25519-dalek = "2.2.0"
 jamscript-crypto = { path = "../../crates/jamscript-crypto" }
-ownership-matrix = { path = "../../crates/ownership-matrix" }
+ownership-core = { path = "../../crates/ownership-core" }
 polkavm = "=0.30.0"
 service-runtime-core = { path = "../../crates/service-runtime-core" }
 service-runtime-guest = { path = "../../crates/service-runtime-guest" }
