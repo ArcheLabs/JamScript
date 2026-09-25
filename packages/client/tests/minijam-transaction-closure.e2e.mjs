@@ -92,6 +92,14 @@ async function directSignedAction(abi, actionName, input, pair, nonce) {
   };
 }
 
+async function waitForTerminalTransaction(transactionId) {
+  for (;;) {
+    const status = await backend.call("jamscript_getTransactionStatusV1", { transactionId });
+    if (status.status === "imported" || status.status === "failed") return status;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 let backend;
 async function backendContext() {
   return backend.call("minijam_getFinalizedContext");
@@ -225,6 +233,40 @@ async function main() {
   console.log("FAILURE_ISOLATION=PASS");
   console.log("FINALIZED_STATE_MATCH=PASS");
 
+  // An unknown but correctly signed selector reaches runtime execution and
+  // produces an imported package with a rejected action receipt. Keep this
+  // separate from stale nonces, which the coordinator now rejects pre-dispatch.
+  const rejectionPayload = encodeActionPayload(abi, "advance", { key: firstKey });
+  const rejectionUnsigned = {
+    version: 1,
+    networkDomain: parseHex(networkDomain, 32),
+    serviceKey: parseHex(serviceKey, 32),
+    actionSelector: actionSelector("unknownTransactionClosureAction"),
+    signerScheme: 0,
+    publicKey: pair.publicKey,
+    nonce: await client.readNonce(pair.publicKey),
+    validUntil: BigInt((await backend.call("minijam_getFinalizedContext")).slot) + 64n,
+    payloadHash: blake2AsU8a(rejectionPayload, 256),
+    payload: rejectionPayload,
+  };
+  const rejectionSignature = await sr25519Sign(signingDigestV1(rejectionUnsigned), pair);
+  const rejectionAction = encodeSignedActionV1({ ...rejectionUnsigned, signature: rejectionSignature });
+  const rejectionSubmitted = await backend.call("jamscript_submitTransactionV1", {
+    serviceId,
+    serviceCodeHash: codeHash,
+    payloadBase64: Buffer.from(rejectionAction).toString("base64"),
+    extrinsicsBase64: [],
+  });
+  const rejectionStatus = await waitForTerminalTransaction(rejectionSubmitted.transactionId);
+  assert.equal(rejectionStatus.status, "imported");
+  assert.ok(rejectionStatus.packageHash);
+  assert.notEqual(rejectionStatus.actionIndex, null);
+  assert.ok(rejectionStatus.executionReceipt);
+  assert.equal(rejectionStatus.actionReceipts?.[rejectionStatus.actionIndex]?.status, "rejected");
+  const afterRuntimeRejection = await managedValue(backend, valueKey);
+  assert.equal(new DataView(afterRuntimeRejection.buffer, afterRuntimeRejection.byteOffset + 32, 4).getUint32(0, true), 23);
+  console.log("RUNTIME_APPLICATION_REJECTION=PASS");
+
   const stalePayload = encodeActionPayload(abi, "advance", { key: firstKey });
   const staleUnsigned = {
     version: 1,
@@ -246,17 +288,15 @@ async function main() {
     payloadBase64: Buffer.from(staleAction).toString("base64"),
     extrinsicsBase64: [],
   });
-  let staleStatus;
-  for (;;) {
-    staleStatus = await backend.call("jamscript_getTransactionStatusV1", { transactionId: staleSubmitted.transactionId });
-    if (staleStatus.status === "imported" || staleStatus.status === "failed") break;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  assert.equal(staleStatus.status, "imported");
-  assert.equal(staleStatus.actionReceipts?.[staleStatus.actionIndex ?? 0]?.status, "rejected");
+  const staleStatus = await waitForTerminalTransaction(staleSubmitted.transactionId);
+  assert.equal(staleStatus.status, "failed");
+  assert.match(staleStatus.error ?? "", /^STALE_NONCE:/);
+  assert.equal(staleStatus.packageHash, null);
+  assert.equal(staleStatus.actionIndex, null);
+  assert.equal(staleStatus.executionReceipt, null);
   const unchangedValue = await managedValue(backend, valueKey);
   assert.equal(new DataView(unchangedValue.buffer, unchangedValue.byteOffset + 32, 4).getUint32(0, true), 23);
-  console.log("STALE_NONCE=PASS");
+  console.log("STALE_NONCE_PRE_DISPATCH_REJECTION=PASS");
   const result = {
     jamscriptHead: process.env.JAMSCRIPT_EXECUTED_SHA ?? null,
     single: measured([seed], [seeded]),
@@ -265,6 +305,7 @@ async function main() {
     crossSigner: measured(crossSigner, crossSignerResults),
     secondBatch: measured(second, secondResults),
     failureBatch: measured(failureBatch, failureResults),
+    runtimeRejected: measured([rejectionSubmitted], [rejectionStatus]),
     stale: measured([staleSubmitted], [staleStatus]),
   };
   await fs.writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`);
