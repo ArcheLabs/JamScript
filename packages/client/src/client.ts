@@ -2,8 +2,6 @@ import { actionByName, queryByName, stateByName, type DeploymentDescriptor } fro
 import { decodeStateValue, decodeValue, encodeActionPayload, encodeValue, type CodecValue } from "./codec.js";
 import {
   actionSelector,
-  controlClaimBootstrapKey,
-  controlClaimKey,
   encodeSignedActionV1,
   encodeSignedActionV2,
   MANAGED_STATE_COMMITMENT_KEY_V1,
@@ -18,20 +16,6 @@ import {
   type Ownership,
   type SignedActionV2,
 } from "./crypto.js";
-import {
-  CONTROL_CLAIM_ACTIONS,
-  encodeControlClaimActionV1,
-  type ControlClaimDeployment,
-  type MatrixControlBootstrapInput,
-  type MatrixControlBootstrapSigner,
-} from "./control-claim.js";
-import {
-  encodeMatrixControlBootstrapV1,
-  encodeMatrixControlClaimProofV1,
-  matrixControlBootstrapSigningMessage,
-  type MatrixControlBootstrapV1,
-  type MatrixControlClaimProofV1,
-} from "./matrix.js";
 import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner, OwnershipSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
@@ -62,6 +46,20 @@ export type WaitForActionResult = Omit<TransactionStatusResult, "status"> & {
   errorCode: number | null;
   actionReceipt: ActionReceipt;
 };
+
+export class TransactionWaitTimeoutError extends Error {
+  constructor(
+    readonly transactionId: string,
+    readonly lastStatus?: TransactionStatusResult,
+  ) {
+    super(
+      lastStatus
+        ? `timed out waiting for transaction ${transactionId} (last status: ${lastStatus.status})`
+        : `timed out waiting for transaction ${transactionId}`,
+    );
+    this.name = "TransactionWaitTimeoutError";
+  }
+}
 
 export class JamScriptClient {
   private readonly rpc: WorkRpc;
@@ -135,7 +133,12 @@ export class JamScriptClient {
       throw error;
     }
     this.actionHashes.set(submitted.transactionId.toLowerCase(), prepared.actionHash);
-    return { ...submitted, actionHash: prepared.actionHash };
+    return {
+      ...submitted,
+      actionHash: prepared.actionHash,
+      submittedSlot: prepared.submittedSlot,
+      validUntil: prepared.validUntil,
+    };
   }
 
   async submitOwnershipAction(
@@ -188,150 +191,16 @@ export class JamScriptClient {
         extrinsicsBase64: (options.extrinsics ?? []).map(toBase64),
       });
       this.actionHashes.set(submitted.transactionId.toLowerCase(), actionHash);
-      return { ...submitted, actionHash };
-    } finally {
-      release();
-      if (this.ownershipTails.get(signerLane) === lane) this.ownershipTails.delete(signerLane);
-    }
-  }
-
-  async bootstrapMatrixControlClaim(
-    input: MatrixControlBootstrapInput & { deployment: ControlClaimDeployment },
-  ): Promise<SubmitActionResult> {
-    const controllerSigner: MatrixControlBootstrapSigner = input.controllerSigner;
-    const controller = await controllerSigner.getController();
-    const matrixProof = input.proof instanceof Uint8Array
-      ? input.proof.slice()
-      : encodeMatrixControlClaimProofV1(input.proof);
-    const draft: MatrixControlBootstrapV1 = {
-      networkDomain: parseHex(input.deployment.networkDomain, 32),
-      subject: input.subject,
-      controller,
-      matrixProof,
-      controllerProof: new Uint8Array(),
-    };
-    const controllerProof = await controllerSigner.signBootstrapMessage(
-      matrixControlBootstrapSigningMessage(draft),
-    );
-    if (controllerProof.length !== 64) throw new Error("invalid Matrix controller possession proof");
-    const payload = encodeMatrixControlBootstrapV1({ ...draft, controllerProof });
-    return this.submitControlClaimAction(
-      input.deployment,
-      CONTROL_CLAIM_ACTIONS.bootstrapMatrixController,
-      payload,
-      controllerSigner,
-    );
-  }
-
-  async addController(input: {
-    deployment: ControlClaimDeployment;
-    subject: Ownership;
-    controller: Ownership;
-    signer: OwnershipSigner;
-  }): Promise<SubmitActionResult> {
-    return this.submitControlClaimAction(
-      input.deployment,
-      CONTROL_CLAIM_ACTIONS.addController,
-      encodeControlClaimActionV1("add", input.subject, input.controller),
-      input.signer,
-      { actAs: input.subject },
-    );
-  }
-
-  async revokeController(input: {
-    deployment: ControlClaimDeployment;
-    subject: Ownership;
-    controller: Ownership;
-    signer: OwnershipSigner;
-  }): Promise<SubmitActionResult> {
-    return this.submitControlClaimAction(
-      input.deployment,
-      CONTROL_CLAIM_ACTIONS.revokeController,
-      encodeControlClaimActionV1("revoke", input.subject, input.controller),
-      input.signer,
-      { actAs: input.subject },
-    );
-  }
-
-  async isControllerActive(
-    deployment: ControlClaimDeployment,
-    subject: Ownership,
-    controller: Ownership,
-  ): Promise<boolean> {
-    await this.validateControlClaimDeployment(deployment);
-    const context = await this.rpc.finalizedContext();
-    const root = await this.managedStateRootFor(context, deployment);
-    const value = await this.readManagedValueFor(root, deployment, controlClaimKey(subject, controller));
-    return value?.length === 1 && value[0] === 1;
-  }
-
-  async hasBootstrapCompleted(
-    deployment: ControlClaimDeployment,
-    subject: Ownership,
-  ): Promise<boolean> {
-    await this.validateControlClaimDeployment(deployment);
-    const context = await this.rpc.finalizedContext();
-    const root = await this.managedStateRootFor(context, deployment);
-    const value = await this.readManagedValueFor(root, deployment, controlClaimBootstrapKey(subject));
-    return value?.length === 1 && value[0] === 1;
-  }
-
-  private async submitControlClaimAction(
-    deployment: ControlClaimDeployment,
-    actionName: string,
-    payload: Uint8Array,
-    signer: OwnershipSigner,
-    options: { actAs?: Ownership; ttl?: bigint } = {},
-  ): Promise<SubmitActionResult> {
-    const controller = await signer.getController();
-    const signerLane = `${deployment.serviceId}:${toHex(controller.public).toLowerCase()}`;
-    const previous = this.ownershipTails.get(signerLane) ?? Promise.resolve();
-    let release!: () => void;
-    const lane = new Promise<void>((resolve) => { release = resolve; });
-    this.ownershipTails.set(signerLane, lane);
-    await previous;
-    try {
-      await this.validateControlClaimDeployment(deployment);
-      const context = await this.rpc.finalizedContext();
-      const effectiveOwner = options.actAs ?? controller;
-      const root = await this.managedStateRootFor(context, deployment);
-      const nonceBytes = await this.readManagedValueFor(root, deployment, ownershipNonceKey(effectiveOwner));
-      const chainNonce = nonceBytes === null ? 0n : decodeValue("u64", nonceBytes);
-      if (typeof chainNonce !== "bigint") throw new Error("ControlClaim nonce storage is not u64");
-      const unsigned: Omit<SignedActionV2, "authorizationProof"> = {
-        version: 2,
-        networkDomain: parseHex(deployment.networkDomain, 32),
-        serviceKey: parseHex(deployment.serviceKey, 32),
-        actionSelector: actionSelector(actionName),
-        controller,
-        actAs: options.actAs ?? null,
-        nonce: chainNonce,
-        validUntil: BigInt(context.slot) + (options.ttl ?? 64n),
-        payloadHash: blake2(payload),
-        payload,
+      return {
+        ...submitted,
+        actionHash,
+        submittedSlot: context.slot,
+        validUntil: Number(unsigned.validUntil),
       };
-      const authorizationProof = await signer.signJamScriptAction({ ...unsigned, message: signingMessageV2(unsigned) });
-      if (authorizationProof.length === 0 || authorizationProof.length > 65536) throw new Error("invalid Ownership authorization proof");
-      const signed = encodeSignedActionV2({ ...unsigned, authorizationProof });
-      const actionHash = toHex(blake2(signed));
-      const submitted = await this.rpc.submitTransaction({
-        serviceId: deployment.serviceId,
-        serviceCodeHash: deployment.codeHash,
-        payloadBase64: toBase64(signed),
-        extrinsicsBase64: [],
-      });
-      this.actionHashes.set(submitted.transactionId.toLowerCase(), actionHash);
-      return { ...submitted, actionHash };
     } finally {
       release();
       if (this.ownershipTails.get(signerLane) === lane) this.ownershipTails.delete(signerLane);
     }
-  }
-
-  private async validateControlClaimDeployment(deployment: ControlClaimDeployment): Promise<void> {
-    const genesis = await this.rpc.genesisHash();
-    if (!sameHex(genesis, deployment.genesisHash)) throw new Error("ControlClaim deployment genesis does not match the chain");
-    if (!sameHex(deployment.networkDomain, this.deployment.networkDomain)) throw new Error("ControlClaim deployment network domain does not match the consumer deployment");
   }
 
   private async reserveWalletNonce(
@@ -363,7 +232,13 @@ export class JamScriptClient {
     input: Record<string, CodecValue>,
     signer: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number },
-  ): Promise<{ request: Parameters<WorkRpc["submitTransaction"]>[0]; actionHash: string; nonce: bigint }> {
+  ): Promise<{
+    request: Parameters<WorkRpc["submitTransaction"]>[0];
+    actionHash: string;
+    nonce: bigint;
+    submittedSlot: number;
+    validUntil: number;
+  }> {
     await this.validateDeployment();
     const action = actionByName(this.deployment.abi, actionName);
     if (action.auth !== "wallet") throw new Error("submitAction requires a wallet-authenticated action");
@@ -399,7 +274,17 @@ export class JamScriptClient {
       extrinsicsBase64: (options.extrinsics ?? []).map(toBase64),
     };
 
-    return { request: requestBase, actionHash, nonce };
+    return {
+      request: requestBase,
+      actionHash,
+      nonce,
+      submittedSlot: initialContext.slot,
+      validUntil: Number(validUntil),
+    };
+  }
+
+  finalizedContext(): Promise<FinalizedContext> {
+    return this.rpc.finalizedContext();
   }
 
   async queryLatest(queryName: string, key?: CodecValue): Promise<QueryResult> {
@@ -434,7 +319,7 @@ export class JamScriptClient {
 
   private async managedStateRootFor(
     context: FinalizedContext,
-    deployment: Pick<ControlClaimDeployment, "serviceId">,
+    deployment: Pick<DeploymentDescriptor, "serviceId">,
   ): Promise<Uint8Array> {
     const encoded = await this.rpc.serviceStorageAt(context.blockHash, deployment.serviceId, toHex(MANAGED_STATE_COMMITMENT_KEY_V1));
     if (encoded === null) return parseHex(EMPTY_STATE_ROOT_V1);
@@ -454,7 +339,7 @@ export class JamScriptClient {
 
   private async readManagedValueFor(
     root: Uint8Array,
-    deployment: Pick<ControlClaimDeployment, "serviceId" | "serviceKey">,
+    deployment: Pick<DeploymentDescriptor, "serviceId" | "serviceKey">,
     key: Uint8Array,
   ): Promise<Uint8Array | null> {
     const response = await this.stateProvider.get({ serviceId: deployment.serviceId, serviceKey: deployment.serviceKey, stateRoot: toHex(root), key });
@@ -483,14 +368,16 @@ export class JamScriptClient {
   ): Promise<TransactionStatusResult> {
     const intervalMs = options.intervalMs ?? 1_000;
     const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+    let lastStatus: TransactionStatusResult | undefined;
     for (;;) {
       try {
         const status = await this.transactionStatus(transactionId);
+        lastStatus = status;
         if (status.status === "imported" || status.status === "failed") return status;
       } catch (error) {
         if (!(error instanceof RpcError) || error.code !== -32013) throw error;
       }
-      if (Date.now() >= deadline) throw new Error("timed out waiting for transaction");
+      if (Date.now() >= deadline) throw new TransactionWaitTimeoutError(transactionId, lastStatus);
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }

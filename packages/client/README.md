@@ -11,7 +11,7 @@ and using JamScript Ownership authentication.
 The first public release is planned as an RC:
 
 ```bash
-npm install @jamscript/client@0.1.0-rc.1
+npm install @jamscript/client@0.1.0-rc.3
 ```
 
 The package is network-neutral. Deployment and transport configuration are
@@ -97,18 +97,12 @@ proof-verified responses from the configured provider.
 
 ## Matrix
 
-`MatrixOwnershipResolver`, `MatrixDeviceController`, and
-`MatrixControlClaimBootstrapper` are exported as protocol-neutral Matrix
-primitives. The package does not depend on `matrix-js-sdk`; applications own
-their Matrix transport and device lifecycle. The Matrix bootstrap codec binds
-the network domain, master Ownership, device controller, M→S→D proof, and
-device possession signature before a ControlClaim action is submitted.
-
-The client also exposes `bootstrapMatrixControlClaim`, `addController`,
-`revokeController`, `isControllerActive`, and `hasBootstrapCompleted` on
-`JamScriptClient`. These methods require the network's dedicated Ownership
-Control service descriptor; a consumer service descriptor is not sufficient.
-
+`MatrixOwnershipResolver` and `MatrixDeviceController` are exported as
+protocol-neutral Matrix primitives. The package does not depend on
+`matrix-js-sdk`; applications own their Matrix transport and device lifecycle.
+The client preserves `MatrixControlClaimProofV1` codec vectors for the
+M→S→D cryptographic evidence format. Controller authorization and bootstrap
+actions belong to the consuming Locus service, not to the JamScript client.
 ## Runtime support
 
 The package is ESM-only and is intended for modern browsers, Vite-based
@@ -117,7 +111,7 @@ Node built-ins, and cryptographic/network dependencies remain external npm
 dependencies so the application bundler can tree-shake them.
 
 This release candidate targets the JamScript Ownership v1 protocol,
-SignedActionV1, SignedActionV2, Matrix bootstrap proof, and the current
+SignedActionV1, SignedActionV2, Matrix M→S→D cross-signing proof, and the current
 MiniJAM Stage-1 deployment target. MiniJAM is a supported deployment target,
 not the package boundary.
 

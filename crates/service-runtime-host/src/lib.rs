@@ -378,17 +378,8 @@ fn initial_runtime_keys(actions: &[Vec<u8>]) -> Vec<Vec<u8>> {
                 keys.push(service_runtime_core::wallet_nonce_key_v1(&account));
             }
         } else if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v2(action) {
-            if let Ok(key) = jamscript_runtime_core::ownership_nonce_key(
-                signed.act_as.as_ref().unwrap_or(&signed.controller),
-            ) {
+            if let Ok(key) = jamscript_runtime_core::ownership_nonce_key(&signed.controller) {
                 keys.push(key);
-            }
-            if let Some(subject) = signed.act_as.as_ref() {
-                if let Ok(key) =
-                    jamscript_runtime_core::control_claim_key(subject, &signed.controller)
-                {
-                    keys.push(key);
-                }
             }
         }
     }

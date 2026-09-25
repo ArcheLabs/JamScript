@@ -23,6 +23,25 @@ export type JamOwnership = {
   public: Uint8Array;
 };
 
+declare function jamscript_verify_matrix_cross_signing(
+  subject: Uint8Array,
+  controller: Uint8Array,
+  proof: Uint8Array,
+): number;
+
+export function verifyMatrixCrossSigning(
+  subject: JamOwnership,
+  controller: JamOwnership,
+  proof: Uint8Array,
+): boolean {
+  if (subject.version !== 1 || controller.version !== 1
+      || subject.kind !== 0 || controller.kind !== 0
+      || subject.public.length !== 32 || controller.public.length !== 32) {
+    return false;
+  }
+  return jamscript_verify_matrix_cross_signing(subject.public, controller.public, proof) === 1;
+}
+
 const OWNERSHIP_KEY_DOMAIN = new TextEncoder().encode("OWNERSHIP_ABSTRACTION_KEY_V1");
 const BLAKE2B_IV_LO = [0xF3BCC908, 0x84CAA73B, 0xFE94F82B, 0x5F1D36F1, 0xADE682D1, 0x2B3E6C1F, 0xFB41BD6B, 0x137E2179];
 const BLAKE2B_IV_HI = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19];

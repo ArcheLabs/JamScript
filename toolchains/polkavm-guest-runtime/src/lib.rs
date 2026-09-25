@@ -8,8 +8,8 @@ extern crate std;
 
 use alloc::vec::Vec;
 use jamscript_runtime_core::{
-    control_claim_key, decode_signed_action_v1, decode_signed_action_v2, nonce_key,
-    ownership_nonce_key, verify_signed_action_v1, verify_signed_action_v2,
+    decode_signed_action_v1, decode_signed_action_v2, nonce_key, ownership_nonce_key,
+    verify_signed_action_v1, verify_signed_action_v2,
 };
 use service_runtime_core::{
     BackendMetadataV1, RuntimeRefineInputV1, RuntimeRefineOutputV1, ScriptActionResultV1,
@@ -243,27 +243,20 @@ fn authenticate<'a>(
         AUTH_OWNERSHIP => {
             let signed = decode_signed_action_v2(raw_action)
                 .map_err(|error| StateAccessError::Rejected(error.code()))?;
-            let nonce_owner = signed.act_as.as_ref().unwrap_or(&signed.controller);
-            let nonce_key = ownership_nonce_key(nonce_owner)
+            if signed.act_as.is_some() {
+                return Err(StateAccessError::Rejected(
+                    jamscript_runtime_core::RuntimeError::ActAsUnsupported.code(),
+                ));
+            }
+            let nonce_key = ownership_nonce_key(&signed.controller)
                 .map_err(|error| StateAccessError::Rejected(error.code()))?;
             let expected_nonce = read_nonce(context, &nonce_key)?;
-            let claim_key = signed
-                .act_as
-                .as_ref()
-                .map(|owner| control_claim_key(owner, &signed.controller))
-                .transpose()
-                .map_err(|error| StateAccessError::Rejected(error.code()))?;
-            let active_control_claim = match claim_key.as_ref() {
-                Some(key) => matches!(context.state().get(key)?.as_deref(), Some([1])),
-                None => false,
-            };
             let verified = verify_signed_action_v2(
                 signed,
                 context.network_domain(),
                 service_key(descriptor),
                 action.selector,
                 Some(expected_nonce),
-                active_control_claim,
             )
             .map_err(|error| StateAccessError::Rejected(error.code()))?;
             context.set_ownership(verified.owner.clone(), verified.controller.clone());

@@ -7,6 +7,23 @@ use ownership_core::{Ownership, OwnershipError, OwnershipKind};
 use service_runtime_core::ServiceKeyV1;
 use thiserror::Error;
 
+/// Pure Matrix M→S→D verifier used by application services. Controller
+/// authorization remains a Locus/application-state decision.
+pub fn verify_matrix_cross_signing(
+    subject: &Ownership,
+    controller: &Ownership,
+    proof: &[u8],
+) -> bool {
+    if subject.kind != OwnershipKind::Ed25519Key
+        || controller.kind != OwnershipKind::Ed25519Key
+        || subject.public.len() != 32
+        || controller.public.len() != 32
+    {
+        return false;
+    }
+    jamscript_crypto::verify_matrix_cross_signing(&subject.public, &controller.public, proof)
+}
+
 pub const SIGNED_ACTION_VERSION_V1: u8 = 1;
 pub const SIGNING_DOMAIN_V1: &[u8] = b"JAMSCRIPT_ACTION_V1";
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
@@ -15,245 +32,6 @@ pub const MAX_SIGNATURE_BYTES: usize = 64;
 pub const SIGNED_ACTION_VERSION_V2: u8 = 2;
 pub const ACTION_COMMITMENT_DOMAIN_V2: &[u8] = b"JAMSCRIPT_ACTION_V2";
 pub const MAX_AUTHORIZATION_PROOF_BYTES: usize = 65_536;
-pub const CONTROL_CLAIM_FORMAT_VERSION_V1: u8 = 1;
-pub const MATRIX_CONTROL_BOOTSTRAP_FORMAT_VERSION_V1: u8 = 1;
-pub const MATRIX_CONTROL_BOOTSTRAP_DOMAIN_V1: &[u8] = b"JAMSCRIPT_MATRIX_CONTROL_BOOTSTRAP_V1";
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ControlClaimActionV1 {
-    BootstrapMatrix {
-        bootstrap: MatrixControlBootstrapV1,
-    },
-    AddController {
-        subject: Ownership,
-        controller: Ownership,
-    },
-    RevokeController {
-        subject: Ownership,
-        controller: Ownership,
-    },
-}
-
-impl ControlClaimActionV1 {
-    pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        let (tag, subject, controller) = match self {
-            Self::BootstrapMatrix { bootstrap } => {
-                let encoded = bootstrap.encode()?;
-                let mut output = vec![CONTROL_CLAIM_FORMAT_VERSION_V1, 2];
-                output.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
-                output.extend_from_slice(&encoded);
-                return Ok(output);
-            }
-            Self::AddController {
-                subject,
-                controller,
-            } => (0, subject, controller),
-            Self::RevokeController {
-                subject,
-                controller,
-            } => (1, subject, controller),
-        };
-        let subject = subject
-            .encode()
-            .map_err(ProtocolError::from_ownership_error)?;
-        let controller = controller
-            .encode()
-            .map_err(ProtocolError::from_ownership_error)?;
-        Ok(encode_control_claim_action(tag, &subject, &controller))
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        let mut reader = Reader { bytes, offset: 0 };
-        if reader.u8()? != CONTROL_CLAIM_FORMAT_VERSION_V1 {
-            return Err(ProtocolError::InvalidEnvelope(
-                "unsupported ControlClaim version",
-            ));
-        }
-        let tag = reader.u8()?;
-        if tag == 2 {
-            let payload = reader.bytes_u32_limited(MAX_AUTHORIZATION_PROOF_BYTES)?;
-            if reader.offset != bytes.len() {
-                return Err(ProtocolError::InvalidEnvelope(
-                    "trailing ControlClaim bytes",
-                ));
-            }
-            return Ok(Self::BootstrapMatrix {
-                bootstrap: MatrixControlBootstrapV1::decode(&payload)?,
-            });
-        }
-        let subject_bytes = reader.bytes_u16()?;
-        let subject =
-            Ownership::decode(&subject_bytes).map_err(ProtocolError::from_ownership_error)?;
-        let controller_bytes = reader.bytes_u16()?;
-        let controller =
-            Ownership::decode(&controller_bytes).map_err(ProtocolError::from_ownership_error)?;
-        if reader.offset != bytes.len() {
-            return Err(ProtocolError::InvalidEnvelope(
-                "trailing ControlClaim bytes",
-            ));
-        }
-        match tag {
-            0 => Ok(Self::AddController {
-                subject,
-                controller,
-            }),
-            1 => Ok(Self::RevokeController {
-                subject,
-                controller,
-            }),
-            _ => Err(ProtocolError::InvalidEnvelope(
-                "unknown ControlClaim action",
-            )),
-        }
-    }
-}
-
-fn encode_control_claim_action(tag: u8, first: &[u8], second: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(7 + first.len() + second.len());
-    output.push(CONTROL_CLAIM_FORMAT_VERSION_V1);
-    output.push(tag);
-    output.extend_from_slice(&(first.len() as u16).to_le_bytes());
-    output.extend_from_slice(first);
-    output.extend_from_slice(&(second.len() as u16).to_le_bytes());
-    output.extend_from_slice(second);
-    output
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MatrixControlBootstrapV1 {
-    pub network_domain: [u8; 32],
-    pub subject: Ownership,
-    pub controller: Ownership,
-    pub matrix_proof: Vec<u8>,
-    pub controller_proof: Vec<u8>,
-}
-
-impl MatrixControlBootstrapV1 {
-    pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        let subject = self
-            .subject
-            .encode()
-            .map_err(ProtocolError::from_ownership_error)?;
-        let controller = self
-            .controller
-            .encode()
-            .map_err(ProtocolError::from_ownership_error)?;
-        if self.matrix_proof.len() > MAX_AUTHORIZATION_PROOF_BYTES
-            || self.controller_proof.len() > MAX_AUTHORIZATION_PROOF_BYTES
-        {
-            return Err(ProtocolError::PayloadTooLarge);
-        }
-        let mut output = Vec::new();
-        output.push(MATRIX_CONTROL_BOOTSTRAP_FORMAT_VERSION_V1);
-        output.extend_from_slice(&self.network_domain);
-        output.extend_from_slice(&(subject.len() as u16).to_le_bytes());
-        output.extend_from_slice(&subject);
-        output.extend_from_slice(&(controller.len() as u16).to_le_bytes());
-        output.extend_from_slice(&controller);
-        output.extend_from_slice(&(self.matrix_proof.len() as u32).to_le_bytes());
-        output.extend_from_slice(&self.matrix_proof);
-        output.extend_from_slice(&(self.controller_proof.len() as u32).to_le_bytes());
-        output.extend_from_slice(&self.controller_proof);
-        Ok(output)
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        let mut reader = Reader { bytes, offset: 0 };
-        if reader.u8()? != MATRIX_CONTROL_BOOTSTRAP_FORMAT_VERSION_V1 {
-            return Err(ProtocolError::InvalidEnvelope(
-                "unsupported Matrix bootstrap version",
-            ));
-        }
-        let network_domain = reader.array::<32>()?;
-        let subject =
-            Ownership::decode(&reader.bytes_u16()?).map_err(ProtocolError::from_ownership_error)?;
-        let controller =
-            Ownership::decode(&reader.bytes_u16()?).map_err(ProtocolError::from_ownership_error)?;
-        let matrix_proof = reader.bytes_u32_limited(MAX_AUTHORIZATION_PROOF_BYTES)?;
-        let controller_proof = reader.bytes_u32_limited(MAX_AUTHORIZATION_PROOF_BYTES)?;
-        if reader.offset != bytes.len() {
-            return Err(ProtocolError::InvalidEnvelope(
-                "trailing Matrix bootstrap bytes",
-            ));
-        }
-        Ok(Self {
-            network_domain,
-            subject,
-            controller,
-            matrix_proof,
-            controller_proof,
-        })
-    }
-
-    pub fn commitment(&self) -> Result<[u8; 32], ProtocolError> {
-        let subject = self
-            .subject
-            .encode()
-            .map_err(ProtocolError::from_ownership_error)?;
-        let controller = self
-            .controller
-            .encode()
-            .map_err(ProtocolError::from_ownership_error)?;
-        let matrix_proof_hash = blake2_256(&self.matrix_proof);
-        let mut preimage = Vec::with_capacity(
-            MATRIX_CONTROL_BOOTSTRAP_DOMAIN_V1.len()
-                + 32
-                + subject.len()
-                + controller.len()
-                + matrix_proof_hash.len(),
-        );
-        preimage.extend_from_slice(MATRIX_CONTROL_BOOTSTRAP_DOMAIN_V1);
-        preimage.extend_from_slice(&self.network_domain);
-        preimage.extend_from_slice(&subject);
-        preimage.extend_from_slice(&controller);
-        preimage.extend_from_slice(&matrix_proof_hash);
-        Ok(blake2_256(&preimage))
-    }
-
-    pub fn controller_signing_message(&self) -> Result<Vec<u8>, ProtocolError> {
-        let encoded = URL_SAFE_NO_PAD.encode(self.commitment()?);
-        let mut message = Vec::with_capacity(40 + encoded.len());
-        message.extend_from_slice(b"JAMSCRIPT_MATRIX_CONTROL_BOOTSTRAP_V1:");
-        message.extend_from_slice(encoded.as_bytes());
-        Ok(message)
-    }
-
-    pub fn verify(&self, expected_network_domain: [u8; 32]) -> Result<(), ProtocolError> {
-        if self.network_domain != expected_network_domain
-            || self.subject.kind != OwnershipKind::Ed25519Key
-            || self.controller.kind != OwnershipKind::Ed25519Key
-            || self.subject.public.len() != 32
-            || self.controller.public.len() != 32
-        {
-            return Err(ProtocolError::InvalidControlClaim);
-        }
-        let proof = jamscript_crypto::MatrixControlClaimProofV1::decode(&self.matrix_proof)
-            .map_err(|_| ProtocolError::MatrixInvalidMasterProof)?;
-        let master: [u8; 32] = self
-            .subject
-            .public
-            .as_slice()
-            .try_into()
-            .map_err(|_| ProtocolError::MatrixInvalidMasterProof)?;
-        let device: [u8; 32] = self
-            .controller
-            .public
-            .as_slice()
-            .try_into()
-            .map_err(|_| ProtocolError::MatrixInvalidDeviceProof)?;
-        proof
-            .verify_for(&master, &device)
-            .map_err(|_| ProtocolError::MatrixInvalidDeviceProof)?;
-        verify_ownership(
-            &self.controller,
-            &self.controller_proof,
-            &self.controller_signing_message()?,
-        )
-        .map_err(|_| ProtocolError::InvalidOwnershipAuthorization)?;
-        Ok(())
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SignerScheme {
@@ -652,8 +430,8 @@ impl SignedActionV2 {
         if blake2_256(&self.payload) != self.payload_hash {
             return Err(ProtocolError::PayloadHashMismatch);
         }
-        if self.act_as.is_some() && !context.active_control_claim {
-            return Err(ProtocolError::ControlClaimNotFound);
+        if self.act_as.is_some() {
+            return Err(ProtocolError::ActAsUnsupported);
         }
         if self.authorization_proof.is_empty() {
             return Err(ProtocolError::InvalidOwnershipAuthorization);
@@ -700,7 +478,6 @@ pub struct VerifyContextV2 {
     pub action_selector: [u8; 8],
     pub current_tick: u64,
     pub expected_nonce: Option<u64>,
-    pub active_control_claim: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -818,6 +595,8 @@ pub enum ProtocolError {
     MatrixBootstrapAlreadyCompleted,
     #[error("unsupported Matrix device profile")]
     MatrixUnsupportedDeviceProfile,
+    #[error("act_as delegation is unsupported")]
+    ActAsUnsupported,
 }
 
 impl ProtocolError {
@@ -855,6 +634,7 @@ impl ProtocolError {
             Self::MatrixDeviceNotCrossSigned => 31,
             Self::MatrixBootstrapAlreadyCompleted => 32,
             Self::MatrixUnsupportedDeviceProfile => 33,
+            Self::ActAsUnsupported => 34,
         }
     }
 
@@ -1047,14 +827,12 @@ mod tests {
             signing_key.verifying_key().to_bytes(),
         )
         .unwrap();
-        let owner =
-            Ownership::from_array(ownership_core::OwnershipKind::Ed25519Key, [8; 32]).unwrap();
         let mut action = SignedActionV2::unsigned(
             [3; 32],
             ServiceKeyV1::new([4; 32]),
             [5; 8],
             controller.clone(),
-            Some(owner.clone()),
+            None,
             2,
             20,
             b"payload".to_vec(),
@@ -1071,92 +849,10 @@ mod tests {
                 action_selector: [5; 8],
                 current_tick: 10,
                 expected_nonce: Some(2),
-                active_control_claim: true,
             })
             .unwrap();
-        assert_eq!(verified.owner, owner);
+        assert_eq!(verified.owner, controller);
         assert_eq!(verified.controller, controller);
         assert_eq!(verified.payload, b"payload");
-    }
-
-    #[test]
-    fn matrix_bootstrap_requires_m_to_s_s_to_d_and_d_possession() {
-        let master = SigningKey::from_bytes(&[1; 32]);
-        let self_signing = SigningKey::from_bytes(&[2; 32]);
-        let device = SigningKey::from_bytes(&[3; 32]);
-        let mut matrix_proof = jamscript_crypto::MatrixControlClaimProofV1 {
-            user_id: "@alice:example.org".into(),
-            self_signing_public_key: self_signing.verifying_key().to_bytes(),
-            master_signature: [0; 64],
-            device_id: "DEVICE".into(),
-            algorithms: vec!["m.olm.v1.curve25519-aes-sha2".into()],
-            device_curve25519_key: [4; 32],
-            device_ed25519_key: device.verifying_key().to_bytes(),
-            self_signing_signature: [0; 64],
-        };
-        matrix_proof.master_signature = master
-            .sign(&matrix_proof.canonical_self_signing_object().unwrap())
-            .to_bytes();
-        matrix_proof.self_signing_signature = self_signing
-            .sign(&matrix_proof.canonical_device_keys_object().unwrap())
-            .to_bytes();
-        let subject = Ownership::from_array(
-            ownership_core::OwnershipKind::Ed25519Key,
-            master.verifying_key().to_bytes(),
-        )
-        .unwrap();
-        let controller = Ownership::from_array(
-            ownership_core::OwnershipKind::Ed25519Key,
-            device.verifying_key().to_bytes(),
-        )
-        .unwrap();
-        let mut bootstrap = MatrixControlBootstrapV1 {
-            network_domain: [9; 32],
-            subject,
-            controller,
-            matrix_proof: matrix_proof.encode().unwrap(),
-            controller_proof: Vec::new(),
-        };
-        let message = bootstrap.controller_signing_message().unwrap();
-        bootstrap.controller_proof = device.sign(&message).to_bytes().to_vec();
-        bootstrap.verify([9; 32]).unwrap();
-        let encoded = bootstrap.encode().unwrap();
-        assert_eq!(
-            MatrixControlBootstrapV1::decode(&encoded).unwrap(),
-            bootstrap
-        );
-
-        let mut tampered = bootstrap.clone();
-        tampered.controller_proof[0] ^= 1;
-        assert_eq!(
-            tampered.verify([9; 32]),
-            Err(ProtocolError::InvalidOwnershipAuthorization)
-        );
-        assert_eq!(
-            bootstrap.verify([8; 32]),
-            Err(ProtocolError::InvalidControlClaim)
-        );
-    }
-
-    #[test]
-    fn control_claim_action_bootstrap_round_trips() {
-        let action = ControlClaimActionV1::BootstrapMatrix {
-            bootstrap: MatrixControlBootstrapV1 {
-                network_domain: [1; 32],
-                subject: Ownership::from_array(ownership_core::OwnershipKind::Ed25519Key, [2; 32])
-                    .unwrap(),
-                controller: Ownership::from_array(
-                    ownership_core::OwnershipKind::Ed25519Key,
-                    [3; 32],
-                )
-                .unwrap(),
-                matrix_proof: vec![4; 7],
-                controller_proof: vec![5; 64],
-            },
-        };
-        assert_eq!(
-            ControlClaimActionV1::decode(&action.encode().unwrap()).unwrap(),
-            action
-        );
     }
 }

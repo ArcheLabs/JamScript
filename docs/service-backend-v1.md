@@ -219,21 +219,33 @@ topology remain behind the same backend URL.
 ## 11. Operations
 
 The backend binary accepts `--bind`, `--data-dir`, `--node-rpc`,
-`--formal-rpc`, `--network local`, and repeatable `--cors-origin` flags; each
-has an environment fallback. It runs in the foreground. Loopback binds allow
-the default wildcard CORS policy; non-loopback binds require an explicit
-origin allowlist. Liveness is `/healthz`; readiness is `/readinessz`.
+`--formal-rpc`, `--genesis-hash`, and repeatable `--cors-origin` flags; each
+has an environment fallback. It receives concrete endpoints and a verified
+chain identity. It does not accept or interpret names such as `local`,
+`testnet`, `staging`, or `mainnet`. Network profile selection belongs to the
+`jams` CLI. The binary runs in the foreground. Liveness is `/healthz`;
+readiness is `/readinessz`.
 
 The CLI launcher is:
 
 ```text
-jams backend start --network local
+jams backend start
+jams backend start --network testnet
 ```
 
-It resolves the selected `[networks.local]` entry, discovers the backend
-binary, and replaces itself with the foreground process. Persistent deployment
-data must be mounted at the configured data directory; the production image
-uses `/var/lib/jamscript`.
+The first command selects the `local` profile when no CLI, environment, or
+`[deployment].default_network` selection exists. The CLI resolves the selected
+`[networks.<name>]` profile with the same rules used by `jams deploy` and
+`jams network show`, verifies any configured genesis pin against Node RPC, then
+passes only `--node-rpc` and `--formal-rpc` to the backend. Missing profiles
+fail closed. The CLI discovers the backend binary and replaces itself with the
+foreground process. Persistent deployment data must be mounted at the
+configured data directory; the production image uses `/var/lib/jamscript`.
+
+For the single-host Docker topology, publish the backend to host loopback by
+default (`JAMSCRIPT_BACKEND_HOST=127.0.0.1`). Set
+`JAMSCRIPT_BACKEND_CORS_ORIGINS` to the exact browser origin for a remote
+frontend; the Compose default is limited to localhost development origins.
 
 ## 12. Required release gates
 

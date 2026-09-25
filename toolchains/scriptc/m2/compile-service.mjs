@@ -36,12 +36,21 @@ await writeFile(profilePath, JSON.stringify({
   optimization: "dev",
   abi: {
     prefix: "jamscript_scriptc_",
-    init_symbol: "jamscript_scriptc_service_init",
+    // JamScript's runtime descriptor calls the adapter init symbol. Keep the
+    // ScriptC init under a private name so the adapter can install the native
+    // verifier callback before the first action executes.
+    init_symbol: "jamscript_scriptc_service_init_scriptc",
     sink_register_symbol: "jamscript_scriptc_service_set_panic_sink",
     collect_symbol: null,
     result_reset_symbol: null,
+    callback_register_symbol: "jamscript_scriptc_service_set_callback",
     localize_runtime: false,
   },
+  callbacks: [{
+    name: "jamscript_verify_matrix_cross_signing",
+    params: ["bytes", "bytes", "bytes"],
+    returns: "u32",
+  }],
   exports,
   determinism: spec.determinism,
 }, null, 2));
@@ -182,7 +191,7 @@ function isSchemaDeclaration(statement) {
 }
 
 function runtimeImports() {
-  return `import {\n  abort, applicationKeyV1, appliedResult, caughtResult, initializeStateView,\n  stateDeleteRaw, stateGetRaw, stateHasRaw, stateSetRaw,\n} from "./scriptc_runtime.js";\nimport {\n  jamU8FromNumber, jamU16FromNumber, jamU32FromNumber,\n  jamU8AddChecked, jamU8SubChecked, jamU8MulChecked, jamU8DivChecked, jamU8ModChecked, jamU8Compare,\n  jamU16AddChecked, jamU16SubChecked, jamU16MulChecked, jamU16DivChecked, jamU16ModChecked, jamU16Compare,\n  jamU32AddChecked, jamU32SubChecked, jamU32MulChecked, jamU32DivChecked, jamU32ModChecked, jamU32Compare,\n  jamU64Const, jamU64Identity, jamU64Or, jamU64AddChecked, jamU64SubChecked, jamU64MulChecked,\n  jamU64DivChecked, jamU64ModChecked, jamU64Compare, jamU64FromNumber,\n  jamU64FromU128, jamU8FromU64, jamU16FromU64, jamU32FromU64,\n  jamU128Const, jamU128Identity, jamU128Or, jamU128AddChecked, jamU128SubChecked, jamU128MulChecked,\n  jamU128DivChecked, jamU128ModChecked, jamU128Compare, jamU128FromNumber, jamU128FromU64,\n  jamU8FromU128, jamU16FromU128, jamU32FromU128, jamEncodeU64, jamEncodeU128,\n  jamDecodeU64, jamDecodeU128,\n} from "./jamscript_numeric_runtime.js";\nexport { abort };`;
+  return `import {\n  abort, applicationKeyV1, appliedResult, caughtResult, initializeStateView,\n  stateDeleteRaw, stateGetRaw, stateHasRaw, stateSetRaw, verifyMatrixCrossSigning,\n} from "./scriptc_runtime.js";\nimport {\n  jamU8FromNumber, jamU16FromNumber, jamU32FromNumber,\n  jamU8AddChecked, jamU8SubChecked, jamU8MulChecked, jamU8DivChecked, jamU8ModChecked, jamU8Compare,\n  jamU16AddChecked, jamU16SubChecked, jamU16MulChecked, jamU16DivChecked, jamU16ModChecked, jamU16Compare,\n  jamU32AddChecked, jamU32SubChecked, jamU32MulChecked, jamU32DivChecked, jamU32ModChecked, jamU32Compare,\n  jamU64Const, jamU64Identity, jamU64Or, jamU64AddChecked, jamU64SubChecked, jamU64MulChecked,\n  jamU64DivChecked, jamU64ModChecked, jamU64Compare, jamU64FromNumber,\n  jamU64FromU128, jamU8FromU64, jamU16FromU64, jamU32FromU64,\n  jamU128Const, jamU128Identity, jamU128Or, jamU128AddChecked, jamU128SubChecked, jamU128MulChecked,\n  jamU128DivChecked, jamU128ModChecked, jamU128Compare, jamU128FromNumber, jamU128FromU64,\n  jamU8FromU128, jamU16FromU128, jamU32FromU128, jamEncodeU64, jamEncodeU128,\n  jamDecodeU64, jamDecodeU128,\n} from "./jamscript_numeric_runtime.js";\nexport { abort };`;
 }
 
 function ownershipImports() {

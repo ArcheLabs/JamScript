@@ -12,8 +12,6 @@ export const MAX_ACTION_PAYLOAD_BYTES = 1_048_576;
 export const OWNERSHIP_VERSION_V1 = 1;
 export const MAX_OWNERSHIP_BYTES = 4096;
 export const OWNERSHIP_KEY_DOMAIN_V1 = new TextEncoder().encode("OWNERSHIP_ABSTRACTION_KEY_V1");
-export const CONTROL_CLAIM_NAMESPACE_V1 = new TextEncoder().encode("__jamscript/runtime/ownership/control/");
-export const CONTROL_CLAIM_BOOTSTRAP_NAMESPACE_V1 = new TextEncoder().encode("__jamscript/runtime/ownership/bootstrap-used/");
 
 export const OWNERSHIP_KIND = {
   ED25519_KEY: 0,
@@ -126,14 +124,6 @@ export function ownershipKey(ownership: Ownership): Uint8Array {
 
 export function ownershipNonceKey(ownership: Ownership): Uint8Array {
   return concat(byte(RUNTIME_KEY_CLASS_V1), byte(WALLET_AUTH_MODULE_V1), new TextEncoder().encode("__jamscript/runtime/ownership/nonces/"), ownershipKey(ownership));
-}
-
-export function controlClaimKey(subject: Ownership, controller: Ownership): Uint8Array {
-  return concat(byte(RUNTIME_KEY_CLASS_V1), byte(WALLET_AUTH_MODULE_V1), CONTROL_CLAIM_NAMESPACE_V1, ownershipKey(subject), ownershipKey(controller));
-}
-
-export function controlClaimBootstrapKey(subject: Ownership): Uint8Array {
-  return concat(byte(RUNTIME_KEY_CLASS_V1), byte(WALLET_AUTH_MODULE_V1), CONTROL_CLAIM_BOOTSTRAP_NAMESPACE_V1, ownershipKey(subject));
 }
 
 export function parseHex(value: string, expectedBytes?: number): Uint8Array {

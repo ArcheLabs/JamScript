@@ -21,8 +21,6 @@ struct Args {
     node_rpc: Option<String>,
     #[arg(long)]
     formal_rpc: Option<String>,
-    #[arg(long, default_value = "local")]
-    network: String,
     #[arg(long)]
     genesis_hash: Option<String>,
     #[arg(long = "cors-origin", action = clap::ArgAction::Append)]
@@ -31,13 +29,6 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    if args.network != "local" {
-        return Err(format!(
-            "unsupported backend network `{}`; only local is available",
-            args.network
-        )
-        .into());
-    }
     let bind = args
         .bind
         .or_else(|| env::var("JAMSCRIPT_BACKEND_BIND").ok())
@@ -135,6 +126,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_artifact_store(artifact_store)
         .with_database(database);
 
+    if let Ok(admin_token) = env::var("JAMSCRIPT_BACKEND_ADMIN_TOKEN") {
+        if !admin_token.is_empty() {
+            handler = handler.with_admin_token(admin_token);
+        }
+    }
+
     if let Some(network) = network {
         handler = handler.with_network(network);
     }
@@ -180,4 +177,41 @@ fn hash_hex(bytes: &[u8]) -> String {
         value.push_str(&format!("{byte:02x}"));
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn backend_accepts_concrete_endpoints_without_a_network_name_argument() {
+        let first = Args::try_parse_from([
+            "jamscript-service-backend",
+            "--node-rpc",
+            "http://127.0.0.1:9944",
+            "--formal-rpc",
+            "http://127.0.0.1:8080",
+        ])
+        .unwrap();
+        assert_eq!(first.node_rpc.as_deref(), Some("http://127.0.0.1:9944"));
+        assert_eq!(first.formal_rpc.as_deref(), Some("http://127.0.0.1:8080"));
+
+        let second = Args::try_parse_from([
+            "jamscript-service-backend",
+            "--node-rpc",
+            "http://10.0.0.2:9944",
+            "--formal-rpc",
+            "http://10.0.0.3:8080",
+            "--genesis-hash",
+            &format!("0x{}", "bb".repeat(32)),
+        ])
+        .unwrap();
+        assert_eq!(second.node_rpc.as_deref(), Some("http://10.0.0.2:9944"));
+        assert_eq!(second.formal_rpc.as_deref(), Some("http://10.0.0.3:8080"));
+
+        let named_network =
+            Args::try_parse_from(["jamscript-service-backend", "--network", "testnet"]);
+        assert!(named_network.is_err());
+    }
 }

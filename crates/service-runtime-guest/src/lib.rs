@@ -18,6 +18,38 @@ unsafe extern "C" {
     fn minijam_network_domain(output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
 }
 
+/// Deterministic static-library entrypoint used by the ScriptC Matrix
+/// verifier builtin. It only consumes bytes supplied by the guest.
+///
+/// # Safety
+///
+/// The caller must provide readable, non-null buffers for `subject_ptr`,
+/// `controller_ptr`, and `proof_ptr`. The subject and controller buffers must
+/// each contain at least 32 bytes, and the proof buffer must contain
+/// `proof_len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn jamscript_verify_matrix_cross_signing(
+    subject_ptr: *const u8,
+    subject_len: usize,
+    controller_ptr: *const u8,
+    controller_len: usize,
+    proof_ptr: *const u8,
+    proof_len: usize,
+) -> u32 {
+    if subject_ptr.is_null()
+        || controller_ptr.is_null()
+        || proof_ptr.is_null()
+        || subject_len != 32
+        || controller_len != 32
+    {
+        return 0;
+    }
+    let subject = core::slice::from_raw_parts(subject_ptr, subject_len);
+    let controller = core::slice::from_raw_parts(controller_ptr, controller_len);
+    let proof = core::slice::from_raw_parts(proof_ptr, proof_len);
+    jamscript_crypto::verify_matrix_cross_signing(subject, controller, proof) as u32
+}
+
 pub fn network_domain() -> Result<[u8; 32], GuestError> {
     #[cfg(target_env = "polkavm")]
     {

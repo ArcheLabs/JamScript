@@ -167,30 +167,68 @@ pub fn validate_networks(
 pub fn resolve_network(
     networks: Option<&NetworkTable>,
     deployment: Option<&DeploymentConfig>,
-    mut overrides: NetworkOverrides,
+    overrides: NetworkOverrides,
 ) -> Result<ResolvedNetwork, DeploymentError> {
-    validate_networks(networks, deployment)?;
+    resolve_network_with_default_profile(networks, deployment, overrides, None)
+}
+
+/// Resolve a named network using the shared CLI/environment/manifest
+/// precedence, with an optional final profile fallback. The fallback is only
+/// applied when neither an explicit/environment-selected network nor
+/// `[deployment].default_network` is configured.
+pub fn resolve_network_with_default_profile(
+    networks: Option<&NetworkTable>,
+    deployment: Option<&DeploymentConfig>,
+    overrides: NetworkOverrides,
+    default_profile: Option<&str>,
+) -> Result<ResolvedNetwork, DeploymentError> {
+    let environment = NetworkOverrides {
+        network: std::env::var("JAMSCRIPT_NETWORK").ok(),
+        kind: std::env::var("JAMSCRIPT_NETWORK_KIND").ok(),
+        deployment_rpc: std::env::var("JAMSCRIPT_DEPLOYMENT_RPC")
+            .ok()
+            .or_else(|| std::env::var("JAMSCRIPT_FORMAL_RPC").ok()),
+        node_rpc: std::env::var("JAMSCRIPT_NODE_RPC").ok(),
+        backend_rpc: std::env::var("JAMSCRIPT_BACKEND_RPC").ok(),
+    };
+    resolve_network_with_environment(
+        networks,
+        deployment,
+        overrides,
+        environment,
+        default_profile,
+    )
+}
+
+fn resolve_network_with_environment(
+    networks: Option<&NetworkTable>,
+    deployment: Option<&DeploymentConfig>,
+    mut overrides: NetworkOverrides,
+    environment: NetworkOverrides,
+    default_profile: Option<&str>,
+) -> Result<ResolvedNetwork, DeploymentError> {
     let table = networks.cloned().unwrap_or_default();
     if overrides.network.is_none() {
-        overrides.network = std::env::var("JAMSCRIPT_NETWORK").ok();
+        overrides.network = environment.network;
     }
     if overrides.deployment_rpc.is_none() {
-        overrides.deployment_rpc = std::env::var("JAMSCRIPT_DEPLOYMENT_RPC").ok();
+        overrides.deployment_rpc = environment.deployment_rpc;
     }
     if overrides.node_rpc.is_none() {
-        overrides.node_rpc = std::env::var("JAMSCRIPT_NODE_RPC").ok();
+        overrides.node_rpc = environment.node_rpc;
     }
     if overrides.backend_rpc.is_none() {
-        overrides.backend_rpc = std::env::var("JAMSCRIPT_BACKEND_RPC").ok();
+        overrides.backend_rpc = environment.backend_rpc;
     }
     if overrides.kind.is_none() {
-        overrides.kind = std::env::var("JAMSCRIPT_NETWORK_KIND").ok();
+        overrides.kind = environment.kind;
     }
 
     let selected_name = overrides
         .network
         .clone()
-        .or_else(|| deployment.and_then(|value| value.default_network.clone()));
+        .or_else(|| deployment.and_then(|value| value.default_network.clone()))
+        .or_else(|| default_profile.map(str::to_owned));
     let (name, base) = match selected_name {
         Some(name) => {
             let base = table.get(&name).ok_or_else(|| {
@@ -203,6 +241,7 @@ pub fn resolve_network(
         }
         None => (None, None),
     };
+    validate_networks(networks, deployment)?;
     let raw_kind = overrides
         .kind
         .as_deref()
@@ -1485,6 +1524,110 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected.deployment_rpc, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn default_profile_is_last_and_missing_fallback_fails_closed() {
+        let local = NetworkConfig {
+            kind: "minijam".into(),
+            deployment_rpc: Some("http://127.0.0.1:8080".into()),
+            node_rpc: Some("http://127.0.0.1:9944".into()),
+            backend_rpc: Some("http://127.0.0.1:8090".into()),
+            genesis_hash: None,
+        };
+        let table = BTreeMap::from([("local".into(), local)]);
+        let resolved = resolve_network_with_environment(
+            Some(&table),
+            None,
+            NetworkOverrides::default(),
+            NetworkOverrides::default(),
+            Some("local"),
+        )
+        .unwrap();
+        assert_eq!(resolved.display_name(), "local");
+        assert_eq!(resolved.node_rpc.as_deref(), Some("http://127.0.0.1:9944"));
+
+        let error = resolve_network_with_environment(
+            None,
+            None,
+            NetworkOverrides::default(),
+            NetworkOverrides::default(),
+            Some("local"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NetworkNotFound);
+        assert!(error.message.contains("network 'local' is not configured"));
+    }
+
+    #[test]
+    fn cli_environment_manifest_and_fallback_precedence_is_shared() {
+        let config = |deployment_rpc: &str, node_rpc: &str| NetworkConfig {
+            kind: "minijam".into(),
+            deployment_rpc: Some(deployment_rpc.into()),
+            node_rpc: Some(node_rpc.into()),
+            backend_rpc: None,
+            genesis_hash: None,
+        };
+        let table = BTreeMap::from([
+            (
+                "local".into(),
+                config("http://local-formal", "http://local-node"),
+            ),
+            (
+                "testnet".into(),
+                config("http://test-formal", "http://test-node"),
+            ),
+        ]);
+        let deployment = DeploymentConfig {
+            default_network: Some("testnet".into()),
+        };
+        let environment = NetworkOverrides {
+            network: Some("local".into()),
+            deployment_rpc: Some("http://env-formal".into()),
+            node_rpc: Some("http://env-node".into()),
+            ..NetworkOverrides::default()
+        };
+        let cli_selected = resolve_network_with_environment(
+            Some(&table),
+            Some(&deployment),
+            NetworkOverrides {
+                network: Some("testnet".into()),
+                deployment_rpc: Some("http://cli-formal".into()),
+                node_rpc: Some("http://cli-node".into()),
+                ..NetworkOverrides::default()
+            },
+            environment.clone(),
+            Some("local"),
+        )
+        .unwrap();
+        assert_eq!(cli_selected.display_name(), "testnet");
+        assert_eq!(cli_selected.deployment_rpc, "http://cli-formal");
+        assert_eq!(cli_selected.node_rpc.as_deref(), Some("http://cli-node"));
+
+        let environment_selected = resolve_network_with_environment(
+            Some(&table),
+            Some(&deployment),
+            NetworkOverrides::default(),
+            environment,
+            Some("local"),
+        )
+        .unwrap();
+        assert_eq!(environment_selected.display_name(), "local");
+        assert_eq!(environment_selected.deployment_rpc, "http://env-formal");
+        assert_eq!(
+            environment_selected.node_rpc.as_deref(),
+            Some("http://env-node")
+        );
+
+        let manifest_selected = resolve_network_with_environment(
+            Some(&table),
+            Some(&deployment),
+            NetworkOverrides::default(),
+            NetworkOverrides::default(),
+            Some("local"),
+        )
+        .unwrap();
+        assert_eq!(manifest_selected.display_name(), "testnet");
     }
 
     #[test]

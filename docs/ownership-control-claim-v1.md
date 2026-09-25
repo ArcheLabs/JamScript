@@ -1,7 +1,28 @@
-# ControlClaim v1
+# Ownership controller authorization compatibility note
 
-`ControlClaim(subject, controller)` is a network-scoped delegation state. It means that the controller may act as the subject when an action explicitly carries `act_as=subject`.
+This document records the compatibility boundary for the former
+`ControlClaim(subject, controller)` design.
 
-The controller is itself an Ownership. Claims are explicit, revocable, and non-transitive: `A → B` and `B → C` never imply `A → C`. `addController` and `revokeController` require the effective owner to equal the subject. Revocation is an on-chain state transition and is not inferred from external key or server state.
+The `SignedActionV2` envelope still carries `controller` and the optional
+`actAs` field so existing wire encodings remain readable. A non-null `actAs`
+value is rejected as unsupported legacy delegation by the protocol/runtime;
+it is never resolved through reserved ControlClaim state. These fields do
+not create a network-scoped controller registry. In particular, a JamScript
+consumer must not infer authorization from an external Ownership Control
+service.
 
-`SignedActionV2` uses the controller for cryptographic authorization. Without `act_as`, the effective owner is the controller; with `act_as`, an active ControlClaim is required. Nonces follow the effective owner, so controller rotation does not move the owner nonce lane.
+For Locus:
+
+- `subject` is the stable asset identity;
+- `ctx.controller` is the cryptographically authenticated signer;
+- controller grants and Matrix bootstrap tombstones are Locus-local state;
+- the Locus SDK injects `subject` into business action payloads; and
+- Locus does not submit `actAs`.
+
+The Matrix `MatrixControlClaimProofV1` name is retained as a wire-compatible
+codec identifier. Its contents are cryptographic M→S→D evidence only; the
+grant created after verification is application state.
+
+Generic JamScript services may define their own authorization state and
+protocol. No service receives implicit access to a network-wide ControlClaim
+state root.

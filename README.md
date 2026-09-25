@@ -61,6 +61,15 @@ Run the local backend when the application needs it:
 jams backend start --network local
 ```
 
+For a configured testnet profile, select it at the CLI layer:
+
+```sh
+jams backend start --network testnet
+```
+
+The CLI resolves the named profile and passes concrete Node and Formal RPC
+endpoints to the backend. The backend process itself is network-name agnostic.
+
 ## ✨ What JamScript handles
 
 - deterministic JamScript → PVM builds

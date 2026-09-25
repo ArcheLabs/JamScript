@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   JamScriptClient,
   RpcError,
+  TransactionWaitTimeoutError,
   actionSelector,
   decodeSignedActionV1,
   toHex,
@@ -297,4 +298,34 @@ test("waitForAction distinguishes an imported failed application receipt", async
   assert.equal(result.transactionStatus, "imported");
   assert.equal(result.actionReceipt.status, "failed");
   assert.equal(result.actionReceipt.errorCode, 2);
+});
+
+test("waitForTransaction timeout carries the last queued status without calling it failed", async () => {
+  let reads = 0;
+  const transport = {
+    async call(method) {
+      if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method");
+      reads += 1;
+      return {
+        transactionId: "0x" + "77".repeat(32),
+        status: "queued",
+        packageHash: null,
+        itemIndex: null,
+        actionIndex: null,
+        executionReceipt: null,
+        error: null,
+      };
+    },
+  };
+  const client = new JamScriptClient(deployment, transport);
+  await assert.rejects(
+    client.waitForTransaction("0x" + "77".repeat(32), { intervalMs: 0, timeoutMs: 0 }),
+    (error) => {
+      assert.ok(error instanceof TransactionWaitTimeoutError);
+      assert.equal(error.lastStatus?.status, "queued");
+      assert.equal(error.transactionId, "0x" + "77".repeat(32));
+      return true;
+    },
+  );
+  assert.equal(reads, 1);
 });
