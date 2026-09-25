@@ -1,11 +1,14 @@
 name: MiniJAM Network E2E
 
 on:
+  push:
+    branches:
+      - codex/network-boundary-refactor
   workflow_dispatch:
 
-# This is a downstream compatibility check. It is deliberately manual so that
-# the JamScript build and release gates never require a MiniJAM or Jambda
-# checkout.
+# This downstream compatibility check stays separate from core CI and release
+# jobs. Run it automatically for the network-boundary candidate branch and
+# manually for other revisions; JamScript builds do not depend on MiniJAM.
 
 jobs:
   network-e2e:
