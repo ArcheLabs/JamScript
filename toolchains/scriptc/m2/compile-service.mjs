@@ -36,12 +36,21 @@ await writeFile(profilePath, JSON.stringify({
   optimization: "dev",
   abi: {
     prefix: "jamscript_scriptc_",
-    init_symbol: "jamscript_scriptc_service_init",
+    // JamScript's runtime descriptor calls the adapter init symbol. Keep the
+    // ScriptC init under a private name so the adapter can install the native
+    // verifier callback before the first action executes.
+    init_symbol: "jamscript_scriptc_service_init_scriptc",
     sink_register_symbol: "jamscript_scriptc_service_set_panic_sink",
     collect_symbol: null,
     result_reset_symbol: null,
+    callback_register_symbol: "jamscript_scriptc_service_set_callback",
     localize_runtime: false,
   },
+  callbacks: [{
+    name: "jamscript_verify_matrix_cross_signing",
+    params: ["bytes", "bytes", "bytes"],
+    returns: "u32",
+  }],
   exports,
   determinism: spec.determinism,
 }, null, 2));

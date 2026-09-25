@@ -181,10 +181,7 @@ impl ScriptcCompiler {
             );
         }
         let adapter_c = output_dir.join("scriptc_service_adapter.c");
-        fs::write(
-            &adapter_c,
-            "/* ScriptC M2 exports its canonical bytes ABI directly. */\n",
-        )?;
+        fs::write(&adapter_c, matrix_verifier_callback_adapter_c())?;
         let generated_actions = ir
             .actions
             .iter()
@@ -227,6 +224,57 @@ impl ScriptcCompiler {
             metadata,
         })
     }
+}
+
+fn matrix_verifier_callback_adapter_c() -> &'static str {
+    // ScriptC library mode exposes manifest-declared calls as callback slots,
+    // not direct native imports. Bridge that supported ABI to the statically
+    // linked Rust verifier and register it whenever the service runtime calls
+    // the normal ScriptC initializer.
+    r#"#include <stddef.h>
+#include <stdint.h>
+
+extern void jamscript_scriptc_service_init_scriptc(void);
+extern int32_t jamscript_scriptc_service_set_callback(
+    const char *name,
+    void (*function)(void),
+    void *context
+);
+extern uint32_t jamscript_verify_matrix_cross_signing(
+    const uint8_t *subject,
+    size_t subject_len,
+    const uint8_t *controller,
+    size_t controller_len,
+    const uint8_t *proof,
+    size_t proof_len
+);
+
+static uint32_t jamscript_scriptc_matrix_verifier_callback(
+    void *context,
+    const uint8_t *subject,
+    size_t subject_len,
+    const uint8_t *controller,
+    size_t controller_len,
+    const uint8_t *proof,
+    size_t proof_len
+) {
+    (void)context;
+    return jamscript_verify_matrix_cross_signing(
+        subject, subject_len, controller, controller_len, proof, proof_len
+    );
+}
+
+void jamscript_scriptc_service_init(void) {
+    jamscript_scriptc_service_init_scriptc();
+    if (jamscript_scriptc_service_set_callback(
+            "jamscript_verify_matrix_cross_signing",
+            (void (*)(void))jamscript_scriptc_matrix_verifier_callback,
+            NULL
+        ) != 0) {
+        __builtin_trap();
+    }
+}
+"#
 }
 
 fn command_output(command: &Path, args: &[&str], cwd: &Path) -> Result<String> {
@@ -345,4 +393,24 @@ fn verify_surface_manifest(toolchain_root: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matrix_verifier_callback_adapter_c;
+
+    #[test]
+    fn matrix_verifier_adapter_matches_the_scriptc_bytes_callback_abi() {
+        let adapter = matrix_verifier_callback_adapter_c();
+        assert!(adapter.contains(
+            "extern uint32_t jamscript_verify_matrix_cross_signing(\n    const uint8_t *subject,\n    size_t subject_len,\n    const uint8_t *controller,\n    size_t controller_len,\n    const uint8_t *proof,\n    size_t proof_len\n);"
+        ));
+        assert!(adapter.contains(
+            "void *context,\n    const uint8_t *subject,\n    size_t subject_len,\n    const uint8_t *controller,\n    size_t controller_len,\n    const uint8_t *proof,\n    size_t proof_len"
+        ));
+        assert!(adapter.contains(
+            "return jamscript_verify_matrix_cross_signing(\n        subject, subject_len, controller, controller_len, proof, proof_len\n    );"
+        ));
+        assert!(adapter.contains("jamscript_scriptc_service_set_callback("));
+    }
 }
