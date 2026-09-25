@@ -23,11 +23,11 @@ adapter_c="${RUN_ROOT}/dist/scriptc/scriptc_service_adapter.c"
 service_elf="${RUN_ROOT}/dist/service.elf"
 service_pvm="${RUN_ROOT}/dist/service.pvm"
 
-rg -Fq 'uint32_t (*)(void *, const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t)' "${generated_c}"
-rg -Fq 'scr_library_cb_require(0, "scriptc: library callback' "${generated_c}"
-rg -Fq 'extern uint32_t jamscript_verify_matrix_cross_signing(' "${adapter_c}"
-rg -Fq 'controller_len' "${adapter_c}"
-! rg -Fq 'scr_undef_global_read' "${generated_c}"
+grep -Fq -- 'uint32_t (*)(void *, const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t)' "${generated_c}"
+grep -Fq -- 'scr_library_cb_require(0, "scriptc: library callback' "${generated_c}"
+grep -Fq -- 'extern uint32_t jamscript_verify_matrix_cross_signing(' "${adapter_c}"
+grep -Fq -- 'controller_len' "${adapter_c}"
+! grep -Fq -- 'scr_undef_global_read' "${generated_c}"
 
 defined_count="$(nm --defined-only "${service_elf}" | awk '$3 == "jamscript_verify_matrix_cross_signing" { count++ } END { print count + 0 }')"
 [[ "${defined_count}" == "1" ]] || {
