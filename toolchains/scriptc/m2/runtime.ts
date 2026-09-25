@@ -23,23 +23,19 @@ export type JamOwnership = {
   public: Uint8Array;
 };
 
-declare function jamscript_verify_matrix_cross_signing(
-  subject: Uint8Array,
-  controller: Uint8Array,
-  proof: Uint8Array,
+declare function jamscript_verify_ed25519(
+  publicKey: Uint8Array,
+  message: Uint8Array,
+  signature: Uint8Array,
 ): number;
 
-export function verifyMatrixCrossSigning(
-  subject: JamOwnership,
-  controller: JamOwnership,
-  proof: Uint8Array,
+/** Verify a generic Ed25519 signature with deterministic guest crypto. */
+export function verifyEd25519(
+  publicKey: Uint8Array,
+  message: Uint8Array,
+  signature: Uint8Array,
 ): boolean {
-  if (subject.version !== 1 || controller.version !== 1
-      || subject.kind !== 0 || controller.kind !== 0
-      || subject.public.length !== 32 || controller.public.length !== 32) {
-    return false;
-  }
-  return jamscript_verify_matrix_cross_signing(subject.public, controller.public, proof) === 1;
+  return jamscript_verify_ed25519(publicKey, message, signature) === 1;
 }
 
 const OWNERSHIP_KEY_DOMAIN = new TextEncoder().encode("OWNERSHIP_ABSTRACTION_KEY_V1");

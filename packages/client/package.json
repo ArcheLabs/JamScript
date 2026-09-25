@@ -10,10 +10,27 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./ownership": {
+      "types": "./dist/ownership/index.d.ts",
+      "import": "./dist/ownership/index.js"
+    },
+    "./ownership/matrix": {
+      "types": "./dist/ownership/matrix/index.d.ts",
+      "import": "./dist/ownership/matrix/index.js"
+    },
+    "./ownership/matrix/service": {
+      "types": "./dist/ownership/matrix/service.d.ts",
+      "import": "./dist/ownership/matrix/service.js"
+    },
+    "./ownership/matrix/proof-runtime": {
+      "types": "./dist/ownership/matrix/proof-runtime.d.ts",
+      "import": "./dist/ownership/matrix/proof-runtime.js"
     }
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],

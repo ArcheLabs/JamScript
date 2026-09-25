@@ -5,6 +5,13 @@ on:
   pull_request:
 
 jobs:
+  ownership-architecture-boundary:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: ./scripts/check-ownership-boundary.sh
+
   installer:
     strategy:
       fail-fast: false
@@ -115,6 +122,40 @@ jobs:
         run: npm pack --dry-run
       - working-directory: packages/client
         run: npm publish --dry-run --access public --tag next
+
+  ownership-matrix-pvm:
+    name: Ownership Matrix adapter PVM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: toolchains/scriptc/NODE_VERSION
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-02
+          components: rust-src
+      - name: Install host build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang-20 lld-20 libclang-20-dev llvm-20-dev
+      - name: Install locked ScriptC and Ownership SDK dependencies
+        run: |
+          npm --prefix toolchains/scriptc ci --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/client ci --ignore-scripts --no-audit --no-fund
+      - name: Build and execute Matrix Ownership adapter inside PVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/release/setup-host-build-env-linux.sh "${RUNNER_TEMP}/host.env"
+          set -a
+          source "${RUNNER_TEMP}/host.env"
+          set +a
+          cargo build --locked --release --bin jams
+          JAMSCRIPT_DEV_TOOLCHAIN=1 \
+            JAMSCRIPT_CLANG="${JAMSCRIPT_CLANG}" \
+            JAMSCRIPT_LLVM_AR="${JAMSCRIPT_LLVM_AR}" \
+            JAMSCRIPT_TEST_CLI="${GITHUB_WORKSPACE}/target/release/jams" \
+            ./scripts/test-scriptc-matrix-ownership-pvm.sh
 
   native-producer-smoke:
     name: Native producer smoke (${{ matrix.platform }})

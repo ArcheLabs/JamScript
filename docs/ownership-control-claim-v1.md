@@ -20,8 +20,11 @@ For Locus:
 - Locus does not submit `actAs`.
 
 The Matrix `MatrixControlClaimProofV1` name is retained as a wire-compatible
-codec identifier. Its contents are cryptographic M→S→D evidence only; the
-grant created after verification is application state.
+codec identifier. JamScript Core exposes provider-neutral deterministic
+cryptographic primitives. Ownership adapters are SDK/standard-library
+components built on those primitives; Matrix M→S→D verification belongs to the
+Matrix Ownership adapter, not the runtime. The grant created after verification
+remains application state.
 
 Generic JamScript services may define their own authorization state and
 protocol. No service receives implicit access to a network-wide ControlClaim

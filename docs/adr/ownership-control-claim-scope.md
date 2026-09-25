@@ -16,8 +16,9 @@ That boundary is not part of the JamScript architecture.
 ## Decision
 
 JamScript authenticates the cryptographic controller in `SignedActionV2` and
-exposes deterministic cryptographic primitives, including the Matrix
-M→S→D proof verifier. JamScript does not maintain a network-wide controller
+exposes provider-neutral deterministic cryptographic primitives. Matrix M→S→D
+proof verification belongs to the Ownership Matrix adapter, built on generic
+Ed25519 verification. JamScript does not maintain a network-wide controller
 registry and does not require an Ownership Control system service.
 
 Application services own their authorization policy and state. Locus keeps

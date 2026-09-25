@@ -47,4 +47,4 @@ echo "CONTRIBUTOR_GUEST_COLD_BUILD=PASS"
 test -s "${RUN_ROOT}/dist-warm/service.blob"
 echo "CONTRIBUTOR_GUEST_WARM_BUILD=PASS"
 
-bash "${JAMSCRIPT_ROOT}/scripts/test-scriptc-matrix-ffi.sh"
+bash "${JAMSCRIPT_ROOT}/scripts/test-scriptc-ed25519-ffi.sh"

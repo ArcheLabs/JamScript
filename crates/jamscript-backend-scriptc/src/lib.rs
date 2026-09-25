@@ -181,7 +181,7 @@ impl ScriptcCompiler {
             );
         }
         let adapter_c = output_dir.join("scriptc_service_adapter.c");
-        fs::write(&adapter_c, matrix_verifier_callback_adapter_c())?;
+        fs::write(&adapter_c, ed25519_verifier_callback_adapter_c())?;
         let generated_actions = ir
             .actions
             .iter()
@@ -226,11 +226,10 @@ impl ScriptcCompiler {
     }
 }
 
-fn matrix_verifier_callback_adapter_c() -> &'static str {
-    // ScriptC library mode exposes manifest-declared calls as callback slots,
-    // not direct native imports. Bridge that supported ABI to the statically
-    // linked Rust verifier and register it whenever the service runtime calls
-    // the normal ScriptC initializer.
+fn ed25519_verifier_callback_adapter_c() -> &'static str {
+    // ScriptC library mode exposes manifest-declared calls as callback slots.
+    // Bridge the generic Ed25519 primitive to the statically linked guest
+    // crypto implementation and register it before actions execute.
     r#"#include <stddef.h>
 #include <stdint.h>
 
@@ -240,35 +239,35 @@ extern int32_t jamscript_scriptc_service_set_callback(
     void (*function)(void),
     void *context
 );
-extern uint32_t jamscript_verify_matrix_cross_signing(
-    const uint8_t *subject,
-    size_t subject_len,
-    const uint8_t *controller,
-    size_t controller_len,
-    const uint8_t *proof,
-    size_t proof_len
+extern uint32_t jamscript_verify_ed25519(
+    const uint8_t *public_key,
+    size_t public_key_len,
+    const uint8_t *message,
+    size_t message_len,
+    const uint8_t *signature,
+    size_t signature_len
 );
 
-static uint32_t jamscript_scriptc_matrix_verifier_callback(
+static uint32_t jamscript_scriptc_ed25519_verifier_callback(
     void *context,
-    const uint8_t *subject,
-    size_t subject_len,
-    const uint8_t *controller,
-    size_t controller_len,
-    const uint8_t *proof,
-    size_t proof_len
+    const uint8_t *public_key,
+    size_t public_key_len,
+    const uint8_t *message,
+    size_t message_len,
+    const uint8_t *signature,
+    size_t signature_len
 ) {
     (void)context;
-    return jamscript_verify_matrix_cross_signing(
-        subject, subject_len, controller, controller_len, proof, proof_len
+    return jamscript_verify_ed25519(
+        public_key, public_key_len, message, message_len, signature, signature_len
     );
 }
 
 void jamscript_scriptc_service_init(void) {
     jamscript_scriptc_service_init_scriptc();
     if (jamscript_scriptc_service_set_callback(
-            "jamscript_verify_matrix_cross_signing",
-            (void (*)(void))jamscript_scriptc_matrix_verifier_callback,
+            "jamscript_verify_ed25519",
+            (void (*)(void))jamscript_scriptc_ed25519_verifier_callback,
             NULL
         ) != 0) {
         __builtin_trap();
@@ -397,19 +396,19 @@ fn verify_surface_manifest(toolchain_root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::matrix_verifier_callback_adapter_c;
+    use super::ed25519_verifier_callback_adapter_c;
 
     #[test]
-    fn matrix_verifier_adapter_matches_the_scriptc_bytes_callback_abi() {
-        let adapter = matrix_verifier_callback_adapter_c();
+    fn ed25519_adapter_matches_the_scriptc_bytes_callback_abi() {
+        let adapter = ed25519_verifier_callback_adapter_c();
         assert!(adapter.contains(
-            "extern uint32_t jamscript_verify_matrix_cross_signing(\n    const uint8_t *subject,\n    size_t subject_len,\n    const uint8_t *controller,\n    size_t controller_len,\n    const uint8_t *proof,\n    size_t proof_len\n);"
+            "extern uint32_t jamscript_verify_ed25519(\n    const uint8_t *public_key,\n    size_t public_key_len,\n    const uint8_t *message,\n    size_t message_len,\n    const uint8_t *signature,\n    size_t signature_len\n);"
         ));
         assert!(adapter.contains(
-            "void *context,\n    const uint8_t *subject,\n    size_t subject_len,\n    const uint8_t *controller,\n    size_t controller_len,\n    const uint8_t *proof,\n    size_t proof_len"
+            "void *context,\n    const uint8_t *public_key,\n    size_t public_key_len,\n    const uint8_t *message,\n    size_t message_len,\n    const uint8_t *signature,\n    size_t signature_len"
         ));
         assert!(adapter.contains(
-            "return jamscript_verify_matrix_cross_signing(\n        subject, subject_len, controller, controller_len, proof, proof_len\n    );"
+            "return jamscript_verify_ed25519(\n        public_key, public_key_len, message, message_len, signature, signature_len\n    );"
         ));
         assert!(adapter.contains("jamscript_scriptc_service_set_callback("));
     }
