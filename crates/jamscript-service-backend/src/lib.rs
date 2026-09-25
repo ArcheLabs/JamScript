@@ -1308,6 +1308,7 @@ pub struct MiniJamNetworkGateway<T> {
 const DEFAULT_BATCH_MAX_ACTIONS: usize = 4;
 const DEFAULT_BATCH_FLUSH_MS: u64 = 50;
 const FUTURE_NONCE_RECHECK_DELAY: Duration = Duration::from_secs(1);
+const COORDINATOR_RECONCILE_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 struct PendingAction {
@@ -1316,7 +1317,9 @@ struct PendingAction {
     sender: Option<[u8; 32]>,
     nonce: Option<u64>,
     nonce_storage_key: Option<Vec<u8>>,
+    valid_until: Option<u64>,
     arrival_sequence: u64,
+    enqueued_at: Instant,
     params: Value,
     extrinsics: Vec<String>,
 }
@@ -1338,6 +1341,35 @@ struct InFlightBatch {
     predicted_output: Option<RuntimeRefineOutputV1>,
     materialized: bool,
     diagnostics_emitted: bool,
+    created_at: Instant,
+    last_status: Option<String>,
+}
+
+#[derive(Clone)]
+struct InFlightBatchSnapshot {
+    batch_id: String,
+    service_id: u32,
+    package_hash: Option<StateRoot>,
+    logical_transaction_ids: Vec<String>,
+    materialized: bool,
+    age: Duration,
+}
+
+#[derive(Clone)]
+struct QueuedTransactionSnapshot {
+    transaction_id: String,
+    service_id: u32,
+    sender: Option<[u8; 32]>,
+    nonce: Option<u64>,
+    valid_until: Option<u64>,
+    arrival_sequence: u64,
+    age: Duration,
+}
+
+#[derive(Default)]
+struct BatchSelection {
+    selected: Vec<usize>,
+    stale: Vec<usize>,
 }
 
 #[derive(Default)]
@@ -1371,8 +1403,8 @@ fn select_canonical_indices(
     pending: &[PendingAction],
     expected_nonces: &BTreeMap<[u8; 32], u64>,
     max_actions: usize,
-) -> Vec<usize> {
-    let mut selected = Vec::new();
+) -> BatchSelection {
+    let mut selection = BatchSelection::default();
     let mut remaining = (0..pending.len()).collect::<BTreeSet<_>>();
     let mut tentative = expected_nonces.clone();
     let mut admission_order = (0..pending.len()).collect::<Vec<_>>();
@@ -1388,28 +1420,34 @@ fn select_canonical_indices(
             let eligible = match (item.sender, item.nonce) {
                 (Some(sender), Some(nonce)) => {
                     let expected = tentative.get(&sender).copied().unwrap_or_default();
-                    if nonce > expected {
-                        false
-                    } else {
-                        if nonce == expected {
-                            tentative.insert(sender, expected.saturating_add(1));
+                    match nonce.cmp(&expected) {
+                        std::cmp::Ordering::Less => {
+                            remaining.remove(&index);
+                            selection.stale.push(index);
+                            progress = true;
+                            continue;
                         }
-                        true
+                        std::cmp::Ordering::Equal => {
+                            tentative.insert(sender, expected.saturating_add(1));
+                            true
+                        }
+                        std::cmp::Ordering::Greater => false,
                     }
                 }
-                _ => true,
+                (None, None) => true,
+                _ => false,
             };
             if eligible {
                 remaining.remove(&index);
-                selected.push(index);
+                selection.selected.push(index);
                 progress = true;
-                if selected.len() == max_actions {
-                    return selected;
+                if selection.selected.len() == max_actions {
+                    return selection;
                 }
             }
         }
         if !progress {
-            return selected;
+            return selection;
         }
     }
 }
@@ -1445,7 +1483,7 @@ impl TransactionCoordinator {
         id_input.extend_from_slice(&current.to_le_bytes());
         id_input.extend_from_slice(&action);
         let logical_id = hash_hex(&service_runtime_core::blake2_256(&id_input));
-        let (sender, nonce, nonce_storage_key) =
+        let (sender, nonce, nonce_storage_key, valid_until) =
             if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v1(&action) {
                 if signed.public_key.len() == 32 {
                     let mut sender = [0u8; 32];
@@ -1454,17 +1492,23 @@ impl TransactionCoordinator {
                         Some(sender),
                         Some(signed.nonce),
                         Some(jamscript_runtime_core::nonce_key(&sender)),
+                        Some(signed.valid_until),
                     )
                 } else {
-                    (None, None, None)
+                    (None, None, None, Some(signed.valid_until))
                 }
             } else if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v2(&action) {
                 let owner = signed.act_as.as_ref().unwrap_or(&signed.controller);
                 let sender = owner.key().ok();
                 let nonce_key = jamscript_runtime_core::ownership_nonce_key(owner).ok();
-                (sender, Some(signed.nonce), nonce_key)
+                (
+                    sender,
+                    Some(signed.nonce),
+                    nonce_key,
+                    Some(signed.valid_until),
+                )
             } else {
-                (None, None, None)
+                (None, None, None, None)
             };
         let arrival_sequence = state.next_arrival_sequence;
         state.next_arrival_sequence = state.next_arrival_sequence.saturating_add(1);
@@ -1499,7 +1543,9 @@ impl TransactionCoordinator {
                 sender,
                 nonce,
                 nonce_storage_key,
+                valid_until,
                 arrival_sequence,
+                enqueued_at: Instant::now(),
                 params,
                 extrinsics,
             });
@@ -1508,6 +1554,8 @@ impl TransactionCoordinator {
             .entry(service_id)
             .or_insert_with(|| Instant::now() + self.flush_delay);
         self.wake.notify_all();
+        drop(state);
+        eprintln!("TX_ENQUEUED service_id={service_id} transaction_id={logical_id} arrival_sequence={arrival_sequence}");
         Ok(logical_id)
     }
 
@@ -1538,6 +1586,79 @@ impl TransactionCoordinator {
             .collect()
     }
 
+    fn in_flight_batches(&self) -> Vec<InFlightBatchSnapshot> {
+        self.state
+            .lock()
+            .ok()
+            .map(|state| {
+                state
+                    .in_flight
+                    .iter()
+                    .filter_map(|(service_id, batch_id)| {
+                        let batch = state.batches.get(batch_id)?;
+                        Some(InFlightBatchSnapshot {
+                            batch_id: batch_id.clone(),
+                            service_id: *service_id,
+                            package_hash: batch.package_hash,
+                            logical_transaction_ids: batch.logical_transaction_ids.clone(),
+                            materialized: batch.materialized,
+                            age: batch.created_at.elapsed(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn queued_transactions(&self, service_id: Option<u32>) -> Vec<QueuedTransactionSnapshot> {
+        self.state
+            .lock()
+            .ok()
+            .map(|state| {
+                state
+                    .queued
+                    .iter()
+                    .filter(|(queued_service_id, _)| {
+                        service_id.is_none_or(|filter| filter == **queued_service_id)
+                    })
+                    .flat_map(|(queued_service_id, queue)| {
+                        queue.iter().map(|item| QueuedTransactionSnapshot {
+                            transaction_id: item.logical_id.clone(),
+                            service_id: *queued_service_id,
+                            sender: item.sender,
+                            nonce: item.nonce,
+                            valid_until: item.valid_until,
+                            arrival_sequence: item.arrival_sequence,
+                            age: item.enqueued_at.elapsed(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn is_flushing(&self, service_id: u32) -> bool {
+        self.state
+            .lock()
+            .ok()
+            .is_some_and(|state| state.flushing.contains(&service_id))
+    }
+
+    fn record_batch_status(&self, batch_id: &str, status: &str) -> bool {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|mut state| {
+                let batch = state.batches.get_mut(batch_id)?;
+                if batch.last_status.as_deref() == Some(status) {
+                    return Some(false);
+                }
+                batch.last_status = Some(status.to_owned());
+                Some(true)
+            })
+            .unwrap_or(false)
+    }
+
     fn queued_services(&self) -> Vec<u32> {
         self.state
             .lock()
@@ -1550,6 +1671,7 @@ impl TransactionCoordinator {
         &self,
         service_id: u32,
         expected_nonces: &BTreeMap<[u8; 32], u64>,
+        finalized_slot: u64,
     ) -> Result<Option<BatchToSubmit>, BackendError> {
         let mut state = self
             .state
@@ -1577,32 +1699,72 @@ impl TransactionCoordinator {
                 .insert(service_id, Instant::now() + FUTURE_NONCE_RECHECK_DELAY);
             return Ok(None);
         }
-        let selected_indices =
-            select_canonical_indices(&pending, expected_nonces, self.max_actions);
-        if selected_indices.is_empty() {
-            state.queued.insert(service_id, pending);
-            state
-                .flush_deadlines
-                .insert(service_id, Instant::now() + FUTURE_NONCE_RECHECK_DELAY);
-            return Ok(None);
+
+        let mut viable = Vec::with_capacity(pending.len());
+        for item in pending {
+            if item
+                .valid_until
+                .is_some_and(|valid_until| finalized_slot > valid_until)
+            {
+                if let Some(transaction) = state.transactions.get_mut(&item.logical_id) {
+                    transaction.error = Some(
+                        "EXPIRED_BEFORE_DISPATCH: signed action validity slot has expired".into(),
+                    );
+                }
+                eprintln!("TX_EXPIRED service_id={service_id} transaction_id={} valid_until={} finalized_slot={finalized_slot}", item.logical_id, item.valid_until.unwrap_or_default());
+            } else {
+                viable.push(item);
+            }
         }
-        let selected = selected_indices
+
+        let selection = select_canonical_indices(&viable, expected_nonces, self.max_actions);
+        for index in &selection.stale {
+            let item = &viable[*index];
+            if let Some(transaction) = state.transactions.get_mut(&item.logical_id) {
+                transaction.error = Some(
+                    "STALE_NONCE: signed action nonce is lower than the canonical expected nonce"
+                        .into(),
+                );
+            }
+            eprintln!(
+                "TX_STALE_NONCE service_id={service_id} transaction_id={} nonce={}",
+                item.logical_id,
+                item.nonce.unwrap_or_default()
+            );
+        }
+
+        let selected = selection
+            .selected
             .iter()
-            .map(|index| pending[*index].clone())
+            .map(|index| viable[*index].clone())
             .collect::<Vec<_>>();
-        let selected_set = selected_indices.into_iter().collect::<BTreeSet<_>>();
-        let remaining = pending
+        let removed = selection
+            .selected
+            .iter()
+            .chain(selection.stale.iter())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let remaining = viable
             .into_iter()
             .enumerate()
-            .filter_map(|(index, item)| (!selected_set.contains(&index)).then_some(item))
+            .filter_map(|(index, item)| (!removed.contains(&index)).then_some(item))
             .collect::<Vec<_>>();
         if remaining.is_empty() {
+            state.queued.remove(&service_id);
             state.flush_deadlines.remove(&service_id);
         } else {
             state.queued.insert(service_id, remaining);
+            let delay = if selected.is_empty() {
+                FUTURE_NONCE_RECHECK_DELAY
+            } else {
+                self.flush_delay
+            };
             state
                 .flush_deadlines
-                .insert(service_id, Instant::now() + self.flush_delay);
+                .insert(service_id, Instant::now() + delay);
+        }
+        if selected.is_empty() {
+            return Ok(None);
         }
         let batch_id = format!("batch-{}", state.next_batch_id);
         state.next_batch_id = state.next_batch_id.saturating_add(1);
@@ -1637,6 +1799,8 @@ impl TransactionCoordinator {
                 predicted_output: None,
                 materialized: false,
                 diagnostics_emitted: false,
+                created_at: Instant::now(),
+                last_status: None,
             },
         );
         Ok(Some(BatchToSubmit {
@@ -1682,17 +1846,28 @@ impl TransactionCoordinator {
 
     fn fail_batch(&self, batch_id: &str, error: String) {
         if let Ok(mut state) = self.state.lock() {
-            let (service_id, transaction_ids) = state
-                .batches
-                .get(batch_id)
-                .map(|batch| (batch.service_id, batch.logical_transaction_ids.clone()))
-                .unwrap_or_default();
+            let Some(batch) = state.batches.get(batch_id) else {
+                return;
+            };
+            if batch.materialized {
+                return;
+            }
+            let service_id = batch.service_id;
+            let transaction_ids = batch.logical_transaction_ids.clone();
             for transaction_id in transaction_ids {
                 if let Some(transaction) = state.transactions.get_mut(&transaction_id) {
-                    transaction.error = Some(error.clone());
+                    if transaction.error.is_none() {
+                        transaction.error = Some(error.clone());
+                    }
                 }
             }
-            state.in_flight.remove(&service_id);
+            if state
+                .in_flight
+                .get(&service_id)
+                .is_some_and(|current| current == batch_id)
+            {
+                state.in_flight.remove(&service_id);
+            }
             state.flushing.remove(&service_id);
             self.wake.notify_all();
         }
@@ -1700,13 +1875,22 @@ impl TransactionCoordinator {
 
     fn mark_materialized(&self, batch_id: &str) {
         if let Ok(mut state) = self.state.lock() {
-            let service_id = state.batches.get_mut(batch_id).map(|batch| {
-                batch.materialized = true;
-                batch.service_id
-            });
-            if let Some(service_id) = service_id {
+            let Some(batch) = state.batches.get_mut(batch_id) else {
+                return;
+            };
+            if batch.materialized {
+                return;
+            }
+            batch.materialized = true;
+            let service_id = batch.service_id;
+            if state
+                .in_flight
+                .get(&service_id)
+                .is_some_and(|current| current == batch_id)
+            {
                 state.in_flight.remove(&service_id);
             }
+            state.flushing.remove(&service_id);
             self.wake.notify_all();
         }
     }
@@ -2417,6 +2601,7 @@ impl BackendRpcHandler {
             "minijam_getWorkStatusV1" => self.work_status(params),
             "jamscript_submitTransactionV1" => self.submit_transaction(params),
             "jamscript_getTransactionStatusV1" => self.transaction_status(params),
+            "jamscript_getCoordinatorStatusV1" => self.coordinator_status(params),
             "minijam_getManagedStateV1" => self.get_managed_state(params),
             "jamscript_getStateV1" => self.get_state(params, false),
             "jamscript_getStateProofV1" => self.get_state(params, true),
@@ -3007,11 +3192,8 @@ impl BackendRpcHandler {
         &self,
         service_id: u32,
         network: &dyn BackendNetwork,
-    ) -> Result<BTreeMap<[u8; 32], u64>, BackendError> {
+    ) -> Result<(BTreeMap<[u8; 32], u64>, u64), BackendError> {
         let senders = self.transactions.pending_senders(service_id);
-        if senders.is_empty() {
-            return Ok(BTreeMap::new());
-        }
         let context = network.finalized_context()?;
         let canonical_root = network
             .service_storage_at(
@@ -3055,7 +3237,119 @@ impl BackendRpcHandler {
             };
             expected.insert(sender, nonce);
         }
-        Ok(expected)
+        Ok((expected, u64::from(context.slot)))
+    }
+
+    /// Reconcile coordinator batches from authoritative Backend/Formal state.
+    /// This runs independently of browser transaction-status polling.
+    fn reconcile_in_flight_batches(&self) -> Result<(), BackendError> {
+        let (network, loader) = match (&self.network, &self.pvm_loader) {
+            (Some(network), Some(loader)) => (Arc::clone(network), Arc::clone(loader)),
+            _ => return Ok(()),
+        };
+        let snapshots = self.transactions.in_flight_batches();
+        let mut first_error = None;
+        for batch in snapshots {
+            let Some(package_hash) = batch.package_hash else {
+                // Submission is synchronous in the dispatcher. A None hash is
+                // a short lived flushing state; never unlock it on age alone.
+                continue;
+            };
+            let key = WorkKey {
+                service_id: batch.service_id,
+                package_hash,
+            };
+            let work_params = json!({
+                "serviceId": batch.service_id,
+                "packageHash": hash_hex(&package_hash),
+            });
+            let status_result = (|| {
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
+                let was_finalized = state.is_finalized(key);
+                let result = match BackendEngine::new(network.clone(), loader.clone())
+                    .status(&mut state, work_params)
+                {
+                    Ok(result) => result,
+                    // Propagation delay is not terminal. Keep the batch locked
+                    // and retry on the next reconciliation interval.
+                    Err(BackendError::WorkNotFound) => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                let work_status = result
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if work_status == "failed" {
+                    return Ok(Some((result, false, true)));
+                }
+                let finalized = state.is_finalized(key);
+                if !was_finalized && finalized && self.database.is_none() {
+                    if let Some(store) = &self.persistence {
+                        let service_key = state.registry.resolve_key(batch.service_id)?;
+                        store.persist_registry(&state.registry)?;
+                        if let Some(output) = state.prediction(batch.service_id, package_hash) {
+                            state.append_recovery(
+                                store.recovery_path(),
+                                &RecoveryEnvelopeV1 {
+                                    service_id: batch.service_id,
+                                    service_key,
+                                    output: output.clone(),
+                                },
+                            )?;
+                        }
+                    }
+                }
+                Ok(Some((result, finalized, false)))
+            })();
+
+            match status_result {
+                Ok(None) => {
+                    if self
+                        .transactions
+                        .record_batch_status(&batch.batch_id, "work_not_found")
+                    {
+                        eprintln!("TX_BATCH_STATUS service_id={} batch_id={} package_hash={} status=work_not_found age_ms={}", batch.service_id, batch.batch_id, hash_hex(&package_hash), batch.age.as_millis());
+                    }
+                }
+                Ok(Some((result, _finalized, true))) => {
+                    let error = result
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Formal reported terminal failure")
+                        .to_owned();
+                    self.transactions.fail_batch(&batch.batch_id, error);
+                    eprintln!("TX_BATCH_FAILED service_id={} batch_id={} package_hash={} transaction_count={}", batch.service_id, batch.batch_id, hash_hex(&package_hash), batch.logical_transaction_ids.len());
+                }
+                Ok(Some((_result, true, false))) => {
+                    self.transactions.mark_materialized(&batch.batch_id);
+                    eprintln!("TX_BATCH_FINALIZED service_id={} batch_id={} package_hash={} transaction_count={}", batch.service_id, batch.batch_id, hash_hex(&package_hash), batch.logical_transaction_ids.len());
+                }
+                Ok(Some((_result, false, false))) => {
+                    let work_status = _result
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    if self
+                        .transactions
+                        .record_batch_status(&batch.batch_id, work_status)
+                    {
+                        eprintln!("TX_BATCH_STATUS service_id={} batch_id={} package_hash={} status={work_status} age_ms={}", batch.service_id, batch.batch_id, hash_hex(&package_hash), batch.age.as_millis());
+                    }
+                }
+                Err(error) => {
+                    eprintln!("TX_BATCH_RECONCILIATION_RETRY service_id={} batch_id={} package_hash={} error={error}", batch.service_id, batch.batch_id, hash_hex(&package_hash));
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
     }
 
     fn dispatch_ready_batches(&self) -> Result<(), BackendError> {
@@ -3067,15 +3361,17 @@ impl BackendRpcHandler {
             if !self.transactions.is_batch_ready(service_id)? {
                 continue;
             }
-            let expected_nonces =
+            let (expected_nonces, finalized_slot) =
                 self.authoritative_expected_nonces(service_id, network.as_ref())?;
-            let Some(batch) = self
-                .transactions
-                .take_ready_batch(service_id, &expected_nonces)?
+            let Some(batch) =
+                self.transactions
+                    .take_ready_batch(service_id, &expected_nonces, finalized_slot)?
             else {
                 continue;
             };
             let batch_id = batch.batch_id.clone();
+            let transaction_count = batch.actions.len();
+            eprintln!("TX_BATCH_SELECTED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count}");
             let mut submit_params = batch.params.clone();
             submit_params["extrinsicsBase64"] = Value::Array(
                 batch
@@ -3102,14 +3398,28 @@ impl BackendRpcHandler {
                         .get("packageHash")
                         .and_then(Value::as_str)
                         .map(parse_hash)
-                        .transpose()?;
-                    let package_hash = package_hash.ok_or_else(|| {
-                        BackendError::Rpc("Formal response omitted packageHash".into())
-                    })?;
-                    self.transactions
-                        .finish_batch(&batch_id, package_hash, prediction);
+                        .transpose();
+                    match package_hash {
+                        Ok(Some(package_hash)) => {
+                            self.transactions
+                                .finish_batch(&batch_id, package_hash, prediction);
+                            eprintln!("TX_BATCH_SUBMITTED service_id={service_id} batch_id={batch_id} package_hash={}", hash_hex(&package_hash));
+                        }
+                        Ok(None) => {
+                            let error = "Formal response omitted packageHash";
+                            self.transactions.fail_batch(&batch_id, error.into());
+                            eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error={error}");
+                        }
+                        Err(error) => {
+                            self.transactions.fail_batch(&batch_id, error.to_string());
+                            eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error=invalid packageHash");
+                        }
+                    }
                 }
-                Err(error) => self.transactions.fail_batch(&batch_id, error.to_string()),
+                Err(error) => {
+                    self.transactions.fail_batch(&batch_id, error.to_string());
+                    eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error={error}");
+                }
             }
         }
         Ok(())
@@ -3244,6 +3554,99 @@ impl BackendRpcHandler {
             output["actionReceipts"] = receipts.clone();
         }
         Ok(output)
+    }
+
+    fn coordinator_status(&self, params: Value) -> Result<Value, BackendError> {
+        let supplied_token = params.get("adminToken").and_then(Value::as_str);
+        if self
+            .admin_token
+            .as_deref()
+            .is_none_or(|token| supplied_token != Some(token))
+        {
+            return Err(BackendError::Rpc(
+                "coordinator diagnostics require the backend control-plane token".into(),
+            ));
+        }
+        let service_id = params
+            .get("serviceId")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| BackendError::Rpc("serviceId must be a u32".into()))
+            })
+            .transpose()?;
+        let queued = self.transactions.queued_transactions(service_id);
+        let in_flight = self
+            .transactions
+            .in_flight_batches()
+            .into_iter()
+            .filter(|batch| service_id.is_none_or(|filter| filter == batch.service_id))
+            .collect::<Vec<_>>();
+        let service_ids = service_id.map_or_else(
+            || {
+                queued
+                    .iter()
+                    .map(|item| item.service_id)
+                    .chain(in_flight.iter().map(|batch| batch.service_id))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            },
+            |value| vec![value],
+        );
+        let queued_json = queued
+            .iter()
+            .map(|item| {
+                json!({
+                    "transactionId": item.transaction_id,
+                    "serviceId": item.service_id,
+                    "senderKeyHash": item.sender.map(|sender| hash_hex(&service_runtime_core::blake2_256(&sender))),
+                    "nonce": item.nonce,
+                    "validUntil": item.valid_until,
+                    "arrivalSequence": item.arrival_sequence,
+                    "ageMs": item.age.as_millis(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let in_flight_json = in_flight
+            .iter()
+            .map(|batch| {
+                json!({
+                    "batchId": batch.batch_id,
+                    "serviceId": batch.service_id,
+                    "packageHash": batch.package_hash.map(|hash| hash_hex(&hash)),
+                    "transactionIds": batch.logical_transaction_ids,
+                    "materialized": batch.materialized,
+                    "ageMs": batch.age.as_millis(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let services = service_ids
+            .into_iter()
+            .map(|id| {
+                let service_queued = queued.iter().filter(|item| item.service_id == id).count();
+                let service_in_flight = in_flight.iter().find(|batch| batch.service_id == id);
+                json!({
+                    "serviceId": id,
+                    "queuedCount": service_queued,
+                    "oldestQueuedAgeMs": queued.iter().filter(|item| item.service_id == id).map(|item| item.age.as_millis()).max(),
+                    "flushing": self.transactions.is_flushing(id),
+                    "inFlight": service_in_flight.map(|batch| json!({
+                        "batchId": batch.batch_id,
+                        "packageHash": batch.package_hash.map(|hash| hash_hex(&hash)),
+                        "transactionIds": batch.logical_transaction_ids,
+                        "materialized": batch.materialized,
+                        "ageMs": batch.age.as_millis(),
+                    })),
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "services": services,
+            "queued": queued_json,
+            "inFlight": in_flight_json,
+        }))
     }
 
     fn work_status(&self, params: Value) -> Result<Value, BackendError> {
@@ -3432,11 +3835,27 @@ impl BackendDaemon {
             }
         };
         let dispatcher = Arc::clone(&self.handler);
-        std::thread::spawn(move || loop {
-            if let Err(error) = dispatcher.dispatch_ready_batches() {
-                eprintln!("backend transaction dispatcher error: {error}");
+        std::thread::spawn(move || {
+            let mut last_reconcile = Instant::now();
+            let reconcile_interval = Duration::from_millis(
+                env_u64(
+                    "JAMSCRIPT_RECONCILE_INTERVAL_MS",
+                    COORDINATOR_RECONCILE_INTERVAL.as_millis() as u64,
+                )
+                .max(100),
+            );
+            loop {
+                if last_reconcile.elapsed() >= reconcile_interval {
+                    last_reconcile = Instant::now();
+                    if let Err(error) = dispatcher.reconcile_in_flight_batches() {
+                        eprintln!("backend transaction reconciliation error: {error}");
+                    }
+                }
+                if let Err(error) = dispatcher.dispatch_ready_batches() {
+                    eprintln!("backend transaction dispatcher error: {error}");
+                }
+                std::thread::sleep(Duration::from_millis(5));
             }
-            std::thread::sleep(Duration::from_millis(5));
         });
         for stream in listener.incoming() {
             match stream {
@@ -4211,7 +4630,9 @@ mod tests {
             sender: sender.map(|value| [value; 32]),
             nonce,
             nonce_storage_key: sender.map(|value| jamscript_runtime_core::nonce_key(&[value; 32])),
+            valid_until: None,
             arrival_sequence,
+            enqueued_at: Instant::now(),
             params: json!({"extrinsicsBase64": []}),
             extrinsics: Vec::new(),
         }
@@ -4231,7 +4652,8 @@ mod tests {
         ];
         let expected = BTreeMap::from([(alice, 0), (bob, 0), (carol, 0)]);
         let selected = select_canonical_indices(&pending, &expected, 5);
-        assert_eq!(selected, vec![1, 2, 3, 4, 0]);
+        assert_eq!(selected.selected, vec![1, 2, 3, 4, 0]);
+        assert!(selected.stale.is_empty());
     }
 
     #[test]
@@ -4241,7 +4663,9 @@ mod tests {
             pending(Some(2), Some(0), 1, 20),
         ];
         let expected = BTreeMap::from([([1; 32], 1), ([2; 32], 0)]);
-        assert_eq!(select_canonical_indices(&pending, &expected, 2), vec![0, 1]);
+        let selected = select_canonical_indices(&pending, &expected, 2);
+        assert_eq!(selected.selected, vec![1]);
+        assert_eq!(selected.stale, vec![0]);
     }
 
     #[test]
@@ -4256,7 +4680,9 @@ mod tests {
         let expected = BTreeMap::from([([1; 32], 0), ([2; 32], 0), ([3; 32], 0)]);
         let first = select_canonical_indices(&pending, &expected, 5);
         for _ in 0..100 {
-            assert_eq!(select_canonical_indices(&pending, &expected, 5), first);
+            let repeated = select_canonical_indices(&pending, &expected, 5);
+            assert_eq!(repeated.selected, first.selected);
+            assert_eq!(repeated.stale, first.stale);
         }
     }
 
@@ -4278,12 +4704,86 @@ mod tests {
                 .insert(7, Instant::now() - Duration::from_secs(1));
         }
         assert!(coordinator
-            .take_ready_batch(7, &BTreeMap::from([([1; 32], 0)]))
+            .take_ready_batch(7, &BTreeMap::from([([1; 32], 0)]), 10)
             .unwrap()
             .is_none());
         assert!(!coordinator.is_batch_ready(7).unwrap());
+        assert_eq!(coordinator.queued_transactions(Some(7)).len(), 1);
         let state = coordinator.state.lock().unwrap();
         assert!(state.flush_deadlines[&7] > Instant::now() + Duration::from_millis(900));
+    }
+
+    #[test]
+    fn stale_nonce_is_failed_and_removed_before_batching() {
+        let coordinator = TransactionCoordinator::new();
+        let stale = pending(Some(1), Some(0), 0, 0x11);
+        let transaction_id = stale.logical_id.clone();
+        {
+            let mut state = coordinator.state.lock().unwrap();
+            state.transactions.insert(
+                transaction_id.clone(),
+                LogicalTransaction {
+                    service_id: 7,
+                    batch_id: None,
+                    package_hash: None,
+                    action_index: None,
+                    error: None,
+                },
+            );
+            state.queued.insert(7, vec![stale]);
+            state
+                .flush_deadlines
+                .insert(7, Instant::now() - Duration::from_secs(1));
+        }
+
+        assert!(coordinator
+            .take_ready_batch(7, &BTreeMap::from([([1; 32], 1)]), 10)
+            .unwrap()
+            .is_none());
+        assert!(coordinator.queued_transactions(Some(7)).is_empty());
+        assert!(coordinator
+            .transaction(&transaction_id)
+            .unwrap()
+            .error
+            .unwrap()
+            .starts_with("STALE_NONCE:"));
+    }
+
+    #[test]
+    fn expired_transaction_is_failed_and_removed_before_batching() {
+        let coordinator = TransactionCoordinator::new();
+        let mut expired = pending(Some(1), Some(0), 0, 0x11);
+        expired.valid_until = Some(5);
+        let transaction_id = expired.logical_id.clone();
+        {
+            let mut state = coordinator.state.lock().unwrap();
+            state.transactions.insert(
+                transaction_id.clone(),
+                LogicalTransaction {
+                    service_id: 7,
+                    batch_id: None,
+                    package_hash: None,
+                    action_index: None,
+                    error: None,
+                },
+            );
+            state.queued.insert(7, vec![expired]);
+            state
+                .flush_deadlines
+                .insert(7, Instant::now() - Duration::from_secs(1));
+        }
+
+        assert!(coordinator
+            .take_ready_batch(7, &BTreeMap::from([([1; 32], 0)]), 6)
+            .unwrap()
+            .is_none());
+        assert!(coordinator.queued_transactions(Some(7)).is_empty());
+        assert!(coordinator
+            .transaction(&transaction_id)
+            .unwrap()
+            .error
+            .unwrap()
+            .starts_with("EXPIRED_BEFORE_DISPATCH:"));
     }
 
     #[test]
@@ -4302,12 +4802,12 @@ mod tests {
         assert_ne!(second, third);
 
         let batch = coordinator
-            .take_ready_batch(7, &BTreeMap::new())
+            .take_ready_batch(7, &BTreeMap::new(), 10)
             .unwrap()
             .unwrap();
         assert_eq!(batch.actions, vec![vec![1], vec![2], vec![3]]);
         assert!(coordinator
-            .take_ready_batch(7, &BTreeMap::new())
+            .take_ready_batch(7, &BTreeMap::new(), 10)
             .unwrap()
             .is_none());
         let mapped = coordinator.transaction(&second).unwrap();
@@ -4320,21 +4820,127 @@ mod tests {
             Some([9; 32])
         );
         assert!(coordinator
-            .take_ready_batch(7, &BTreeMap::new())
+            .take_ready_batch(7, &BTreeMap::new(), 10)
             .unwrap()
             .is_none());
         coordinator.mark_materialized(&batch.batch_id);
         assert!(coordinator
-            .take_ready_batch(7, &BTreeMap::new())
+            .take_ready_batch(7, &BTreeMap::new(), 10)
             .unwrap()
             .is_none());
 
         let fourth = coordinator.enqueue(7, vec![4], json!({})).unwrap();
-        let next = coordinator.take_ready_batch(7, &BTreeMap::new()).unwrap();
+        let next = coordinator
+            .take_ready_batch(7, &BTreeMap::new(), 10)
+            .unwrap();
         assert!(next.is_some());
         assert_eq!(
             coordinator.transaction(&fourth).unwrap().action_index,
             Some(0)
+        );
+    }
+
+    fn handler_with_in_flight_batch(
+        work_status: &str,
+    ) -> (BackendRpcHandler, tempfile::TempDir, String, String) {
+        let package_hash = [0x91; 32];
+        let (prediction, canonical_root) = output_with_receipts(vec![ActionReceiptV1 {
+            action_hash: [0x92; 32],
+            status: ActionStatusV1::Applied,
+            error_code: None,
+        }]);
+        let directory = tempfile::tempdir().unwrap();
+        let loader = Arc::new(PvmArtifactLoader::new(Arc::new(
+            DiskArtifactStore::new(directory.path()).unwrap(),
+        )));
+        let network = WorkStatusNetwork {
+            result: work_status_result(work_status),
+            canonical_root: Some(canonical_root),
+        };
+        let handler = BackendRpcHandler::new(
+            state_with_prediction(package_hash, prediction.clone()),
+            Arc::new(UnconfiguredWorkGateway),
+        )
+        .with_network(Arc::new(network))
+        .with_pvm_artifact_loader(loader);
+        let first = handler
+            .transactions
+            .enqueue(10, vec![0x01], json!({}))
+            .unwrap();
+        handler
+            .transactions
+            .state
+            .lock()
+            .unwrap()
+            .flush_deadlines
+            .insert(10, Instant::now() - Duration::from_secs(1));
+        let batch = handler
+            .transactions
+            .take_ready_batch(10, &BTreeMap::new(), 11)
+            .unwrap()
+            .unwrap();
+        handler
+            .transactions
+            .finish_batch(&batch.batch_id, package_hash, prediction);
+        let second = handler
+            .transactions
+            .enqueue(10, vec![0x02], json!({}))
+            .unwrap();
+        handler
+            .transactions
+            .state
+            .lock()
+            .unwrap()
+            .flush_deadlines
+            .insert(10, Instant::now() - Duration::from_secs(1));
+        (handler, directory, first, second)
+    }
+
+    #[test]
+    fn background_reconcile_releases_imported_batch_without_transaction_status_polling() {
+        let (handler, _directory, first, second) = handler_with_in_flight_batch("imported");
+        assert!(!handler.transactions.is_batch_ready(10).unwrap());
+
+        handler.reconcile_in_flight_batches().unwrap();
+
+        assert!(handler.transactions.in_flight_batches().is_empty());
+        assert!(handler
+            .transactions
+            .transaction(&first)
+            .unwrap()
+            .error
+            .is_none());
+        let next = handler
+            .transactions
+            .take_ready_batch(10, &BTreeMap::new(), 12)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            handler.transactions.transaction(&second).unwrap().batch_id,
+            Some(next.batch_id)
+        );
+    }
+
+    #[test]
+    fn background_reconcile_releases_formal_failed_batch_without_status_polling() {
+        let (handler, _directory, first, second) = handler_with_in_flight_batch("failed");
+        handler.reconcile_in_flight_batches().unwrap();
+
+        assert!(handler.transactions.in_flight_batches().is_empty());
+        assert!(handler
+            .transactions
+            .transaction(&first)
+            .unwrap()
+            .error
+            .is_some());
+        let next = handler
+            .transactions
+            .take_ready_batch(10, &BTreeMap::new(), 12)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            handler.transactions.transaction(&second).unwrap().batch_id,
+            Some(next.batch_id)
         );
     }
 
@@ -4786,6 +5392,48 @@ mod tests {
             .handle("jamscript_listServicesV1", Value::Null)
             .unwrap();
         assert_eq!(services.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn coordinator_diagnostics_requires_admin_token_and_omits_action_material() {
+        let handler =
+            BackendRpcHandler::new(BackendState::default(), Arc::new(UnconfiguredWorkGateway))
+                .with_admin_token("secret");
+        handler
+            .transactions
+            .enqueue(
+                3083943385,
+                vec![0xaa, 0xbb],
+                json!({"payloadBase64": "private-action", "authorizationProof": "proof"}),
+            )
+            .unwrap();
+
+        assert!(handler
+            .handle(
+                "jamscript_getCoordinatorStatusV1",
+                json!({"serviceId": 3083943385u64})
+            )
+            .is_err());
+        assert!(handler
+            .handle(
+                "jamscript_getCoordinatorStatusV1",
+                json!({"serviceId": 3083943385u64, "adminToken": "wrong"}),
+            )
+            .is_err());
+        let result = handler
+            .handle(
+                "jamscript_getCoordinatorStatusV1",
+                json!({"serviceId": 3083943385u64, "adminToken": "secret"}),
+            )
+            .unwrap();
+        assert_eq!(result["queued"].as_array().unwrap().len(), 1);
+        assert!(result["queued"][0]["transactionId"].as_str().is_some());
+        assert_eq!(result["queued"][0]["senderKeyHash"], Value::Null);
+        let encoded = result.to_string();
+        assert!(!encoded.contains("private-action"));
+        assert!(!encoded.contains("authorizationProof"));
+        assert!(!encoded.contains("proof"));
+        assert!(!encoded.contains("payloadBase64"));
     }
 
     #[test]

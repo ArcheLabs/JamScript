@@ -47,6 +47,20 @@ export type WaitForActionResult = Omit<TransactionStatusResult, "status"> & {
   actionReceipt: ActionReceipt;
 };
 
+export class TransactionWaitTimeoutError extends Error {
+  constructor(
+    readonly transactionId: string,
+    readonly lastStatus?: TransactionStatusResult,
+  ) {
+    super(
+      lastStatus
+        ? `timed out waiting for transaction ${transactionId} (last status: ${lastStatus.status})`
+        : `timed out waiting for transaction ${transactionId}`,
+    );
+    this.name = "TransactionWaitTimeoutError";
+  }
+}
+
 export class JamScriptClient {
   private readonly rpc: WorkRpc;
   private readonly actionHashes = new Map<string, string>();
@@ -119,7 +133,12 @@ export class JamScriptClient {
       throw error;
     }
     this.actionHashes.set(submitted.transactionId.toLowerCase(), prepared.actionHash);
-    return { ...submitted, actionHash: prepared.actionHash };
+    return {
+      ...submitted,
+      actionHash: prepared.actionHash,
+      submittedSlot: prepared.submittedSlot,
+      validUntil: prepared.validUntil,
+    };
   }
 
   async submitOwnershipAction(
@@ -172,7 +191,12 @@ export class JamScriptClient {
         extrinsicsBase64: (options.extrinsics ?? []).map(toBase64),
       });
       this.actionHashes.set(submitted.transactionId.toLowerCase(), actionHash);
-      return { ...submitted, actionHash };
+      return {
+        ...submitted,
+        actionHash,
+        submittedSlot: context.slot,
+        validUntil: Number(unsigned.validUntil),
+      };
     } finally {
       release();
       if (this.ownershipTails.get(signerLane) === lane) this.ownershipTails.delete(signerLane);
@@ -208,7 +232,13 @@ export class JamScriptClient {
     input: Record<string, CodecValue>,
     signer: JamSigner,
     options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number },
-  ): Promise<{ request: Parameters<WorkRpc["submitTransaction"]>[0]; actionHash: string; nonce: bigint }> {
+  ): Promise<{
+    request: Parameters<WorkRpc["submitTransaction"]>[0];
+    actionHash: string;
+    nonce: bigint;
+    submittedSlot: number;
+    validUntil: number;
+  }> {
     await this.validateDeployment();
     const action = actionByName(this.deployment.abi, actionName);
     if (action.auth !== "wallet") throw new Error("submitAction requires a wallet-authenticated action");
@@ -244,7 +274,17 @@ export class JamScriptClient {
       extrinsicsBase64: (options.extrinsics ?? []).map(toBase64),
     };
 
-    return { request: requestBase, actionHash, nonce };
+    return {
+      request: requestBase,
+      actionHash,
+      nonce,
+      submittedSlot: initialContext.slot,
+      validUntil: Number(validUntil),
+    };
+  }
+
+  finalizedContext(): Promise<FinalizedContext> {
+    return this.rpc.finalizedContext();
   }
 
   async queryLatest(queryName: string, key?: CodecValue): Promise<QueryResult> {
@@ -328,14 +368,16 @@ export class JamScriptClient {
   ): Promise<TransactionStatusResult> {
     const intervalMs = options.intervalMs ?? 1_000;
     const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+    let lastStatus: TransactionStatusResult | undefined;
     for (;;) {
       try {
         const status = await this.transactionStatus(transactionId);
+        lastStatus = status;
         if (status.status === "imported" || status.status === "failed") return status;
       } catch (error) {
         if (!(error instanceof RpcError) || error.code !== -32013) throw error;
       }
-      if (Date.now() >= deadline) throw new Error("timed out waiting for transaction");
+      if (Date.now() >= deadline) throw new TransactionWaitTimeoutError(transactionId, lastStatus);
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }

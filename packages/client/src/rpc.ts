@@ -46,6 +46,8 @@ export type SubmitTransactionResult = {
 
 export type SubmitActionResult = SubmitTransactionResult & {
   actionHash: string;
+  submittedSlot?: number;
+  validUntil?: number;
 };
 
 export type TransactionStatusResult = {

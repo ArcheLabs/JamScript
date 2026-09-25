@@ -126,6 +126,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_artifact_store(artifact_store)
         .with_database(database);
 
+    if let Ok(admin_token) = env::var("JAMSCRIPT_BACKEND_ADMIN_TOKEN") {
+        if !admin_token.is_empty() {
+            handler = handler.with_admin_token(admin_token);
+        }
+    }
+
     if let Some(network) = network {
         handler = handler.with_network(network);
     }

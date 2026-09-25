@@ -64,3 +64,29 @@ need independent verification set `stateVerification: "proof"`; the legacy
 
 The older `tools/managed-state-network-adapter` is a legacy compatibility/test
 wrapper for the generated Builder path. It is not the production topology.
+# Transaction coordinator lifecycle
+
+The backend coordinator advances queued transactions independently of browser
+polling. A background loop reconciles submitted work against MiniJAM/Formal,
+releases finalized or terminally failed batches, and then dispatches the next
+eligible queue. Reconciliation runs every 250 ms by default and can be tuned
+with `JAMSCRIPT_RECONCILE_INTERVAL_MS` (minimum 100 ms). Transaction status
+requests are observations; clients do not need to poll to release scheduler
+locks.
+
+Signed actions with an expired `validUntil` slot fail before dispatch, and
+actions with a stale Ownership nonce fail with `STALE_NONCE`. Future nonces
+remain queued until the missing earlier nonce is finalized. Non-final Formal
+states and temporarily missing work remain in flight and are retried.
+
+The coordinator queue, transaction-to-batch mappings, and in-flight metadata
+remain process-local and are lost on backend restart. Chain state is durable;
+clients recovering an unknown transaction must verify the action's effect on
+chain before deciding whether to resubmit. Full queue persistence is not part
+of this backend version.
+
+The optional `jamscript_getCoordinatorStatusV1` diagnostic RPC requires
+`JAMSCRIPT_BACKEND_ADMIN_TOKEN` in the backend process and the same token in
+the request's `adminToken` field. It returns transaction IDs, sender key
+hashes, nonces, package hashes, and ages only; it never returns signed action
+bytes or authorization proofs. Do not provide this token to browser clients.
