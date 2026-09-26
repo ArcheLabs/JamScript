@@ -16,7 +16,7 @@ import {
   type Ownership,
   type SignedActionV2,
 } from "./crypto.js";
-import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionRequest, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner, OwnershipSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
@@ -47,6 +47,48 @@ export type WaitForActionResult = Omit<TransactionStatusResult, "status"> & {
   actionReceipt: ActionReceipt;
 };
 
+/** Opaque action data prepared before requesting a wallet signature. */
+export type PreparedOwnershipAction = {
+  readonly phase: "prepared";
+  readonly actionName: string;
+};
+
+/** Opaque signed action data ready for one backend submission attempt. */
+export type SignedOwnershipAction = {
+  readonly phase: "signed";
+  readonly actionName: string;
+  readonly actionHash: string;
+  readonly submittedSlot: number;
+  readonly validUntil: number;
+};
+
+export type OwnershipPreparationPhase =
+  | "VALIDATING_DEPLOYMENT"
+  | "READING_FINALIZED_CONTEXT"
+  | "READING_MANAGED_STATE"
+  | "READING_NONCE";
+
+type PreparedOwnershipActionData = {
+  signer: OwnershipSigner;
+  signerLane: string;
+  unsigned: Omit<SignedActionV2, "authorizationProof">;
+  message: Uint8Array;
+  requestOptions: Pick<SubmitTransactionRequest, "extrinsicsBase64">;
+  submittedSlot: number;
+  validUntil: number;
+};
+
+type SignedOwnershipActionData = {
+  signerLane: string;
+  request: SubmitTransactionRequest;
+  actionHash: string;
+  submittedSlot: number;
+  validUntil: number;
+};
+
+const preparedOwnershipActions = new WeakMap<PreparedOwnershipAction, PreparedOwnershipActionData>();
+const signedOwnershipActions = new WeakMap<SignedOwnershipAction, SignedOwnershipActionData>();
+
 export class TransactionWaitTimeoutError extends Error {
   constructor(
     readonly transactionId: string,
@@ -67,6 +109,7 @@ export class JamScriptClient {
   private readonly nextNonces = new Map<string, bigint>();
   private readonly nonceTails = new Map<string, Promise<void>>();
   private readonly ownershipTails = new Map<string, Promise<void>>();
+  private readonly ownershipReservations = new Map<string, object>();
 
   constructor(
     private readonly deployment: DeploymentDescriptor,
@@ -147,6 +190,21 @@ export class JamScriptClient {
     signer: OwnershipSigner,
     options: { actAs?: Ownership; ttl?: bigint; extrinsics?: Uint8Array[] } = {},
   ): Promise<SubmitActionResult> {
+    const prepared = await this.prepareOwnershipAction(actionName, input, signer, options);
+    const signed = await this.signPreparedOwnershipAction(prepared);
+    return this.submitSignedOwnershipAction(signed);
+  }
+
+  /**
+   * Resolve deployment, action encoding, finalized context, and Ownership
+   * nonce before the caller asks the user for the final signature.
+   */
+  async prepareOwnershipAction(
+    actionName: string,
+    input: Record<string, CodecValue>,
+    signer: OwnershipSigner,
+    options: { actAs?: Ownership; ttl?: bigint; extrinsics?: Uint8Array[]; onProgress?: (phase: OwnershipPreparationPhase) => void } = {},
+  ): Promise<PreparedOwnershipAction> {
     const controller = await signer.getController();
     const signerLane = toHex(controller.public).toLowerCase();
     const previous = this.ownershipTails.get(signerLane) ?? Promise.resolve();
@@ -155,15 +213,22 @@ export class JamScriptClient {
     this.ownershipTails.set(signerLane, lane);
     await previous;
     try {
+      if (this.ownershipReservations.has(signerLane)) {
+        throw new Error("another Ownership action is already awaiting signature or submission for this controller");
+      }
+      options.onProgress?.("VALIDATING_DEPLOYMENT");
       await this.validateDeployment();
       const action = actionByName(this.deployment.abi, actionName);
-      if (!isOwnershipAuth(action.auth)) throw new Error("submitOwnershipAction requires an ownership-authenticated action");
+      if (!isOwnershipAuth(action.auth)) throw new Error("prepareOwnershipAction requires an ownership-authenticated action");
       const payload = encodeActionPayload(this.deployment.abi, actionName, input);
       const selector = actionSelector(actionName);
       if (!sameHex(toHex(selector), action.selector)) throw new Error("deployment ABI selector does not match the canonical selector");
+      options.onProgress?.("READING_FINALIZED_CONTEXT");
       const context = await this.rpc.finalizedContext();
       const effectiveOwner = options.actAs ?? controller;
+      options.onProgress?.("READING_MANAGED_STATE");
       const root = await this.managedStateRoot(context);
+      options.onProgress?.("READING_NONCE");
       const nonceBytes = await this.readManagedValue(root, ownershipNonceKey(effectiveOwner));
       const chainNonce = nonceBytes === null ? 0n : decodeValue("u64", nonceBytes);
       if (typeof chainNonce !== "bigint") throw new Error("ownership nonce storage is not u64");
@@ -180,27 +245,118 @@ export class JamScriptClient {
         payload,
       };
       const message = signingMessageV2(unsigned);
-      const authorizationProof = await signer.signJamScriptAction({ ...unsigned, message });
-      if (authorizationProof.length === 0 || authorizationProof.length > 65536) throw new Error("invalid Ownership authorization proof");
-      const signed = encodeSignedActionV2({ ...unsigned, authorizationProof });
-      const actionHash = toHex(blake2(signed));
-      const submitted = await this.rpc.submitTransaction({
-        serviceId: this.deployment.serviceId,
-        serviceCodeHash: this.deployment.codeHash,
-        payloadBase64: toBase64(signed),
-        extrinsicsBase64: (options.extrinsics ?? []).map(toBase64),
-      });
-      this.actionHashes.set(submitted.transactionId.toLowerCase(), actionHash);
-      return {
-        ...submitted,
-        actionHash,
+      const prepared = Object.freeze({ phase: "prepared" as const, actionName });
+      const validUntil = Number(unsigned.validUntil);
+      preparedOwnershipActions.set(prepared, {
+        signer,
+        signerLane,
+        unsigned,
+        message,
+        requestOptions: { extrinsicsBase64: (options.extrinsics ?? []).map(toBase64) },
         submittedSlot: context.slot,
-        validUntil: Number(unsigned.validUntil),
-      };
+        validUntil,
+      });
+      this.ownershipReservations.set(signerLane, prepared);
+      return prepared;
     } finally {
       release();
       if (this.ownershipTails.get(signerLane) === lane) this.ownershipTails.delete(signerLane);
     }
+  }
+
+  /**
+   * Invoke the wallet signer immediately, with no network or state reads in
+   * this phase. Call this directly from the user's signature button handler.
+   */
+  signPreparedOwnershipAction(prepared: PreparedOwnershipAction): Promise<SignedOwnershipAction> {
+    const data = preparedOwnershipActions.get(prepared);
+    if (!data || this.ownershipReservations.get(data.signerLane) !== prepared) {
+      return Promise.reject(new Error("prepared Ownership action is unavailable or already consumed"));
+    }
+
+    let signature: Promise<Uint8Array>;
+    try {
+      signature = data.signer.signJamScriptAction({ ...data.unsigned, message: data.message });
+    } catch (error) {
+      preparedOwnershipActions.delete(prepared);
+      this.ownershipReservations.delete(data.signerLane);
+      return Promise.reject(error);
+    }
+
+    return signature.then((authorizationProof) => {
+      if (this.ownershipReservations.get(data.signerLane) !== prepared) {
+        throw new Error("prepared Ownership action was abandoned while the wallet request was open");
+      }
+      if (authorizationProof.length === 0 || authorizationProof.length > 65536) {
+        throw new Error("invalid Ownership authorization proof");
+      }
+      const bytes = encodeSignedActionV2({ ...data.unsigned, authorizationProof });
+      const actionHash = toHex(blake2(bytes));
+      const signed = Object.freeze({
+        phase: "signed" as const,
+        actionName: prepared.actionName,
+        actionHash,
+        submittedSlot: data.submittedSlot,
+        validUntil: data.validUntil,
+      });
+      const request: SubmitTransactionRequest = {
+        serviceId: this.deployment.serviceId,
+        serviceCodeHash: this.deployment.codeHash,
+        payloadBase64: toBase64(bytes),
+        extrinsicsBase64: data.requestOptions.extrinsicsBase64,
+      };
+      preparedOwnershipActions.delete(prepared);
+      signedOwnershipActions.set(signed, {
+        signerLane: data.signerLane,
+        request,
+        actionHash,
+        submittedSlot: data.submittedSlot,
+        validUntil: data.validUntil,
+      });
+      this.ownershipReservations.set(data.signerLane, signed);
+      return signed;
+    }).catch((error) => {
+      preparedOwnershipActions.delete(prepared);
+      if (this.ownershipReservations.get(data.signerLane) === prepared) this.ownershipReservations.delete(data.signerLane);
+      throw error;
+    });
+  }
+
+  /** Release an unsigned preparation after wallet rejection or timeout. */
+  abandonPreparedOwnershipAction(prepared: PreparedOwnershipAction): void {
+    const data = preparedOwnershipActions.get(prepared);
+    if (!data) return;
+    preparedOwnershipActions.delete(prepared);
+    if (this.ownershipReservations.get(data.signerLane) === prepared) this.ownershipReservations.delete(data.signerLane);
+  }
+
+  /** Submit one signed payload. This method never retries a transport error. */
+  async submitSignedOwnershipAction(signed: SignedOwnershipAction): Promise<SubmitActionResult> {
+    const data = signedOwnershipActions.get(signed);
+    if (!data || this.ownershipReservations.get(data.signerLane) !== signed) {
+      throw new Error("signed Ownership action is unavailable or already submitted");
+    }
+    let submitted: SubmitTransactionResult;
+    try {
+      submitted = await this.rpc.submitTransaction(data.request);
+    } catch (error) {
+      // A JSON-RPC error is an explicit rejection. A transport failure is
+      // ambiguous: the backend may have accepted the payload before the
+      // response was lost, so keep the controller lane reserved and never
+      // silently sign or submit a replacement.
+      signedOwnershipActions.delete(signed);
+      if (error instanceof RpcError) this.ownershipReservations.delete(data.signerLane);
+      throw error;
+    }
+    this.actionHashes.set(submitted.transactionId.toLowerCase(), data.actionHash);
+    signedOwnershipActions.delete(signed);
+    this.ownershipReservations.delete(data.signerLane);
+      return {
+        ...submitted,
+        actionHash: data.actionHash,
+        submittedSlot: data.submittedSlot,
+        validUntil: data.validUntil,
+      };
   }
 
   private async reserveWalletNonce(
