@@ -137,6 +137,160 @@ test("submitAction signs once and submits a logical transaction", async () => {
   assert.equal(nonceRead.params[0], initialContext.blockHash);
 });
 
+test("Ownership action preparation, wallet signature, and submission are separate phases", async () => {
+  const calls = [];
+  const ownershipDeployment = {
+    ...deployment,
+    abi: {
+      ...deployment.abi,
+      actions: [...deployment.abi.actions, {
+        name: "createAsset",
+        selector: toHex(actionSelector("createAsset")),
+        auth: { kind: "ownership", version: 1 },
+        input: [{ name: "subject", type: "ownership" }, { name: "initialSupply", type: "u64" }],
+        executeOutput: "unit",
+      }],
+    },
+  };
+  const transport = {
+    async call(method, params = []) {
+      calls.push({ method, params });
+      if (method === "chain_getBlockHash") return genesisHash;
+      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "jamscript_getStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
+      if (method === "jamscript_submitTransactionV1") return transactionResult("0xprepared");
+      throw new Error("unexpected RPC method: " + method);
+    },
+  };
+  const signer = {
+    publicKey: new Uint8Array(32).fill(7),
+    signatures: 0,
+    async getController() {
+      return { version: 1, kind: 0, public: new Uint8Array(32).fill(7) };
+    },
+    signJamScriptAction(request) {
+      this.signatures += 1;
+      assert.equal(request.message.length > 0, true);
+      return Promise.resolve(new Uint8Array([1, 2, 3]));
+    },
+  };
+  const client = new JamScriptClient(ownershipDeployment, transport);
+  const preparationPhases = [];
+  const prepared = await client.prepareOwnershipAction("createAsset", {
+    subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) },
+    initialSupply: 12n,
+  }, signer, { onProgress: (phase) => preparationPhases.push(phase) });
+
+  assert.equal(prepared.phase, "prepared");
+  assert.deepEqual(preparationPhases, ["VALIDATING_DEPLOYMENT", "READING_FINALIZED_CONTEXT", "READING_MANAGED_STATE", "READING_NONCE"]);
+  assert.equal(signer.signatures, 0);
+  const callsBeforeSignature = calls.length;
+  const signing = client.signPreparedOwnershipAction(prepared);
+  assert.equal(signer.signatures, 1, "wallet signing starts synchronously in the signature phase");
+  assert.equal(calls.length, callsBeforeSignature, "signature phase performs no RPC work");
+  const signed = await signing;
+  assert.equal(signed.phase, "signed");
+  assert.match(signed.actionHash, /^0x[0-9a-f]{64}$/i);
+
+  const submitting = client.submitSignedOwnershipAction(signed);
+  assert.equal(calls.at(-1).method, "jamscript_submitTransactionV1");
+  const submitted = await submitting;
+  assert.equal(submitted.transactionId, "0xprepared");
+  assert.equal(submitted.actionHash, signed.actionHash);
+});
+
+test("a rejected Ownership wallet signature releases its prepared controller reservation", async () => {
+  const ownershipDeployment = {
+    ...deployment,
+    abi: {
+      ...deployment.abi,
+      actions: [...deployment.abi.actions, {
+        name: "createAsset",
+        selector: toHex(actionSelector("createAsset")),
+        auth: { kind: "ownership", version: 1 },
+        input: [{ name: "subject", type: "ownership" }],
+        executeOutput: "unit",
+      }],
+    },
+  };
+  const transport = {
+    async call(method, params = []) {
+      if (method === "chain_getBlockHash") return genesisHash;
+      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "jamscript_getStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
+      throw new Error("unexpected RPC method: " + method);
+    },
+  };
+  let rejectSignature = true;
+  const signer = {
+    async getController() { return { version: 1, kind: 0, public: new Uint8Array(32).fill(7) }; },
+    signJamScriptAction() {
+      if (rejectSignature) return Promise.reject(new Error("user rejected signature"));
+      return Promise.resolve(new Uint8Array([1]));
+    },
+  };
+  const client = new JamScriptClient(ownershipDeployment, transport);
+  const input = { subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) } };
+  const first = await client.prepareOwnershipAction("createAsset", input, signer);
+  await assert.rejects(client.signPreparedOwnershipAction(first), /user rejected signature/);
+  rejectSignature = false;
+  const second = await client.prepareOwnershipAction("createAsset", input, signer);
+  assert.equal((await client.signPreparedOwnershipAction(second)).phase, "signed");
+});
+
+test("abandoning a wallet signature timeout prevents a late signature from producing a submittable action", async () => {
+  const ownershipDeployment = {
+    ...deployment,
+    abi: {
+      ...deployment.abi,
+      actions: [...deployment.abi.actions, {
+        name: "createAsset",
+        selector: toHex(actionSelector("createAsset")),
+        auth: { kind: "ownership", version: 1 },
+        input: [{ name: "subject", type: "ownership" }],
+        executeOutput: "unit",
+      }],
+    },
+  };
+  const transport = {
+    async call(method, params = []) {
+      if (method === "chain_getBlockHash") return genesisHash;
+      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "jamscript_getStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
+      throw new Error("unexpected RPC method: " + method);
+    },
+  };
+  let resolveSignature;
+  let signatureCalls = 0;
+  const signer = {
+    async getController() { return { version: 1, kind: 0, public: new Uint8Array(32).fill(7) }; },
+    signJamScriptAction() {
+      signatureCalls += 1;
+      if (signatureCalls > 1) return Promise.resolve(new Uint8Array([1]));
+      return new Promise((resolve) => { resolveSignature = resolve; });
+    },
+  };
+  const client = new JamScriptClient(ownershipDeployment, transport);
+  const input = { subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) } };
+  const prepared = await client.prepareOwnershipAction("createAsset", input, signer);
+  const signing = client.signPreparedOwnershipAction(prepared);
+  client.abandonPreparedOwnershipAction(prepared);
+  resolveSignature(new Uint8Array([1]));
+  await assert.rejects(signing, /abandoned while the wallet request was open/);
+
+  const replacement = await client.prepareOwnershipAction("createAsset", input, signer);
+  assert.equal((await client.signPreparedOwnershipAction(replacement)).phase, "signed");
+});
+
 function nonceAwareTransport({ failFirstSubmission = false, submissionDelayMs = 0 } = {}) {
   const submissions = [];
   let submissionCount = 0;
