@@ -20,8 +20,8 @@ test -s "${RUN_ROOT}/dist/service.pvm"
 
 log="${RUN_ROOT}/matrix-pvm.log"
 cargo run --locked --quiet \
-  --manifest-path "${JAMSCRIPT_ROOT}/tools/pvm-scriptc-ed25519-ffi/Cargo.toml" \
-  --bin matrix_adapter -- "${RUN_ROOT}/dist/service.pvm" | tee "${log}"
+  --manifest-path "${JAMSCRIPT_ROOT}/tools/pvm-scriptc-matrix-adapter/Cargo.toml" \
+  -- "${RUN_ROOT}/dist/service.pvm" | tee "${log}"
 for marker in \
   MATRIX_ADAPTER_PVM_VALID=PASS \
   MATRIX_ADAPTER_PVM_INVALID_M_TO_S=PASS \

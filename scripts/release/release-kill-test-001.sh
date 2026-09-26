@@ -249,6 +249,7 @@ echo "K10_BUILD=PASS"
 echo "K11_PVM_ARTIFACT=PASS"
 
 generic_ed25519_build=false
+generic_ed25519_plain_action=false
 generic_ed25519_valid=false
 generic_ed25519_invalid=false
 generic_ed25519_fatal=true
@@ -260,13 +261,18 @@ if grep -Fq 'verifyEd25519' "${fixture_dir}/${entry_file}"; then
   }
   generic_log="${work_dir}/generic-ed25519.log"
   "${harness}" "${output_a}/service.pvm" | tee "${generic_log}"
+  grep -Fxq 'GENERIC_ED25519_PLAIN_ACTION=PASS' "${generic_log}"
+  grep -Fxq 'GENERIC_ED25519_INVALID=PASS' "${generic_log}"
+  grep -Fxq 'GENERIC_ED25519_VALID=PASS' "${generic_log}"
   grep -Fxq 'GENERIC_ED25519_PVM=PASS' "${generic_log}"
   grep -Fxq 'GENERIC_ED25519_FATAL=false' "${generic_log}"
   generic_ed25519_build=true
+  generic_ed25519_plain_action=true
   generic_ed25519_valid=true
   generic_ed25519_invalid=true
   generic_ed25519_fatal=false
   echo "RELEASE_GENERIC_ED25519_BUILD=PASS"
+  echo "RELEASE_GENERIC_ED25519_PLAIN_ACTION=PASS"
   echo "RELEASE_GENERIC_ED25519_VALID=PASS"
   echo "RELEASE_GENERIC_ED25519_INVALID=PASS"
   echo "RELEASE_GENERIC_ED25519_FATAL=false"
@@ -312,6 +318,7 @@ cat >"${result_json}" <<EOF
   "execution": true,
   "output_match": true,
   "generic_ed25519_build": ${generic_ed25519_build},
+  "generic_ed25519_plain_action": ${generic_ed25519_plain_action},
   "generic_ed25519_valid": ${generic_ed25519_valid},
   "generic_ed25519_invalid": ${generic_ed25519_invalid},
   "generic_ed25519_fatal": ${generic_ed25519_fatal},

@@ -16,7 +16,8 @@ fn main() -> Result<()> {
         .nth(1)
         .map(PathBuf::from)
         .context("usage: matrix_adapter <service.pvm>")?;
-    let artifact = fs::read(&artifact).with_context(|| format!("reading {}", artifact.display()))?;
+    let artifact =
+        fs::read(&artifact).with_context(|| format!("reading {}", artifact.display()))?;
     let master = SigningKey::from_bytes(&[1; 32]);
     let self_signing = SigningKey::from_bytes(&[2; 32]);
     let device = SigningKey::from_bytes(&[3; 32]);
@@ -211,7 +212,9 @@ fn run_probe(
             return Ok(());
         }
         caller.instance.write_memory(output, &[0u8; 32])?;
-        caller.instance.write_memory(output_size, &(32u64).to_le_bytes())?;
+        caller
+            .instance
+            .write_memory(output_size, &(32u64).to_le_bytes())?;
         caller.instance.set_reg(Reg::A0, 0);
         Ok(())
     })?;
@@ -230,7 +233,9 @@ fn run_probe(
     let output_len = instance.reg(Reg::A1) as u32;
     let output = instance.read_memory(output_ptr, output_len)?;
     let decoded = RuntimeRefineOutputV1::decode(&output).map_err(|error| {
-        anyhow::anyhow!("decoding PVM receipt (fatal output is not an application rejection): {error:?}")
+        anyhow::anyhow!(
+            "decoding PVM receipt (fatal output is not an application rejection): {error:?}"
+        )
     })?;
     let receipt = decoded
         .receipts

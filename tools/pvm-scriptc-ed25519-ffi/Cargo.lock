@@ -783,15 +783,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownership-matrix"
-version = "0.1.0"
-dependencies = [
- "base64",
- "jamscript-crypto",
- "thiserror",
-]
-
-[[package]]
 name = "parity-scale-codec"
 version = "3.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -983,7 +974,7 @@ dependencies = [
  "anyhow",
  "ed25519-dalek",
  "jamscript-crypto",
- "ownership-matrix",
+ "ownership-core",
  "polkavm",
  "service-runtime-core",
  "service-runtime-guest",
