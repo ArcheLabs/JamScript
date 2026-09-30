@@ -33,7 +33,10 @@ await writeFile(profilePath, JSON.stringify({
   // profile-relative entry next to the profile itself.
   entry: "scriptc_service.transformed.ts",
   emission: "c",
-  optimization: "dev",
+  // Service actions run under a bounded PVM gas budget. Always compile the
+  // deployed artifact with the release optimizer; dev (-O0) output can trap
+  // during planning even when the action itself is otherwise valid.
+  optimization: "release",
   abi: {
     prefix: "jamscript_scriptc_",
     // JamScript's runtime descriptor calls the adapter init symbol. Keep the
