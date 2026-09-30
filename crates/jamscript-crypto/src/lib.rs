@@ -186,34 +186,69 @@ pub fn verify_polkadot_ownership(
     }
     let scheme = authorization_proof[0];
     let signature = &authorization_proof[1..];
+    let wrapped_message = polkadot_sign_raw_message(message);
     match scheme {
         0 => {
             if signature.len() != 64 {
                 return Err(CryptoError::InvalidPolkadotAuthorization);
             }
-            verify_ed25519(&ownership.public, signature, message)
-                .map_err(|_| CryptoError::InvalidPolkadotAuthorization)?;
+            if verify_ed25519(&ownership.public, signature, message).is_err()
+                && verify_ed25519(&ownership.public, signature, &wrapped_message).is_err()
+            {
+                return Err(CryptoError::InvalidPolkadotAuthorization);
+            }
         }
         1 => {
             if signature.len() != 64 {
                 return Err(CryptoError::InvalidPolkadotAuthorization);
             }
-            verify_sr25519(&ownership.public, signature, message)
-                .map_err(|_| CryptoError::InvalidPolkadotAuthorization)?;
+            if verify_sr25519(&ownership.public, signature, message).is_err()
+                && verify_sr25519(&ownership.public, signature, &wrapped_message).is_err()
+            {
+                return Err(CryptoError::InvalidPolkadotAuthorization);
+            }
         }
         2 => {
             if signature.len() != 65 {
                 return Err(CryptoError::InvalidPolkadotAuthorization);
             }
-            let digest = blake2_256(message);
-            let recovered = recover_secp256k1(&digest, signature)?;
-            if blake2_256(&recovered) != ownership.public.as_slice() {
-                return Err(CryptoError::PolkadotAddressMismatch);
+            let mut recovered_any = false;
+            let mut recovery_error = None;
+            for candidate in [message, wrapped_message.as_slice()] {
+                let digest = blake2_256(candidate);
+                match recover_secp256k1(&digest, signature) {
+                    Ok(recovered) => {
+                        recovered_any = true;
+                        if blake2_256(&recovered) == ownership.public.as_slice() {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) => {
+                        recovery_error.get_or_insert(error);
+                    }
+                };
             }
+            if !recovered_any {
+                if let Some(error) = recovery_error {
+                    return Err(error);
+                }
+            }
+            return Err(CryptoError::PolkadotAddressMismatch);
         }
         _ => return Err(CryptoError::InvalidPolkadotAuthorization),
     }
     Ok(())
+}
+
+/// Polkadot extension `signRaw` implementations conventionally sign byte
+/// messages wrapped in `<Bytes>...</Bytes>`. Accept both that interoperable
+/// representation and signatures over the exact JamScript message.
+fn polkadot_sign_raw_message(message: &[u8]) -> Vec<u8> {
+    let mut wrapped = Vec::with_capacity(7 + message.len() + 8);
+    wrapped.extend_from_slice(b"<Bytes>");
+    wrapped.extend_from_slice(message);
+    wrapped.extend_from_slice(b"</Bytes>");
+    wrapped
 }
 
 pub fn verify_ownership(
