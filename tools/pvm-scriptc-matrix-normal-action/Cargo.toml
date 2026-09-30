@@ -1,0 +1,18 @@
+[package]
+name = "pvm-scriptc-matrix-normal-action"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.100"
+ed25519-dalek = "2.2.0"
+jamscript-codec = { path = "../../crates/jamscript-codec" }
+jamscript-ir = { path = "../../crates/jamscript-ir" }
+jamscript-protocol = { path = "../../crates/jamscript-protocol" }
+jamscript-runtime-core = { path = "../../crates/jamscript-runtime-core" }
+ownership-core = { path = "../../crates/ownership-core" }
+polkavm = "=0.30.0"
+service-runtime-core = { path = "../../crates/service-runtime-core" }
+service-runtime-state = { path = "../../crates/service-runtime-state" }
+
+[workspace]

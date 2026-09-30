@@ -68,7 +68,12 @@ fn host_execution_environment() -> Result<ExecutionEnvironmentV1, GuestError> {
 }
 
 /// Fixed production arena budget for one guest invocation.
-pub const GUEST_HEAP_LIMIT: usize = 256 * 1024;
+///
+/// The previous 256 KiB limit was below the measured peak allocation for a
+/// valid delegated ownership transfer through the full Locus ScriptC service.
+/// Keep room for the planner/refine state proof and application runtime while
+/// retaining a deterministic per-invocation memory bound.
+pub const GUEST_HEAP_LIMIT: usize = 512 * 1024;
 
 #[cfg(any(target_env = "polkavm", test))]
 #[inline]
@@ -538,7 +543,7 @@ mod allocator_tests {
 
     #[test]
     fn production_arena_exhaustion_is_bounded_without_hang() {
-        assert_eq!(GUEST_HEAP_LIMIT, 262_144);
+        assert_eq!(GUEST_HEAP_LIMIT, 524_288);
 
         // This models the top-level runtime allocation repro: once the shared
         // arena is full, the next allocation must fail as a bounded decision.

@@ -13,7 +13,8 @@ use jamscript_deployment::JsonRpcTransport;
 use parity_scale_codec::Decode as ScaleDecode;
 use parity_scale_codec::Encode as ScaleEncode;
 use polkavm::{
-    BackendKind, Config as PvmConfig, Engine, Linker, MemoryAccessError, Module, ModuleConfig, Reg,
+    BackendKind, CallError as PvmCallError, Config as PvmConfig, Engine, Linker, MemoryAccessError,
+    Module, ModuleConfig, Reg,
 };
 use rocksdb::{
     ColumnFamilyDescriptor, Direction, IteratorMode, Options, WriteBatch, WriteOptions, DB,
@@ -860,7 +861,7 @@ impl PvmApplication {
     }
 
     pub fn metadata(&self) -> Result<BackendMetadataV1, BackendError> {
-        let bytes = self.invoke("jamscript_backend_metadata_v1", &[], [0; 32])?;
+        let bytes = self.invoke("jamscript_backend_metadata_v1", &[], [0; 32], None)?;
         BackendMetadataV1::decode(&bytes).map_err(BackendError::Wire)
     }
 
@@ -873,7 +874,7 @@ impl PvmApplication {
         input: &[u8],
         network_domain: StateRoot,
     ) -> Result<Vec<u8>, BackendError> {
-        self.invoke("jamscript_plan_v1", input, network_domain)
+        self.invoke("jamscript_plan_v1", input, network_domain, None)
     }
 
     pub fn plan_with_keys(
@@ -922,6 +923,23 @@ impl PvmApplication {
         external_state: Vec<service_runtime_core::ExternalStateWitnessV1>,
         network_domain: StateRoot,
     ) -> Result<PlannerResult, BackendError> {
+        self.plan_with_external_witness_and_network_domain_for_service_id(
+            actions,
+            managed_state,
+            external_state,
+            network_domain,
+            None,
+        )
+    }
+
+    fn plan_with_external_witness_and_network_domain_for_service_id(
+        &self,
+        actions: &[Vec<u8>],
+        managed_state: service_runtime_core::ManagedStateWitnessV1,
+        external_state: Vec<service_runtime_core::ExternalStateWitnessV1>,
+        network_domain: StateRoot,
+        service_id: Option<u32>,
+    ) -> Result<PlannerResult, BackendError> {
         let input = RuntimeRefineInputV1 {
             version: RuntimeRefineInputV1::VERSION,
             managed_state,
@@ -929,7 +947,7 @@ impl PvmApplication {
             actions: actions.to_vec(),
         };
         let encoded = input.encode().map_err(BackendError::Wire)?;
-        let output = self.plan_encoded_with_network_domain(&encoded, network_domain)?;
+        let output = self.invoke("jamscript_plan_v1", &encoded, network_domain, service_id)?;
         if let Ok((service_id, key)) =
             service_runtime_core::decode_planner_need_external_state(&output)
         {
@@ -959,7 +977,16 @@ impl PvmApplication {
         input: &[u8],
         network_domain: StateRoot,
     ) -> Result<RuntimeRefineOutputV1, BackendError> {
-        let bytes = self.invoke("minijam_refine", input, network_domain)?;
+        self.refine_encoded_with_network_domain_for_service_id(input, network_domain, None)
+    }
+
+    fn refine_encoded_with_network_domain_for_service_id(
+        &self,
+        input: &[u8],
+        network_domain: StateRoot,
+        service_id: Option<u32>,
+    ) -> Result<RuntimeRefineOutputV1, BackendError> {
+        let bytes = self.invoke("minijam_refine", input, network_domain, service_id)?;
         RuntimeRefineOutputV1::decode(&bytes).map_err(BackendError::Wire)
     }
 
@@ -968,6 +995,7 @@ impl PvmApplication {
         export: &str,
         payload: &[u8],
         network_domain: StateRoot,
+        service_id: Option<u32>,
     ) -> Result<Vec<u8>, BackendError> {
         let mut config = PvmConfig::new();
         config.set_backend(Some(BackendKind::Interpreter));
@@ -978,7 +1006,7 @@ impl PvmApplication {
             self.bytes.as_ref().clone().into(),
         )
         .map_err(|error| BackendError::Pvm(error.to_string()))?;
-        let payload = payload.to_vec();
+        let payload_for_host = payload.to_vec();
         let mut linker: Linker<(), MemoryAccessError> = Linker::new();
         linker
             .define_untyped("minijam_fetch", move |caller| {
@@ -988,7 +1016,7 @@ impl PvmApplication {
                 let mode = caller.instance.reg(Reg::A3);
                 let index = caller.instance.reg(Reg::A4);
                 let value = if mode == 13 && index == 0 {
-                    payload.as_slice()
+                    payload_for_host.as_slice()
                 } else {
                     &[]
                 };
@@ -1036,9 +1064,30 @@ impl PvmApplication {
             .instantiate()
             .map_err(|error| BackendError::Pvm(error.to_string()))?;
         instance.set_gas(5_000_000);
-        instance
-            .call_typed_and_get_result::<u64, _>(&mut (), export, ())
-            .map_err(|error| BackendError::Pvm(format!("{export}: {error:?}")))?;
+        if let Err(error) = instance.call_typed_and_get_result::<u64, _>(&mut (), export, ()) {
+            let failure_kind = match &error {
+                PvmCallError::Trap => "TRAP",
+                PvmCallError::NotEnoughGas => "OUT_OF_GAS",
+                PvmCallError::Error(error) if error.to_string().contains("export not found") => {
+                    "INVALID_EXPORT"
+                }
+                PvmCallError::Error(_) | PvmCallError::User(_) => "HOST_OR_RUNTIME_ERROR",
+                PvmCallError::Step => "STEP",
+            };
+            let (action_selector, ownership_kind) = pvm_action_diagnostic_context(payload);
+            // This log intentionally includes only public routing metadata and
+            // runtime location. It never includes the action payload, signature,
+            // ownership proof, or wallet credentials.
+            eprintln!(
+                "PVM_INVOKE_FAILED serviceId={} codeHash={} artifactDigest={} export={export} selector={action_selector} ownershipKind={ownership_kind} kind={failure_kind} error={error:?} program_counter={:?} gasLimit=5000000 gasRemaining={}",
+                service_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".into()),
+                hash_hex(&self.canonical_code_hash),
+                hash_hex(&self.artifact_digest),
+                instance.program_counter(),
+                instance.gas(),
+            );
+            return Err(BackendError::Pvm(format!("{export}: {error:?}")));
+        }
         let pointer = instance.reg(Reg::A0) as u32;
         let size = instance.reg(Reg::A1) as u32;
         if size as usize > MAX_RECOVERY_BYTES + MAX_PVM_ARTIFACT_BYTES.min(2 * 1024 * 1024) {
@@ -1048,6 +1097,25 @@ impl PvmApplication {
             .read_memory(pointer, size)
             .map_err(|error| BackendError::Pvm(error.to_string()))
     }
+}
+
+fn pvm_action_diagnostic_context(payload: &[u8]) -> (String, String) {
+    let Ok(input) = RuntimeRefineInputV1::decode(payload) else {
+        return ("unknown".into(), "unknown".into());
+    };
+    let Some(action) = input.actions.first() else {
+        return ("unknown".into(), "unknown".into());
+    };
+    if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v2(action) {
+        return (
+            hash_hex(&signed.action_selector),
+            format!("{:?}", signed.controller.kind),
+        );
+    }
+    if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v1(action) {
+        return (hash_hex(&signed.action_selector), "ED25519".into());
+    }
+    ("unknown".into(), "unknown".into())
 }
 
 impl ApplicationPlanner for PvmApplication {
@@ -1510,6 +1578,14 @@ impl TransactionCoordinator {
             } else {
                 (None, None, None, None)
             };
+        let action_selector = jamscript_runtime_core::decode_signed_action_v1(&action)
+            .map(|signed| signed.action_selector)
+            .or_else(|_| {
+                jamscript_runtime_core::decode_signed_action_v2(&action)
+                    .map(|signed| signed.action_selector)
+            })
+            .map(|selector| hash_hex(&selector))
+            .unwrap_or_else(|_| "unknown".into());
         let arrival_sequence = state.next_arrival_sequence;
         state.next_arrival_sequence = state.next_arrival_sequence.saturating_add(1);
         let extrinsics = params
@@ -1555,7 +1631,7 @@ impl TransactionCoordinator {
             .or_insert_with(|| Instant::now() + self.flush_delay);
         self.wake.notify_all();
         drop(state);
-        eprintln!("TX_ENQUEUED service_id={service_id} transaction_id={logical_id} arrival_sequence={arrival_sequence}");
+        eprintln!("TX_ENQUEUED service_id={service_id} transaction_id={logical_id} action_selector={action_selector} arrival_sequence={arrival_sequence}");
         Ok(logical_id)
     }
 
@@ -2040,11 +2116,12 @@ impl BackendEngine {
                 .map_err(BackendError::Provider)?;
             let external_witnesses =
                 build_external_witnesses(state, self.network.as_ref(), &context, &external_keys)?;
-            let planned = pvm.plan_with_external_witness_and_network_domain(
+            let planned = pvm.plan_with_external_witness_and_network_domain_for_service_id(
                 &actions,
                 witness,
                 external_witnesses.clone(),
                 network_domain,
+                Some(service_id),
             )?;
             let mut changed = false;
             for key in planned.local_access_keys {
@@ -2082,7 +2159,11 @@ impl BackendEngine {
         };
         let action_count = input.actions.len();
         let encoded = input.encode().map_err(BackendError::Wire)?;
-        let prediction = pvm.refine_encoded_with_network_domain(&encoded, network_domain)?;
+        let prediction = pvm.refine_encoded_with_network_domain_for_service_id(
+            &encoded,
+            network_domain,
+            Some(service_id),
+        )?;
         if prediction.receipts.len() != action_count {
             return Err(BackendError::Rpc(format!(
                 "PVM returned {} action receipts for {} actions",
