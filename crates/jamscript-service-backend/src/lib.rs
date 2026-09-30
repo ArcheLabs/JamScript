@@ -3434,6 +3434,13 @@ impl BackendRpcHandler {
     }
 
     fn dispatch_ready_batches(&self) -> Result<(), BackendError> {
+        // Formal validates the finalized context before it accepts a Work.
+        // The chain can advance while the backend plans and preflights a batch,
+        // so retry that explicit pre-acceptance rejection with a fresh context.
+        // No Work exists when Formal returns StaleContext, making this retry
+        // safe for the same signed actions and nonce reservations.
+        const MAX_STALE_CONTEXT_RETRIES: usize = 3;
+
         let (network, loader) = match (&self.network, &self.pvm_loader) {
             (Some(network), Some(loader)) => (Arc::clone(network), Arc::clone(loader)),
             _ => return Ok(()),
@@ -3462,16 +3469,30 @@ impl BackendRpcHandler {
                     .map(Value::String)
                     .collect(),
             );
-            let result = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
-                BackendEngine::new(network.clone(), loader.clone()).submit_actions(
-                    &mut state,
-                    submit_params,
-                    batch.actions,
-                )
+            let mut stale_context_retries = 0;
+            let result = loop {
+                let attempt_result = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
+                    BackendEngine::new(network.clone(), loader.clone()).submit_actions(
+                        &mut state,
+                        submit_params.clone(),
+                        batch.actions.clone(),
+                    )
+                };
+                match attempt_result {
+                    Err(BackendError::StaleContext)
+                        if stale_context_retries < MAX_STALE_CONTEXT_RETRIES =>
+                    {
+                        stale_context_retries += 1;
+                        eprintln!(
+                            "TX_BATCH_RETRY service_id={service_id} batch_id={batch_id} reason=StaleContext attempt={stale_context_retries} max_retries={MAX_STALE_CONTEXT_RETRIES}"
+                        );
+                    }
+                    result => break result,
+                }
             };
             match result {
                 Ok((response, prediction)) => {
