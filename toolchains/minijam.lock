@@ -1,10 +1,10 @@
 source_repository = "https://github.com/ArcheLabs/minijam-client"
-source_revision = "559215cad2b9cda90a690c977be4a2b550bbc413"
+source_revision = "1000bd7504a61010b5e83b1cae5a651b9373ae08"
 
-dev_image = "ghcr.io/archelabs/minijam@sha256:9e08ccf5a0ce373860082ef79453c8f3d86c61d95af671bb0cfce19799ef3b00"
+dev_image = "ghcr.io/archelabs/minijam@sha256:8dfb923c521b93c91ff989d156e866269ceadc85b32c6ef5073d075c1df7d417"
 
 # Component pins are retained as release metadata only; the canonical
 # JamScript E2E does not compose these images independently.
-node_image = "ghcr.io/archelabs/minijam-node@sha256:4c90bc6ac31e80f572029fea18785f1f5ef6c6a5328bbd24cce6636f64d47265"
-worker_image = "ghcr.io/archelabs/minijam-worker@sha256:9b46c35e9c638070671df544c5eeb6274e671c591f61ddabaee2fc9f4bcfd575"
-formal_rpc_image = "ghcr.io/archelabs/minijam-formal-rpc@sha256:e9e0afded2dfac5265e412377c2783ca466acd41847af255bb4b3cad92773192"
+node_image = "ghcr.io/archelabs/minijam-node@sha256:ba765011d45f6f0307328e55f3d7311ae15570baa286ef13897ed8d59d18bfa9"
+worker_image = "ghcr.io/archelabs/minijam-worker@sha256:714bf7456ad797d8436568cfbe0375f8afbead892c7bb407fd60bb3f6ed8ac2f"
+formal_rpc_image = "ghcr.io/archelabs/minijam-formal-rpc@sha256:6314129f900154ec2f001e73b2f09c1e4ad747bc12f972438c372f55e2210904"

@@ -21,7 +21,7 @@ boundary. JamScript remains spec-agnostic and targets the MiniJAM ABI; it does
 not target JAM FullSpec directly, and it does not checkout MiniJAM or Jambda
 when building or running the consumer E2E.
 
-The checked-in `dev_image` points at the published MiniJAM Stage-1 v0.2.0
+The checked-in `dev_image` points at the published MiniJAM Stage-1 v0.2.1
 aggregate image. The consumer E2E fails closed with
 `MINIJAM_DEV_IMAGE_PIN=BLOCKED` if this value is missing, mutable, or not
 digest-addressed; it never falls back to component images or a source
