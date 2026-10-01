@@ -1,0 +1,10 @@
+.git
+target
+**/target
+node_modules
+**/node_modules
+dist
+**/dist
+tools/*
+!tools/managed-state-network-adapter
+!tools/managed-state-network-adapter/**
