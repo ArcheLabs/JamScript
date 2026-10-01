@@ -19,7 +19,10 @@ green in ordinary CI before starting a release.
 ## Release validation
 
 Run `Release JamScript` manually from `main` with the intended version, for
-example `v0.1.0-rc.4`. The workflow has only four jobs: validate, build one
+example `v0.1.0-rc.9`. Publish the matching Backend release
+(`backend-v0.1.0-rc.9`) first. JamScript validation requires its release
+manifest and Linux/macOS artifacts before building the JamScript archives.
+The workflow has only four jobs: validate, build one
 toolchain archive per platform, build one CLI archive per platform, and publish
 the exact bytes. Validation requires already successful push-triggered CI and
 canonical MiniJAM consumer E2E runs for the exact source SHA; it does not rerun

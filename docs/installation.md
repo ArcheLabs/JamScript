@@ -35,10 +35,10 @@ For reproducible environments, pass an immutable release tag:
 
 ```bash
 curl -fsSL https://install.minijam.xyz/jamscript \
-  | bash -s -- --version v0.1.0-rc.7
+  | bash -s -- --version v0.1.0-rc.8
 ```
 
-The matching backend release is resolved as `backend-v0.1.0-rc.7`.
+The matching backend release is resolved as `backend-v0.1.0-rc.8`.
 
 A custom binary directory can be selected with:
 

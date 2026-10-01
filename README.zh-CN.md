@@ -31,7 +31,7 @@ curl -fsSL https://install.minijam.xyz/jamscript | bash
 
 ```bash
 curl -fsSL https://install.minijam.xyz/jamscript \
-  | bash -s -- --version v0.1.0-rc.7
+  | bash -s -- --version v0.1.0-rc.8
 ```
 
 ## 🧩 示例
