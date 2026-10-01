@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Example: backend-v0.1.0-rc.N or backend-v0.1.0
+        description: "Example: backend-v0.1.0-rc.N or backend-v0.1.0"
         required: true
         type: string
 
