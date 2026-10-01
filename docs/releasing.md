@@ -121,7 +121,10 @@ release scope.
 ## Promotion protocol
 
 Run `Release JamScript` manually from `main` with only the intended version,
-for example `v0.1.0-rc.4`. The workflow validates the generic semver and
+for example `v0.1.0-rc.9`. Publish the matching Backend release
+(`backend-v0.1.0-rc.9`) first. The JamScript workflow verifies the backend
+manifest and Linux/macOS artifacts before it builds or publishes anything.
+The workflow validates the generic semver and
 source identity, requires a successful push-triggered CI run for that exact
 source SHA, builds the release bytes once, checks the exact five-file public
 asset set, creates and pushes the annotated tag, and publishes the exact same

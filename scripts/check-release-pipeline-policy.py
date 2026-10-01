@@ -33,6 +33,15 @@ if "actions: read" not in release or "gh run list" not in release:
     raise SystemExit("release validate job must require a successful source CI run")
 if "SOURCE_CI_STATUS=PASS" not in release:
     raise SystemExit("release must report the source CI status")
+if "backend-${VERSION}" not in release or "MATCHING_BACKEND_RELEASE=PASS" not in release:
+    raise SystemExit("JamScript release must require a matching published Backend release")
+for required_backend_asset in (
+    "backend-manifest.json",
+    "jamscript-backend-${VERSION}-linux-x86_64.tar.gz",
+    "jamscript-backend-${VERSION}-macos-arm64.tar.gz",
+):
+    if required_backend_asset not in release:
+        raise SystemExit(f"release is missing matching Backend validation: {required_backend_asset}")
 if "minijam-network-e2e.yml" not in release or "JAMSCRIPT_CANONICAL_MINIJAM_E2E=PASS" not in release:
     raise SystemExit("release must require a successful canonical MiniJAM consumer E2E")
 
@@ -85,7 +94,6 @@ for forbidden in (
     "jamscript-service-backend",
     "Dockerfile.backend",
     "docker",
-    "backend",
     "ghcr.io",
     "packages: write",
 ):

@@ -1,6 +1,6 @@
-# JamScript v0.1.0-rc.8 (unpublished candidate)
+# JamScript v0.1.0-rc.8
 
-This candidate separates provider-neutral execution and cryptography from
+This release separates provider-neutral execution and cryptography from
 identity-specific authorization adapters.
 
 ## JamScript Core
@@ -25,5 +25,5 @@ identity-specific authorization adapters.
   builds and executes a generic Ed25519 consumer using those candidate
   artifacts. It checks both valid and invalid signatures and rejects runtime
   fatal results.
-- This file describes an unpublished candidate. Publishing remains a separate
-  release action.
+- Published as a prerelease with Linux x86_64 and macOS Apple Silicon CLI and
+  managed toolchain bundles, plus `SHA256SUMS`.
