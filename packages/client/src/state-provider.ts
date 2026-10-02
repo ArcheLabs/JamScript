@@ -7,6 +7,13 @@ export type StateProviderRequest = {
   serviceKey: string;
   stateRoot: string;
   key: Uint8Array;
+  context?: {
+    blockHash: string;
+    blockNumber: number;
+    stateRoot: string;
+    slot: number;
+    contextType?: "best" | "finalized";
+  };
 };
 
 export type StateProviderResponse = {
@@ -57,6 +64,7 @@ export class RpcStateProvider implements StateProvider {
         serviceId: request.serviceId,
         stateRoot: request.stateRoot,
         keyBase64: toBase64(request.key),
+        ...(request.context ? { context: request.context } : {}),
       });
     } catch (error) {
       const detail = error instanceof Error ? ": " + error.message : "";
@@ -97,10 +105,17 @@ export class TrustedStateProvider implements StateProvider {
       valueBase64: string | null;
     };
     try {
-      response = await this.transport.call("jamscript_getStateV1", {
-        serviceId: request.serviceId,
-        keyBase64: toBase64(request.key),
-      });
+      response = request.context
+        ? await this.transport.call("minijam_getManagedStateV1", {
+            serviceId: request.serviceId,
+            stateRoot: request.stateRoot,
+            keyBase64: toBase64(request.key),
+            context: request.context,
+          })
+        : await this.transport.call("jamscript_getStateV1", {
+            serviceId: request.serviceId,
+            keyBase64: toBase64(request.key),
+          });
     } catch (error) {
       const detail = error instanceof Error ? ": " + error.message : "";
       throw new StateProviderError(
@@ -137,10 +152,18 @@ export class ProofStateProvider implements StateProvider {
       proofBase64: string[];
     };
     try {
-      response = await this.transport.call("jamscript_getStateProofV1", {
-        serviceId: request.serviceId,
-        keyBase64: toBase64(request.key),
-      });
+      response = request.context
+        ? await this.transport.call("minijam_getManagedStateV1", {
+            serviceId: request.serviceId,
+            stateRoot: request.stateRoot,
+            keyBase64: toBase64(request.key),
+            context: request.context,
+          })
+        : await this.transport.call("jamscript_getStateProofV1", {
+            serviceId: request.serviceId,
+            stateRoot: request.stateRoot,
+            keyBase64: toBase64(request.key),
+          });
     } catch (error) {
       const detail = error instanceof Error ? ": " + error.message : "";
       throw new StateProviderError(

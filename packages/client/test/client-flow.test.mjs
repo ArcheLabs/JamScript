@@ -27,6 +27,12 @@ const refreshedContext = {
   stateRoot: "0x" + "66".repeat(32),
   slot: 11,
 };
+const bestContext = {
+  blockHash: "0x" + "77".repeat(32),
+  blockNumber: 12,
+  stateRoot: "0x" + "88".repeat(32),
+  slot: 12,
+};
 const deployment = {
   genesisHash,
   networkDomain: genesisHash,
@@ -107,6 +113,9 @@ test("submitAction signs once and submits a logical transaction", async () => {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
       }
       if (method === "minijam_getManagedStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
+      if (method === "minijam_getManagedStateV1") {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null, proofBase64: ["AA=="] };
       }
       if (method === "jamscript_submitTransactionV1") {
@@ -156,9 +165,10 @@ test("Ownership action preparation, wallet signature, and submission are separat
     async call(method, params = []) {
       calls.push({ method, params });
       if (method === "chain_getBlockHash") return genesisHash;
-      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getBestContext") return bestContext;
       if (method === "minijam_getServiceStorageAt") return null;
-      if (method === "jamscript_getStateV1") {
+      if (method === "minijam_getManagedStateV1") {
+        assert.deepEqual(params.context, { ...bestContext, contextType: "best" });
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
       }
       if (method === "jamscript_submitTransactionV1") return transactionResult("0xprepared");
@@ -185,7 +195,7 @@ test("Ownership action preparation, wallet signature, and submission are separat
   }, signer, { onProgress: (phase) => preparationPhases.push(phase) });
 
   assert.equal(prepared.phase, "prepared");
-  assert.deepEqual(preparationPhases, ["VALIDATING_DEPLOYMENT", "READING_FINALIZED_CONTEXT", "READING_MANAGED_STATE", "READING_NONCE"]);
+  assert.deepEqual(preparationPhases, ["VALIDATING_DEPLOYMENT", "READING_BEST_CONTEXT", "READING_MANAGED_STATE", "READING_NONCE"]);
   assert.equal(signer.signatures, 0);
   const callsBeforeSignature = calls.length;
   const signing = client.signPreparedOwnershipAction(prepared);
@@ -219,9 +229,9 @@ test("a rejected Ownership wallet signature releases its prepared controller res
   const transport = {
     async call(method, params = []) {
       if (method === "chain_getBlockHash") return genesisHash;
-      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getBestContext") return bestContext;
       if (method === "minijam_getServiceStorageAt") return null;
-      if (method === "jamscript_getStateV1") {
+      if (method === "minijam_getManagedStateV1") {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
       }
       throw new Error("unexpected RPC method: " + method);
@@ -261,9 +271,9 @@ test("abandoning a wallet signature timeout prevents a late signature from produ
   const transport = {
     async call(method, params = []) {
       if (method === "chain_getBlockHash") return genesisHash;
-      if (method === "minijam_getFinalizedContext") return initialContext;
+      if (method === "minijam_getBestContext") return bestContext;
       if (method === "minijam_getServiceStorageAt") return null;
-      if (method === "jamscript_getStateV1") {
+      if (method === "minijam_getManagedStateV1") {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
       }
       throw new Error("unexpected RPC method: " + method);
@@ -303,6 +313,9 @@ function nonceAwareTransport({ failFirstSubmission = false, submissionDelayMs = 
       if (method === "chain_getBlockHash") return genesisHash;
       if (method === "minijam_getFinalizedContext") return initialContext;
       if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "minijam_getManagedStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
       if (method === "jamscript_getStateV1") {
         return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
       }
@@ -390,6 +403,124 @@ test("query reads and decodes state at the finalized block", async () => {
   assert.equal(result.stateRoot, queryManagedStateRoot);
 });
 
+test("query defaults to one explicit best context and never falls back to finalized", async () => {
+  const calls = [];
+  const transport = {
+    async call(method, params = []) {
+      calls.push({ method, params });
+      if (method === "minijam_getBestContext") return bestContext;
+      if (method === "minijam_getServiceStorageAt") {
+        assert.equal(params[0], bestContext.blockHash);
+        return managedCommitment(queryManagedStateRoot);
+      }
+      if (method === "minijam_getManagedStateV1") {
+        assert.deepEqual(params.context, { ...bestContext, contextType: "best" });
+        return { serviceId: 1000, stateRoot: queryManagedStateRoot, keyBase64: params.keyBase64, valueBase64: rawU64(43) };
+      }
+      throw new Error("unexpected RPC method: " + method);
+    },
+  };
+  const result = await new JamScriptClient(deployment, transport).query("getScore", new Uint8Array(32).fill(1));
+  assert.equal(result.value, 43n);
+  assert.equal(result.context.contextType, "best");
+  assert.equal(result.context.blockHash, bestContext.blockHash);
+  assert.equal(result.stateRoot, queryManagedStateRoot);
+  assert.equal(calls.some(({ method }) => method === "minijam_getFinalizedContext"), false);
+});
+
+test("same-client concurrent Ownership preparations reserve ordered unique nonces", async () => {
+  const ownershipDeployment = {
+    ...deployment,
+    abi: {
+      ...deployment.abi,
+      actions: [...deployment.abi.actions, {
+        name: "createAsset",
+        selector: toHex(actionSelector("createAsset")),
+        auth: { kind: "ownership", version: 1 },
+        input: [{ name: "subject", type: "ownership" }],
+        executeOutput: "unit",
+      }],
+    },
+  };
+  const transport = {
+    async call(method, params = []) {
+      if (method === "chain_getBlockHash") return genesisHash;
+      if (method === "minijam_getBestContext") return bestContext;
+      if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "minijam_getManagedStateV1") {
+        assert.deepEqual(params.context, { ...bestContext, contextType: "best" });
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
+      throw new Error("unexpected RPC method: " + method);
+    },
+  };
+  const signedNonces = [];
+  const signer = {
+    async getController() { return { version: 1, kind: 0, public: new Uint8Array(32).fill(7) }; },
+    signJamScriptAction(request) {
+      signedNonces.push(request.nonce);
+      return Promise.resolve(new Uint8Array([1]));
+    },
+  };
+  const client = new JamScriptClient(ownershipDeployment, transport);
+  const input = { subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) } };
+  const [first, second] = await Promise.all([
+    client.prepareOwnershipAction("createAsset", input, signer),
+    client.prepareOwnershipAction("createAsset", input, signer),
+  ]);
+  await Promise.all([
+    client.signPreparedOwnershipAction(first),
+    client.signPreparedOwnershipAction(second),
+  ]);
+  assert.deepEqual(signedNonces, [0n, 1n]);
+});
+
+test("ambiguous Ownership submission blocks the local nonce lane until chain nonce advances", async () => {
+  const ownershipDeployment = {
+    ...deployment,
+    abi: {
+      ...deployment.abi,
+      actions: [...deployment.abi.actions, {
+        name: "createAsset",
+        selector: toHex(actionSelector("createAsset")),
+        auth: { kind: "ownership", version: 1 },
+        input: [{ name: "subject", type: "ownership" }],
+        executeOutput: "unit",
+      }],
+    },
+  };
+  let submissions = 0;
+  const transport = {
+    async call(method, params = []) {
+      if (method === "chain_getBlockHash") return genesisHash;
+      if (method === "minijam_getBestContext") return bestContext;
+      if (method === "minijam_getServiceStorageAt") return null;
+      if (method === "minijam_getManagedStateV1") {
+        return { serviceId: 1000, stateRoot: emptyManagedStateRoot, keyBase64: params.keyBase64, valueBase64: null };
+      }
+      if (method === "jamscript_submitTransactionV1") {
+        submissions += 1;
+        throw new Error("socket closed after send");
+      }
+      throw new Error("unexpected RPC method: " + method);
+    },
+  };
+  let signatures = 0;
+  const signer = {
+    async getController() { return { version: 1, kind: 0, public: new Uint8Array(32).fill(7) }; },
+    signJamScriptAction() {
+      signatures += 1;
+      return Promise.resolve(new Uint8Array([1]));
+    },
+  };
+  const client = new JamScriptClient(ownershipDeployment, transport);
+  const input = { subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) } };
+  await assert.rejects(client.submitOwnershipAction("createAsset", input, signer), /socket closed after send/);
+  await assert.rejects(client.submitOwnershipAction("createAsset", input, signer), /OWNERSHIP_NONCE_RECONCILIATION_REQUIRED/);
+  assert.equal(signatures, 1);
+  assert.equal(submissions, 1);
+});
+
 test("managed-state provider unavailability does not fall back to Service KV by default", async () => {
   let storageReads = 0;
   const transport = {
@@ -399,7 +530,7 @@ test("managed-state provider unavailability does not fall back to Service KV by 
         storageReads += 1;
         return storageReads === 1 ? null : stateU64(99);
       }
-      if (method === "jamscript_getStateV1") throw new RpcError("unavailable root", -32031);
+      if (method === "minijam_getManagedStateV1") throw new RpcError("unavailable root", -32031);
       throw new Error("unexpected RPC method: " + method);
     },
   };
@@ -482,4 +613,29 @@ test("waitForTransaction timeout carries the last queued status without calling 
     },
   );
   assert.equal(reads, 1);
+});
+
+test("waitForBest resolves at verified best-chain inclusion before finality", async () => {
+  const transport = {
+    async call(method) {
+      if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method: " + method);
+      return {
+        transactionId: "0x" + "77".repeat(32),
+        status: "imported",
+        packageHash: "0x" + "88".repeat(32),
+        itemIndex: 0,
+        actionIndex: 0,
+        executionReceipt: null,
+        error: null,
+        bestChainStatus: "included",
+        bestContext: { ...bestContext, contextType: "best" },
+        finalized: false,
+      };
+    },
+  };
+  const status = await new JamScriptClient(deployment, transport)
+    .waitForBest("0x" + "77".repeat(32), { intervalMs: 0, timeoutMs: 1000 });
+  assert.equal(status.bestChainStatus, "included");
+  assert.equal(status.finalized, false);
+  assert.equal(status.bestContext.contextType, "best");
 });

@@ -91,9 +91,19 @@ interface OwnershipSigner {
 
 ## State queries and proofs
 
-`JamScriptClient` supports finalized state queries and managed-state proof
-verification. Use `stateVerification: "proof"` when the application requires
-proof-verified responses from the configured provider.
+`queryBest()` reads one reorgable best-chain snapshot and is also the default
+for `query()`. `queryFinalized()` reads the finalized snapshot for accounting
+and audit. `queryLatest()` remains a deprecated alias for finalized reads; it
+does not switch context implicitly. Use `stateVerification: "proof"` when the
+application requires proof-verified responses from the configured provider.
+
+Ownership V2 nonce preparation reads the best-context managed state and
+reserves a distinct nonce in the current client instance. This does not
+coordinate separate tabs or devices. A transport timeout keeps the affected
+nonce lane blocked until a later best-context read shows the nonce advanced.
+Use `waitForBest()` to observe verified best-chain inclusion and
+`waitForFinalized()` when the action receipt is final. Best inclusion may still
+be reverted; a finalized receipt is the final result.
 
 ## Matrix
 
