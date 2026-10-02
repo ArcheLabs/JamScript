@@ -8,10 +8,12 @@ and using JamScript Ownership authentication.
 
 ## Install
 
-The first public release is planned as an RC:
+Lifecycle tracking in this change requires Client `0.1.0-rc.5` and a Backend
+that advertises the required lifecycle capabilities. RC5 is not yet published;
+install it after the matching package release is available:
 
 ```bash
-npm install @jamscript/client@0.1.0-rc.3
+npm install @jamscript/client@0.1.0-rc.5
 ```
 
 The package is network-neutral. Deployment and transport configuration are
@@ -42,9 +44,13 @@ const client = new JamScriptClient(
 await client.validateDeployment();
 
 const submitted = await client.submitAction("increment", {}, signer);
-const result = await client.waitForAction(submitted.transactionId, {
+const result = await client.waitForFinalized(submitted.transactionId, {
+  actionHash: submitted.actionHash,
   timeoutMs: 120_000,
 });
+if (result.actionReceipt?.status !== "applied") {
+  throw new Error("The action was finalized but not applied");
+}
 const state = await client.query("getValue");
 
 console.log(result.status, state.value);
@@ -75,7 +81,13 @@ const client = new JamScriptClient(
 const input: Record<string, CodecValue> = {};
 
 const submitted = await client.submitOwnershipAction("transfer", input, signer);
-await client.waitForAction(submitted.transactionId, { timeoutMs: 120_000 });
+const result = await client.waitForFinalized(submitted.transactionId, {
+  actionHash: submitted.actionHash,
+  timeoutMs: 120_000,
+});
+if (result.actionReceipt?.status !== "applied") {
+  throw new Error("The Ownership action was finalized but not applied");
+}
 ```
 
 `OwnershipSigner` is the browser-wallet extension point:
@@ -99,11 +111,35 @@ application requires proof-verified responses from the configured provider.
 
 Ownership V2 nonce preparation reads the best-context managed state and
 reserves a distinct nonce in the current client instance. This does not
-coordinate separate tabs or devices. A transport timeout keeps the affected
-nonce lane blocked until a later best-context read shows the nonce advanced.
-Use `waitForBest()` to observe verified best-chain inclusion and
-`waitForFinalized()` when the action receipt is final. Best inclusion may still
-be reverted; a finalized receipt is the final result.
+coordinate separate tabs or devices. A Best inclusion or ambiguous submission
+blocks the affected local nonce lane until a later finalized-state read proves
+the nonce advanced. HTTP 5xx, timeouts, and connection failures are treated as
+unknown submission outcomes; the client never signs a replacement action.
+
+Transaction tracking requires a Backend that advertises
+`transactionLifecycleVersion: 1`, `bestChainTracking: true`, and
+`strictFinalizedReceipts: true`. Missing capabilities fail explicitly. The
+Backend currently reports `durableTransactionLookup: false`; transaction IDs
+and action mappings cannot be recovered after a Backend restart unless the
+Backend is separately upgraded to persist them. Save the returned `actionHash`
+and pass it back in `waitForFinalized(transactionId, { actionHash })` to resume
+on a new Client instance while the Backend mapping still exists.
+
+`waitForBest()` resolves only when the exact transaction is verified in a
+Best snapshot or is finalized. This is an inclusion observation, not action
+success. `waitForFinalized()` and `waitForAction()` resolve only when
+`finalized === true` and the receipt matches the target action hash and action
+index (or uniquely matches by hash when no index is supplied). A finalized
+`failed` or `rejected` receipt is a finalized result but not business success.
+If finality is reported before the receipt is indexed, tracking continues and
+eventually times out with the last status and a `RECEIPT_UNAVAILABLE` code.
+
+The `onUpdate` callback receives deduplicated lifecycle observations. It can
+report Best inclusion followed by reorganization and later reinclusion.
+`AbortSignal` stops only the local poll; it does not cancel the submitted
+transaction. A timeout or abort leaves the outcome unresolved and is not a
+chain failure. `watchTransaction()` is an alias for continuous tracking to a
+finalized action result.
 
 ## Matrix
 
@@ -127,8 +163,10 @@ not the package boundary.
 
 ## Package status
 
-This is the first public release candidate. The client has an independent
-version cycle from the JamScript CLI, backend, and network releases.
+This Client version has an independent release cycle from the JamScript CLI,
+Backend, and network releases. RC5 is a pending artifact in this branch; it
+must not be treated as published until the npm registry contains the exact
+package and its integrity matches the reviewed tarball.
 
 Detailed protocol and integration documentation is available in the
 [JamScript repository](https://github.com/ArcheLabs/JamScript/tree/main/docs).

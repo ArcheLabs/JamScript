@@ -803,12 +803,16 @@ impl JsonRpcTransport for CurlJsonRpcTransport {
             ));
         }
         if status >= 400 {
+            // A server-side failure can happen after a mutating request has
+            // been accepted. Keep 5xx, timeout, and throttling responses
+            // ambiguous so callers never retry a Work that may be in flight.
+            let error_code = if mutating {
+                mutating_http_error_code(status)
+            } else {
+                ErrorCode::NetworkUnreachable
+            };
             return Err(DeploymentError::new(
-                if mutating {
-                    ErrorCode::DeploymentRejected
-                } else {
-                    ErrorCode::NetworkUnreachable
-                },
+                error_code,
                 format_http_error(method, endpoint, status, body.as_bytes(), &output.stderr),
             ));
         }
@@ -832,6 +836,14 @@ impl JsonRpcTransport for CurlJsonRpcTransport {
 }
 
 const RESPONSE_PREVIEW_LIMIT: usize = 512;
+
+fn mutating_http_error_code(status: u16) -> ErrorCode {
+    if (400..500).contains(&status) && !matches!(status, 408 | 425 | 429) {
+        ErrorCode::DeploymentRejected
+    } else {
+        ErrorCode::DeploymentOutcomeUnknown
+    }
+}
 
 fn curl_transport_error(
     method: &str,
@@ -1821,6 +1833,24 @@ mod tests {
         assert!(message.contains("response_body_bytes=0"));
         assert!(message.contains("response_body_preview=<empty>"));
         assert!(message.contains("upstream failed"));
+    }
+
+    #[test]
+    fn mutating_http_errors_only_mark_definitive_client_rejections_as_rejected() {
+        for status in [400, 401, 403, 404, 422, 499] {
+            assert_eq!(
+                mutating_http_error_code(status),
+                ErrorCode::DeploymentRejected,
+                "HTTP {status} should be a definite rejection",
+            );
+        }
+        for status in [408, 425, 429, 500, 502, 503] {
+            assert_eq!(
+                mutating_http_error_code(status),
+                ErrorCode::DeploymentOutcomeUnknown,
+                "HTTP {status} may follow a received mutating request",
+            );
+        }
     }
 
     fn write_artifact_fixture(directory: &Path) {

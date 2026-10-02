@@ -38,6 +38,7 @@ export type TransactionState =
   | "reported"
   | "imported"
   | "reorged"
+  | "submission_unknown"
   | "failed";
 
 export type SubmitTransactionResult = {
@@ -108,6 +109,10 @@ export type BackendCapabilitiesV1 = {
   multiService: boolean;
   externalStateWitness: boolean;
   dynamicPvmServices: boolean;
+  transactionLifecycleVersion?: number;
+  bestChainTracking?: boolean;
+  strictFinalizedReceipts?: boolean;
+  durableTransactionLookup?: boolean;
 };
 
 export class RpcError extends Error {
@@ -189,6 +194,7 @@ export type WorkRpc = RpcTransport & {
   workStatus(packageHash: string, serviceId?: number): Promise<WorkStatusResult>;
   submitTransaction(request: SubmitTransactionRequest): Promise<SubmitTransactionResult>;
   transactionStatus(transactionId: string): Promise<TransactionStatusResult>;
+  capabilities(): Promise<BackendCapabilitiesV1>;
 };
 
 export function asWorkRpc(transport: RpcTransport): WorkRpc {
@@ -234,5 +240,6 @@ export function asWorkRpc(transport: RpcTransport): WorkRpc {
         error: result.error ?? null,
       };
     },
+    capabilities: () => transport.call<BackendCapabilitiesV1>("jamscript_getCapabilitiesV1"),
   };
 }
