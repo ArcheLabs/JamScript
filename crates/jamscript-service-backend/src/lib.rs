@@ -2475,39 +2475,51 @@ impl<T: JsonRpcTransport + Send + Sync> BackendNetwork for MiniJamNetworkGateway
     }
 
     fn best_context(&self) -> Result<FinalizedContextV1, BackendError> {
-        let value = self
+        // Pin the best hash first, then fetch that exact header. The tuple
+        // remains internally consistent even if the head moves meanwhile.
+        let best_hash = self
             .transport
             .call(
                 &self.node_rpc,
-                "minijam_getBestContext",
+                "chain_getBlockHash",
                 json!([]),
                 self.timeout,
                 false,
             )
             .map_err(|_| BackendError::BestContextUnavailable)?;
+        let block_hash = parse_hash(
+            best_hash
+                .as_str()
+                .ok_or(BackendError::BestContextUnavailable)?,
+        )
+        .map_err(|_| BackendError::BestContextUnavailable)?;
+        let header = self
+            .transport
+            .call(
+                &self.node_rpc,
+                "chain_getHeader",
+                json!([hash_hex(&block_hash)]),
+                self.timeout,
+                false,
+            )
+            .map_err(|_| BackendError::BestContextUnavailable)?;
+        let block_number = header
+            .get("number")
+            .and_then(Value::as_str)
+            .and_then(|number| u32::from_str_radix(number.trim_start_matches("0x"), 16).ok())
+            .ok_or(BackendError::BestContextUnavailable)?;
+        let state_root = parse_hash(
+            header
+                .get("stateRoot")
+                .and_then(Value::as_str)
+                .ok_or(BackendError::BestContextUnavailable)?,
+        )
+        .map_err(|_| BackendError::BestContextUnavailable)?;
         Ok(FinalizedContextV1 {
-            block_hash: parse_hash(
-                value
-                    .get("blockHash")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| BackendError::Rpc("best context lacks blockHash".into()))?,
-            )?,
-            block_number: value
-                .get("blockNumber")
-                .and_then(Value::as_u64)
-                .and_then(|number| u32::try_from(number).ok())
-                .ok_or_else(|| BackendError::Rpc("best context lacks blockNumber".into()))?,
-            state_root: parse_hash(
-                value
-                    .get("stateRoot")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| BackendError::Rpc("best context lacks stateRoot".into()))?,
-            )?,
-            slot: value
-                .get("slot")
-                .and_then(Value::as_u64)
-                .and_then(|slot| u32::try_from(slot).ok())
-                .ok_or_else(|| BackendError::Rpc("best context lacks slot".into()))?,
+            block_hash,
+            block_number,
+            state_root,
+            slot: block_number,
         })
     }
 
@@ -5030,6 +5042,47 @@ mod tests {
         ) -> Result<Value, DeploymentError> {
             Ok(self.0.clone())
         }
+    }
+
+    struct StandardBestContextTransport;
+
+    impl JsonRpcTransport for StandardBestContextTransport {
+        fn call(
+            &self,
+            _endpoint: &str,
+            method: &str,
+            params: Value,
+            _timeout: Duration,
+            _mutating: bool,
+        ) -> Result<Value, DeploymentError> {
+            match method {
+                "chain_getBlockHash" => {
+                    assert_eq!(params, json!([]));
+                    Ok(Value::String(hash_hex(&[0x66; 32])))
+                }
+                "chain_getHeader" => {
+                    assert_eq!(params, json!([hash_hex(&[0x66; 32])]));
+                    Ok(json!({ "number": "0xb", "stateRoot": hash_hex(&[0x77; 32]) }))
+                }
+                _ => panic!("unexpected RPC method: {method}"),
+            }
+        }
+    }
+
+    #[test]
+    fn best_context_uses_standard_substrate_chain_rpcs() {
+        let gateway = MiniJamNetworkGateway::new(
+            StandardBestContextTransport,
+            "http://node.test",
+            "http://formal.test",
+        );
+
+        let context = gateway.best_context().unwrap();
+
+        assert_eq!(context.block_hash, [0x66; 32]);
+        assert_eq!(context.block_number, 11);
+        assert_eq!(context.state_root, [0x77; 32]);
+        assert_eq!(context.slot, 11);
     }
 
     fn record(id: u32, key: u8) -> ServiceRecord {

@@ -76,6 +76,12 @@ Service's committed managed-state root before returning data. A best root that
 belongs to a known, verified Work prediction can be read from an immutable
 snapshot; it does not move the Backend's finalized materialized head.
 
+For its internal node connection, the Backend reads the best hash with
+standard Substrate `chain_getBlockHash`, then fetches the header at that exact
+hash with `chain_getHeader`. This keeps the hash, block number, and state root
+tied to one block even if the head moves between calls. Node RPC remains
+private; the application gateway does not forward arbitrary node methods.
+
 Work submission still uses the finalized context required by Formal RPC.
 Transactions receive their Backend ID when they enter the bounded Service
 queue, and the backend can build best-context reads and report verified best
