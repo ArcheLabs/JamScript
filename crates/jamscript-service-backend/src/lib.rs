@@ -9,7 +9,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bounded_collections::{BoundedVec, ConstU32};
 use jam_codec::Decode as JamDecode;
 use jam_program_blob_common::ProgramBlob;
-use jamscript_deployment::JsonRpcTransport;
+use jamscript_deployment::{ErrorCode, JsonRpcTransport};
 use parity_scale_codec::Decode as ScaleDecode;
 use parity_scale_codec::Encode as ScaleEncode;
 use polkavm::{
@@ -1244,6 +1244,7 @@ pub enum BackendError {
     PlannerArtifactMismatch,
     PlannerUnavailable,
     Planner(PlannerError),
+    NotSubmitted(String),
     ArtifactNotFound,
     ArtifactTooLarge,
     ArtifactDigestMismatch,
@@ -1417,6 +1418,7 @@ struct LogicalTransaction {
     package_hash: Option<StateRoot>,
     action_index: Option<usize>,
     error: Option<String>,
+    submission_unknown: bool,
     best_included: bool,
 }
 
@@ -1657,6 +1659,7 @@ impl TransactionCoordinator {
                 package_hash: None,
                 action_index: None,
                 error: None,
+                submission_unknown: false,
                 best_included: false,
             },
         );
@@ -2008,6 +2011,26 @@ impl TransactionCoordinator {
         }
     }
 
+    fn mark_batch_submission_unknown(&self, batch_id: &str, error: String) {
+        if let Ok(mut state) = self.state.lock() {
+            let Some(batch) = state.batches.get(batch_id) else {
+                return;
+            };
+            let transaction_ids = batch.logical_transaction_ids.clone();
+            for transaction_id in transaction_ids {
+                if let Some(transaction) = state.transactions.get_mut(&transaction_id) {
+                    transaction.submission_unknown = true;
+                    transaction.error = Some(error.clone());
+                }
+            }
+            // Keep the service's in-flight lane occupied. The upstream call may
+            // have been accepted even though its response was lost, so
+            // dispatching a replacement action could duplicate a payment or
+            // advance a nonce past an unresolved transaction.
+            self.wake.notify_all();
+        }
+    }
+
     fn mark_materialized(&self, batch_id: &str) {
         if let Ok(mut state) = self.state.lock() {
             let Some(batch) = state.batches.get_mut(batch_id) else {
@@ -2086,6 +2109,7 @@ impl BackendEngine {
         params: Value,
         actions: Vec<Vec<u8>>,
     ) -> Result<(Value, RuntimeRefineOutputV1), BackendError> {
+        let (forwarded, prediction, service_id) = (|| -> Result<_, BackendError> {
         let service_id = required_u32(&params, "serviceId")?;
         let code_hash = parse_hash(required_str(&params, "serviceCodeHash")?)?;
         let record = state.registry.get(service_id)?.clone();
@@ -2254,6 +2278,14 @@ impl BackendEngine {
             "slot": context.slot,
         });
         forwarded["payloadBase64"] = Value::String(BASE64.encode(&encoded));
+        Ok((forwarded, prediction, service_id))
+        })()
+        .map_err(|error| match error {
+            BackendError::StaleContext => BackendError::StaleContext,
+            error => BackendError::NotSubmitted(error.to_string()),
+        })?;
+        // Errors from this call are ambiguous unless they are explicit
+        // pre-acceptance rejections such as StaleContext or QueueFull.
         let mut response = self.network.submit_work(forwarded)?;
         let package_hash = response
             .get("packageHash")
@@ -2681,6 +2713,8 @@ impl<T: JsonRpcTransport + Send + Sync> BackendNetwork for MiniJamNetworkGateway
             .map_err(|error| {
                 if error.message == "stale finalized context" {
                     BackendError::StaleContext
+                } else if error.code == ErrorCode::DeploymentRejected {
+                    BackendError::NotSubmitted(format!("Formal rejected Work: {}", error.message))
                 } else {
                     BackendError::Rpc(error.message)
                 }
@@ -2845,10 +2879,14 @@ impl BackendRpcHandler {
     }
 
     fn capabilities(&self) -> CapabilitiesJson {
-        CapabilitiesJson::from(CapabilitiesV1 {
+        let mut capabilities = CapabilitiesJson::from(CapabilitiesV1 {
             dynamic_pvm_services: self.dynamic_pvm_services,
             ..CapabilitiesV1::default()
-        })
+        });
+        let lifecycle_tracking_available = self.network.is_some() && self.pvm_loader.is_some();
+        capabilities.best_chain_tracking = lifecycle_tracking_available;
+        capabilities.strict_finalized_receipts = lifecycle_tracking_available;
+        capabilities
     }
 
     fn chain_get_block_hash(&self, params: Value) -> Result<Value, BackendError> {
@@ -3738,19 +3776,40 @@ impl BackendRpcHandler {
                             eprintln!("TX_BATCH_SUBMITTED service_id={service_id} batch_id={batch_id} package_hash={}", hash_hex(&package_hash));
                         }
                         Ok(None) => {
-                            let error = "Formal response omitted packageHash";
-                            self.transactions.fail_batch(&batch_id, error.into());
-                            eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error={error}");
+                            let error = "Formal may have accepted the Work but omitted packageHash";
+                            self.transactions
+                                .mark_batch_submission_unknown(&batch_id, error.into());
+                            eprintln!("TX_BATCH_SUBMISSION_UNKNOWN service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error={error}");
                         }
                         Err(error) => {
-                            self.transactions.fail_batch(&batch_id, error.to_string());
-                            eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error=invalid packageHash");
+                            self.transactions.mark_batch_submission_unknown(
+                                &batch_id,
+                                format!("Formal may have accepted the Work but returned an invalid packageHash: {error}"),
+                            );
+                            eprintln!("TX_BATCH_SUBMISSION_UNKNOWN service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error=invalid packageHash");
                         }
                     }
                 }
-                Err(error) => {
-                    self.transactions.fail_batch(&batch_id, error.to_string());
+                Err(BackendError::StaleContext) => {
+                    self.transactions
+                        .fail_batch(&batch_id, "STALE_CONTEXT".into());
+                    eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error=STALE_CONTEXT");
+                }
+                Err(BackendError::NotSubmitted(error)) => {
+                    self.transactions.fail_batch(&batch_id, error.clone());
                     eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error={error}");
+                }
+                Err(BackendError::QueueFull { retry_after_ms }) => {
+                    let error = format!("QUEUE_FULL: retry after {retry_after_ms} ms");
+                    self.transactions.fail_batch(&batch_id, error.clone());
+                    eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error={error}");
+                }
+                Err(error) => {
+                    self.transactions.mark_batch_submission_unknown(
+                        &batch_id,
+                        format!("submission outcome unknown: {error}"),
+                    );
+                    eprintln!("TX_BATCH_SUBMISSION_UNKNOWN service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error={error}");
                 }
             }
         }
@@ -3763,6 +3822,17 @@ impl BackendRpcHandler {
             .transactions
             .transaction(&logical_id)
             .ok_or(BackendError::WorkNotFound)?;
+        if transaction.submission_unknown {
+            return Ok(json!({
+                "transactionId": logical_id,
+                "status": "submission_unknown",
+                "packageHash": transaction.package_hash.map(|hash| hash_hex(&hash)),
+                "itemIndex": Value::Null,
+                "actionIndex": transaction.action_index,
+                "executionReceipt": Value::Null,
+                "error": transaction.error,
+            }));
+        }
         if let Some(error) = transaction.error {
             return Ok(json!({
                 "transactionId": logical_id,
@@ -3860,10 +3930,12 @@ impl BackendRpcHandler {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let finalized = result.get("actionReceipts").is_some_and(Value::is_array);
+        let lifecycle_tracking_available = self.network.is_some() && self.pvm_loader.is_some();
+        let finalized = lifecycle_tracking_available
+            && result.get("actionReceipts").is_some_and(Value::is_array);
         let mut best_context = None;
         let mut best_included = finalized;
-        let mut best_chain_unknown = false;
+        let mut best_chain_unknown = !lifecycle_tracking_available;
         let mut reorged = false;
         if !finalized && (work_status == "imported" || transaction.best_included) {
             if let Some(network) = &self.network {
@@ -4168,6 +4240,10 @@ struct CapabilitiesJson {
     multi_service: bool,
     external_state_witness: bool,
     dynamic_pvm_services: bool,
+    transaction_lifecycle_version: u32,
+    best_chain_tracking: bool,
+    strict_finalized_receipts: bool,
+    durable_transaction_lookup: bool,
 }
 
 impl Default for CapabilitiesJson {
@@ -4179,6 +4255,10 @@ impl Default for CapabilitiesJson {
             multi_service: capabilities.multi_service,
             external_state_witness: capabilities.external_state_witness,
             dynamic_pvm_services: capabilities.dynamic_pvm_services,
+            transaction_lifecycle_version: 1,
+            best_chain_tracking: true,
+            strict_finalized_receipts: true,
+            durable_transaction_lookup: false,
         }
     }
 }
@@ -4191,6 +4271,10 @@ impl From<CapabilitiesV1> for CapabilitiesJson {
             multi_service: capabilities.multi_service,
             external_state_witness: capabilities.external_state_witness,
             dynamic_pvm_services: capabilities.dynamic_pvm_services,
+            transaction_lifecycle_version: 1,
+            best_chain_tracking: true,
+            strict_finalized_receipts: true,
+            durable_transaction_lookup: false,
         }
     }
 }
@@ -4617,6 +4701,7 @@ fn rpc_error(error: &BackendError) -> Value {
     }
     let (code, message) = match error {
         BackendError::Rpc(message) => (-32000, message.clone()),
+        BackendError::NotSubmitted(message) => (-32045, format!("NOT_SUBMITTED: {message}")),
         BackendError::Registry(_) => (-32011, "unknown or invalid Service".into()),
         BackendError::Provider(_) => (-32030, "STATE_ROOT_UNAVAILABLE".into()),
         BackendError::StateNotMaterialized => (
@@ -5239,6 +5324,7 @@ mod tests {
                     package_hash: None,
                     action_index: None,
                     error: None,
+                    submission_unknown: false,
                     best_included: false,
                 },
             );
@@ -5277,6 +5363,7 @@ mod tests {
                     package_hash: None,
                     action_index: None,
                     error: None,
+                    submission_unknown: false,
                     best_included: false,
                 },
             );
@@ -5591,6 +5678,46 @@ mod tests {
         assert_eq!(error, BackendError::StaleContext);
     }
 
+    struct ReportedWorkGateway(Value);
+
+    impl BackendWorkGateway for ReportedWorkGateway {
+        fn submit_work(&self, _params: Value) -> Result<Value, BackendError> {
+            Err(BackendError::Rpc("unused test method".into()))
+        }
+
+        fn work_status(&self, _params: Value) -> Result<Value, BackendError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn unverified_upstream_receipt_does_not_claim_finality_or_best_inclusion() {
+        let service = record(10, 1);
+        let mut state = BackendState::default();
+        state.register(service).unwrap();
+        let handler = BackendRpcHandler::new(
+            state,
+            Arc::new(ReportedWorkGateway(work_status_result("imported"))),
+        );
+        let transaction_id = handler
+            .transactions
+            .enqueue(10, vec![0x01], json!({}))
+            .unwrap();
+        {
+            let mut manager = handler.transactions.state.lock().unwrap();
+            let transaction = manager.transactions.get_mut(&transaction_id).unwrap();
+            transaction.package_hash = Some([0x71; 32]);
+            transaction.action_index = Some(0);
+        }
+
+        let status = handler
+            .transaction_status(json!({"transactionId": transaction_id}))
+            .unwrap();
+
+        assert_eq!(status["finalized"], false);
+        assert_eq!(status["bestChainStatus"], "unknown");
+    }
+
     fn work_status_result(status: &str) -> Value {
         json!({
             "status": status,
@@ -5784,6 +5911,44 @@ mod tests {
             .unwrap();
         assert_eq!(reorged["status"], "reorged");
         assert_eq!(reorged["error"], "TRANSACTION_REORGED");
+    }
+
+    #[test]
+    fn unknown_submission_is_not_reported_failed_or_released_for_replacement() {
+        let handler =
+            BackendRpcHandler::new(BackendState::default(), Arc::new(UnconfiguredWorkGateway));
+        let transaction_id = handler
+            .transactions
+            .enqueue(10, vec![0x01], json!({}))
+            .unwrap();
+        let batch_id = "unknown-submission-test".to_owned();
+        {
+            let mut state = handler.transactions.state.lock().unwrap();
+            state.batches.insert(
+                batch_id.clone(),
+                InFlightBatch {
+                    service_id: 10,
+                    logical_transaction_ids: vec![transaction_id.clone()],
+                    package_hash: None,
+                    predicted_output: None,
+                    materialized: false,
+                    diagnostics_emitted: false,
+                    created_at: Instant::now(),
+                    last_status: None,
+                },
+            );
+            state.in_flight.insert(10, batch_id.clone());
+        }
+        handler
+            .transactions
+            .mark_batch_submission_unknown(&batch_id, "upstream response was lost".into());
+
+        let status = handler
+            .transaction_status(json!({"transactionId": transaction_id}))
+            .unwrap();
+        assert_eq!(status["status"], "submission_unknown");
+        assert_eq!(status["error"], "upstream response was lost");
+        assert!(!handler.transactions.is_batch_ready(10).unwrap());
     }
 
     #[test]
@@ -6017,6 +6182,18 @@ mod tests {
             .unwrap();
         assert_eq!(capabilities["protocolVersion"], 1);
         assert_eq!(capabilities["multiService"], true);
+        assert_eq!(capabilities["transactionLifecycleVersion"], 1);
+        assert_eq!(capabilities["bestChainTracking"], false);
+        assert_eq!(capabilities["strictFinalizedReceipts"], false);
+        assert_eq!(capabilities["durableTransactionLookup"], false);
+
+        let (tracking_handler, _directory, _first, _second) =
+            handler_with_in_flight_batch("accepted");
+        let tracking_capabilities = tracking_handler
+            .handle("jamscript_getCapabilitiesV1", Value::Null)
+            .unwrap();
+        assert_eq!(tracking_capabilities["bestChainTracking"], true);
+        assert_eq!(tracking_capabilities["strictFinalizedReceipts"], true);
 
         let registration = json!({
             "serviceId": 10,

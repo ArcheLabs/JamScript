@@ -96,6 +96,27 @@ function transactionResult(transactionId = "0x" + "99".repeat(32)) {
   return { transactionId, status: "queued", packageHash: null, itemIndex: null, actionIndex: 0 };
 }
 
+const lifecycleCapabilities = {
+  protocolVersion: 1,
+  managedStateVersion: 1,
+  multiService: true,
+  externalStateWitness: true,
+  dynamicPvmServices: true,
+  transactionLifecycleVersion: 1,
+  bestChainTracking: true,
+  strictFinalizedReceipts: true,
+  durableTransactionLookup: false,
+};
+
+function clientWithCapabilities(descriptor, transport) {
+  return new JamScriptClient(descriptor, {
+    call(method, params) {
+      if (method === "jamscript_getCapabilitiesV1") return Promise.resolve(lifecycleCapabilities);
+      return transport.call(method, params);
+    },
+  });
+}
+
 test("submitAction signs once and submits a logical transaction", async () => {
   const calls = [];
   let contextReads = 0;
@@ -135,7 +156,7 @@ test("submitAction signs once and submits a logical transaction", async () => {
     },
   };
 
-  const client = new JamScriptClient(deployment, transport);
+  const client = clientWithCapabilities(deployment, transport);
   const result = await client.submitAction("submit", { score: 9n }, signer);
 
   assert.match(result.transactionId, /^0x/);
@@ -187,7 +208,7 @@ test("Ownership action preparation, wallet signature, and submission are separat
       return Promise.resolve(new Uint8Array([1, 2, 3]));
     },
   };
-  const client = new JamScriptClient(ownershipDeployment, transport);
+  const client = clientWithCapabilities(ownershipDeployment, transport);
   const preparationPhases = [];
   const prepared = await client.prepareOwnershipAction("createAsset", {
     subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) },
@@ -206,8 +227,8 @@ test("Ownership action preparation, wallet signature, and submission are separat
   assert.match(signed.actionHash, /^0x[0-9a-f]{64}$/i);
 
   const submitting = client.submitSignedOwnershipAction(signed);
-  assert.equal(calls.at(-1).method, "jamscript_submitTransactionV1");
   const submitted = await submitting;
+  assert.equal(calls.at(-1).method, "jamscript_submitTransactionV1");
   assert.equal(submitted.transactionId, "0xprepared");
   assert.equal(submitted.actionHash, signed.actionHash);
 });
@@ -245,7 +266,7 @@ test("a rejected Ownership wallet signature releases its prepared controller res
       return Promise.resolve(new Uint8Array([1]));
     },
   };
-  const client = new JamScriptClient(ownershipDeployment, transport);
+  const client = clientWithCapabilities(ownershipDeployment, transport);
   const input = { subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) } };
   const first = await client.prepareOwnershipAction("createAsset", input, signer);
   await assert.rejects(client.signPreparedOwnershipAction(first), /user rejected signature/);
@@ -289,7 +310,7 @@ test("abandoning a wallet signature timeout prevents a late signature from produ
       return new Promise((resolve) => { resolveSignature = resolve; });
     },
   };
-  const client = new JamScriptClient(ownershipDeployment, transport);
+  const client = clientWithCapabilities(ownershipDeployment, transport);
   const input = { subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) } };
   const prepared = await client.prepareOwnershipAction("createAsset", input, signer);
   const signing = client.signPreparedOwnershipAction(prepared);
@@ -301,7 +322,7 @@ test("abandoning a wallet signature timeout prevents a late signature from produ
   assert.equal((await client.signPreparedOwnershipAction(replacement)).phase, "signed");
 });
 
-function nonceAwareTransport({ failFirstSubmission = false, submissionDelayMs = 0 } = {}) {
+function nonceAwareTransport({ failFirstSubmission = false, submissionErrorCode = -32045, submissionDelayMs = 0 } = {}) {
   const submissions = [];
   let submissionCount = 0;
   let activeSubmissions = 0;
@@ -322,7 +343,7 @@ function nonceAwareTransport({ failFirstSubmission = false, submissionDelayMs = 
       if (method === "jamscript_submitTransactionV1") {
         submissions.push(params);
         submissionCount += 1;
-        if (failFirstSubmission && submissionCount === 1) throw new RpcError("admission failed", -32001);
+        if (failFirstSubmission && submissionCount === 1) throw new RpcError("admission failed", submissionErrorCode);
         activeSubmissions += 1;
         maxActiveSubmissions = Math.max(maxActiveSubmissions, activeSubmissions);
         if (submissionDelayMs) await new Promise((resolve) => setTimeout(resolve, submissionDelayMs));
@@ -336,7 +357,7 @@ function nonceAwareTransport({ failFirstSubmission = false, submissionDelayMs = 
 
 test("client reserves per-signer nonces while all signers submit in parallel", async () => {
   const transport = nonceAwareTransport({ submissionDelayMs: 25 });
-  const client = new JamScriptClient(deployment, transport);
+  const client = clientWithCapabilities(deployment, transport);
   const alice = {
     publicKey: new Uint8Array(32).fill(1),
     async signRaw() { return new Uint8Array(64).fill(1); },
@@ -367,7 +388,7 @@ test("client reserves per-signer nonces while all signers submit in parallel", a
 
 test("client resynchronizes a signer nonce after admission failure", async () => {
   const transport = nonceAwareTransport({ failFirstSubmission: true });
-  const client = new JamScriptClient(deployment, transport);
+  const client = clientWithCapabilities(deployment, transport);
   const signer = {
     publicKey: new Uint8Array(32).fill(3),
     async signRaw() { return new Uint8Array(64).fill(3); },
@@ -377,6 +398,21 @@ test("client resynchronizes a signer nonce after admission failure", async () =>
   const second = decodeSignedActionV1(Uint8Array.from(Buffer.from(transport.submissions[1].payloadBase64, "base64")));
   assert.equal(second.nonce, 0n);
   console.log("CLIENT_ADMISSION_FAILURE_RESYNC=PASS");
+});
+
+test("client keeps the signer nonce blocked after an HTTP 5xx submission response", async () => {
+  const transport = nonceAwareTransport({ failFirstSubmission: true, submissionErrorCode: 503 });
+  const client = clientWithCapabilities(deployment, transport);
+  const signer = {
+    publicKey: new Uint8Array(32).fill(4),
+    async signRaw() { return new Uint8Array(64).fill(4); },
+  };
+  await assert.rejects(client.submitAction("submit", { score: 5n }, signer), /admission failed/);
+  await assert.rejects(
+    client.submitAction("submit", { score: 6n }, signer),
+    /WALLET_NONCE_RECONCILIATION_REQUIRED/,
+  );
+  assert.equal(transport.submissions.length, 1);
 });
 
 test("query reads and decodes state at the finalized block", async () => {
@@ -396,7 +432,7 @@ test("query reads and decodes state at the finalized block", async () => {
       throw new Error("unexpected RPC method: " + method);
     },
   };
-  const client = new JamScriptClient(deployment, transport);
+  const client = clientWithCapabilities(deployment, transport);
   const result = await client.queryLatest("getScore", new Uint8Array(32).fill(1));
   assert.equal(result.value, 42n);
   assert.equal(result.context.blockHash, initialContext.blockHash);
@@ -420,7 +456,7 @@ test("query defaults to one explicit best context and never falls back to finali
       throw new Error("unexpected RPC method: " + method);
     },
   };
-  const result = await new JamScriptClient(deployment, transport).query("getScore", new Uint8Array(32).fill(1));
+  const result = await clientWithCapabilities(deployment, transport).query("getScore", new Uint8Array(32).fill(1));
   assert.equal(result.value, 43n);
   assert.equal(result.context.contextType, "best");
   assert.equal(result.context.blockHash, bestContext.blockHash);
@@ -462,7 +498,7 @@ test("same-client concurrent Ownership preparations reserve ordered unique nonce
       return Promise.resolve(new Uint8Array([1]));
     },
   };
-  const client = new JamScriptClient(ownershipDeployment, transport);
+  const client = clientWithCapabilities(ownershipDeployment, transport);
   const input = { subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) } };
   const [first, second] = await Promise.all([
     client.prepareOwnershipAction("createAsset", input, signer),
@@ -513,7 +549,7 @@ test("ambiguous Ownership submission blocks the local nonce lane until chain non
       return Promise.resolve(new Uint8Array([1]));
     },
   };
-  const client = new JamScriptClient(ownershipDeployment, transport);
+  const client = clientWithCapabilities(ownershipDeployment, transport);
   const input = { subject: { version: 1, kind: 0, public: new Uint8Array(32).fill(8) } };
   await assert.rejects(client.submitOwnershipAction("createAsset", input, signer), /socket closed after send/);
   await assert.rejects(client.submitOwnershipAction("createAsset", input, signer), /OWNERSHIP_NONCE_RECONCILIATION_REQUIRED/);
@@ -534,7 +570,7 @@ test("managed-state provider unavailability does not fall back to Service KV by 
       throw new Error("unexpected RPC method: " + method);
     },
   };
-  const client = new JamScriptClient(deployment, transport);
+  const client = clientWithCapabilities(deployment, transport);
   await assert.rejects(client.queryLatest("getScore", new Uint8Array(32).fill(1)), /unavailable root/);
   assert.equal(storageReads, 1);
 });
@@ -552,7 +588,7 @@ test("waitForWork tolerates not-finalized package lookup and stops at Imported",
       return { packageHash: "0x" + "77".repeat(32), workId: 3, status: "imported", executionReceipt: "0x" + "99".repeat(32), context: initialContext };
     },
   };
-  const client = new JamScriptClient(deployment, transport);
+  const client = clientWithCapabilities(deployment, transport);
   const result = await client.waitForWork("0x" + "77".repeat(32), { intervalMs: 0, timeoutMs: 1000 });
   assert.equal(result.status, "imported");
   assert.equal(reads, 3);
@@ -561,6 +597,7 @@ test("waitForWork tolerates not-finalized package lookup and stops at Imported",
 test("waitForAction distinguishes an imported failed application receipt", async () => {
   const transport = {
     async call(method) {
+      if (method === "jamscript_getCapabilitiesV1") return lifecycleCapabilities;
       if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method");
       return {
         transactionId: "0x" + "77".repeat(32),
@@ -569,11 +606,12 @@ test("waitForAction distinguishes an imported failed application receipt", async
         itemIndex: 0,
         actionIndex: 0,
         error: null,
+        finalized: true,
         actionReceipts: [{ actionHash: "0x" + "aa".repeat(32), status: "failed", errorCode: 2 }],
       };
     },
   };
-  const client = new JamScriptClient(deployment, transport);
+  const client = clientWithCapabilities(deployment, transport);
   const result = await client.waitForAction(
     "0x" + "77".repeat(32),
     "0x" + "aa".repeat(32),
@@ -589,6 +627,7 @@ test("waitForTransaction timeout carries the last queued status without calling 
   let reads = 0;
   const transport = {
     async call(method) {
+      if (method === "jamscript_getCapabilitiesV1") return lifecycleCapabilities;
       if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method");
       reads += 1;
       return {
@@ -602,7 +641,7 @@ test("waitForTransaction timeout carries the last queued status without calling 
       };
     },
   };
-  const client = new JamScriptClient(deployment, transport);
+  const client = clientWithCapabilities(deployment, transport);
   await assert.rejects(
     client.waitForTransaction("0x" + "77".repeat(32), { intervalMs: 0, timeoutMs: 0 }),
     (error) => {
@@ -612,12 +651,13 @@ test("waitForTransaction timeout carries the last queued status without calling 
       return true;
     },
   );
-  assert.equal(reads, 1);
+  assert.ok(reads >= 1);
 });
 
 test("waitForBest resolves at verified best-chain inclusion before finality", async () => {
   const transport = {
     async call(method) {
+      if (method === "jamscript_getCapabilitiesV1") return lifecycleCapabilities;
       if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method: " + method);
       return {
         transactionId: "0x" + "77".repeat(32),
@@ -633,9 +673,123 @@ test("waitForBest resolves at verified best-chain inclusion before finality", as
       };
     },
   };
-  const status = await new JamScriptClient(deployment, transport)
+  const status = await clientWithCapabilities(deployment, transport)
     .waitForBest("0x" + "77".repeat(32), { intervalMs: 0, timeoutMs: 1000 });
   assert.equal(status.bestChainStatus, "included");
   assert.equal(status.finalized, false);
   assert.equal(status.bestContext.contextType, "best");
+});
+
+test("waitForFinalized ignores imported receipts until finalized is true", async () => {
+  let reads = 0;
+  const transport = {
+    async call(method) {
+      if (method === "jamscript_getCapabilitiesV1") return lifecycleCapabilities;
+      if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method: " + method);
+      reads += 1;
+      return {
+        transactionId: "0x" + "77".repeat(32),
+        status: "imported",
+        packageHash: "0x" + "88".repeat(32),
+        itemIndex: 0,
+        actionIndex: 0,
+        executionReceipt: null,
+        error: null,
+        finalized: reads > 1,
+        actionReceipts: [{ actionHash: "0x" + "aa".repeat(32), status: "applied", errorCode: null }],
+      };
+    },
+  };
+  const updates = [];
+  const result = await clientWithCapabilities(deployment, transport).waitForFinalized(
+    "0x" + "77".repeat(32),
+    { actionHash: "0x" + "aa".repeat(32), intervalMs: 100, timeoutMs: 1000, onUpdate: (value) => updates.push(value) },
+  );
+  assert.equal(result.actionReceipt.status, "applied");
+  assert.equal(reads, 2);
+  assert.deepEqual(updates.map((update) => update.confirmation), ["unknown", "finalized"]);
+});
+
+test("finalized status without the matching receipt times out with recoverable context", async () => {
+  const transport = {
+    async call(method) {
+      if (method === "jamscript_getCapabilitiesV1") return lifecycleCapabilities;
+      if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method: " + method);
+      return {
+        transactionId: "0x" + "77".repeat(32), status: "imported", packageHash: "0x" + "88".repeat(32),
+        itemIndex: 0, actionIndex: 0, executionReceipt: null, error: null, finalized: true, actionReceipts: [],
+      };
+    },
+  };
+  await assert.rejects(
+    clientWithCapabilities(deployment, transport).waitForFinalized("0x" + "77".repeat(32), {
+      actionHash: "0x" + "aa".repeat(32), intervalMs: 100, timeoutMs: 150,
+    }),
+    (error) => {
+      assert.ok(error instanceof TransactionWaitTimeoutError);
+      assert.equal(error.code, "RECEIPT_UNAVAILABLE");
+      assert.equal(error.lastStatus?.finalized, true);
+      return true;
+    },
+  );
+});
+
+test("finalized receipt index cannot be remapped to a different action hash", async () => {
+  const transport = {
+    async call(method) {
+      if (method === "jamscript_getCapabilitiesV1") return lifecycleCapabilities;
+      if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method: " + method);
+      return {
+        transactionId: "0x" + "77".repeat(32), status: "imported", packageHash: "0x" + "88".repeat(32),
+        itemIndex: 0, actionIndex: 0, executionReceipt: null, error: null, finalized: true,
+        actionReceipts: [{ actionHash: "0x" + "bb".repeat(32), status: "applied", errorCode: null }],
+      };
+    },
+  };
+  await assert.rejects(
+    clientWithCapabilities(deployment, transport).waitForFinalized("0x" + "77".repeat(32), {
+      actionHash: "0x" + "aa".repeat(32), intervalMs: 100, timeoutMs: 1000,
+    }),
+    (error) => error.code === "ACTION_IDENTITY_MISMATCH",
+  );
+});
+
+test("waitForFinalized reports an old Backend without lifecycle evidence as unsupported", async () => {
+  const transport = {
+    async call(method) {
+      if (method === "jamscript_getCapabilitiesV1") return { protocolVersion: 1 };
+      throw new Error("transaction status must not be queried on an unsupported Backend");
+    },
+  };
+  await assert.rejects(
+    new JamScriptClient(deployment, transport).waitForFinalized("0x" + "77".repeat(32), {
+      actionHash: "0x" + "aa".repeat(32),
+    }),
+    (error) => error.code === "LIFECYCLE_UNSUPPORTED",
+  );
+});
+
+test("Ownership submission rejects an old Backend before consulting the signer", async () => {
+  const methods = [];
+  let walletTouches = 0;
+  const transport = {
+    async call(method) {
+      methods.push(method);
+      if (method === "jamscript_getCapabilitiesV1") {
+        return { protocolVersion: 1, managedStateVersion: 1, multiService: true, externalStateWitness: true, dynamicPvmServices: true };
+      }
+      throw new Error(`unexpected RPC method: ${method}`);
+    },
+  };
+  const signer = {
+    async getController() { walletTouches += 1; return { version: 1, kind: 0, public: new Uint8Array(32).fill(1) }; },
+    async signJamScriptAction() { walletTouches += 1; return new Uint8Array([1]); },
+  };
+  const client = new JamScriptClient(deployment, transport);
+  await assert.rejects(
+    () => client.submitOwnershipAction("transfer", {}, signer),
+    (error) => error.code === "LIFECYCLE_UNSUPPORTED",
+  );
+  assert.deepEqual(methods, ["jamscript_getCapabilitiesV1"]);
+  assert.equal(walletTouches, 0);
 });

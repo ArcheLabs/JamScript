@@ -16,7 +16,7 @@ import {
   type Ownership,
   type SignedActionV2,
 } from "./crypto.js";
-import { asWorkRpc, RpcError, type ActionReceipt, type BestContext, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionRequest, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, RpcError, type ActionReceipt, type BackendCapabilitiesV1, type BestContext, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionRequest, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner, OwnershipSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
@@ -45,6 +45,21 @@ export type WaitForActionResult = Omit<TransactionStatusResult, "status"> & {
   actionHash: string;
   errorCode: number | null;
   actionReceipt: ActionReceipt;
+};
+
+export type TransactionTrackingOptions = {
+  intervalMs?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  actionHash?: string;
+  onUpdate?: (update: TransactionLifecycleUpdate) => void;
+};
+
+export type TransactionLifecycleUpdate = {
+  transactionId: string;
+  status: TransactionStatusResult;
+  confirmation: "unknown" | "best" | "finalized";
+  actionResult?: ActionReceipt["status"];
 };
 
 /** Opaque action data prepared before requesting a wallet signature. */
@@ -88,20 +103,63 @@ type SignedOwnershipActionData = {
   validUntil: number;
 };
 
+export type SignedActionTrackingInfo = {
+  actionHash: string;
+  submittedSlot: number;
+  validUntil: number;
+};
+
+export type PreparedActionTrackingInfo = Omit<SignedActionTrackingInfo, "actionHash"> & { actionName: string };
+
 const preparedOwnershipActions = new WeakMap<PreparedOwnershipAction, PreparedOwnershipActionData>();
 const signedOwnershipActions = new WeakMap<SignedOwnershipAction, SignedOwnershipActionData>();
 
-export class TransactionWaitTimeoutError extends Error {
+export class TransactionTrackingError extends Error {
   constructor(
+    message: string,
+    readonly code: string,
     readonly transactionId: string,
+    readonly actionHash?: string,
     readonly lastStatus?: TransactionStatusResult,
+    readonly failureStage?: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "TransactionTrackingError";
+  }
+}
+
+export class TransactionWaitTimeoutError extends TransactionTrackingError {
+  constructor(
+    transactionId: string,
+    lastStatus?: TransactionStatusResult,
+    actionHash?: string,
+    reason: "timeout" | "receipt_unavailable" | "status_unavailable" = "timeout",
+    cause?: unknown,
   ) {
     super(
-      lastStatus
-        ? `timed out waiting for transaction ${transactionId} (last status: ${lastStatus.status})`
-        : `timed out waiting for transaction ${transactionId}`,
+      reason === "receipt_unavailable"
+        ? `transaction ${transactionId} is finalized but its matching action receipt is not available yet`
+        : reason === "status_unavailable"
+          ? `timed out waiting for transaction ${transactionId}; its status is still unavailable`
+          : lastStatus
+            ? `timed out waiting for transaction ${transactionId} (last status: ${lastStatus.status})`
+            : `timed out waiting for transaction ${transactionId}`,
+      reason.toUpperCase(),
+      transactionId,
+      actionHash,
+      lastStatus,
+      undefined,
+      cause === undefined ? undefined : { cause },
     );
     this.name = "TransactionWaitTimeoutError";
+  }
+}
+
+export class TransactionTrackingAbortedError extends TransactionTrackingError {
+  constructor(transactionId: string, lastStatus?: TransactionStatusResult, actionHash?: string, cause?: unknown) {
+    super("transaction tracking was stopped; the transaction remains unresolved", "ABORTED", transactionId, actionHash, lastStatus, undefined, cause === undefined ? undefined : { cause });
+    this.name = "TransactionTrackingAbortedError";
   }
 }
 
@@ -116,6 +174,10 @@ export class JamScriptClient {
   private readonly nextOwnershipNonces = new Map<string, bigint>();
   private readonly ownershipBlockedNonces = new Map<string, bigint>();
   private readonly ownershipTransactionNonces = new Map<string, { nonceLane: string; nonce: bigint }>();
+  private readonly walletTransactionNonces = new Map<string, { signerKey: string; nonce: bigint }>();
+  private readonly walletBlockedNonces = new Map<string, bigint>();
+  private readonly statusReads = new Map<string, Promise<TransactionStatusResult>>();
+  private lifecycleCapabilities?: Promise<BackendCapabilitiesV1>;
 
   constructor(
     private readonly deployment: DeploymentDescriptor,
@@ -143,6 +205,16 @@ export class JamScriptClient {
     }
   }
 
+  transactionScope(): Pick<DeploymentDescriptor, "genesisHash" | "networkDomain" | "serviceId" | "serviceKey" | "codeHash"> {
+    return {
+      genesisHash: this.deployment.genesisHash,
+      networkDomain: this.deployment.networkDomain,
+      serviceId: this.deployment.serviceId,
+      serviceKey: this.deployment.serviceKey,
+      codeHash: this.deployment.codeHash,
+    };
+  }
+
   async readNonce(publicKey: Uint8Array, context?: FinalizedContext): Promise<bigint> {
     if (publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
     const finalized = { ...(context ?? await this.rpc.finalizedContext()), contextType: "finalized" as const };
@@ -159,8 +231,9 @@ export class JamScriptClient {
     actionName: string,
     input: Record<string, CodecValue>,
     signer: JamSigner,
-    options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number } = {},
+    options: { ttl?: bigint; extrinsics?: Uint8Array[]; staleRetries?: number; onSigned?: (info: SignedActionTrackingInfo) => void | Promise<void> } = {},
   ): Promise<SubmitActionResult> {
+    await this.assertTransactionLifecycleSupport();
     if (signer.publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
     const signerKey = toHex(signer.publicKey).toLowerCase();
     const prepared = await this.prepareAction(
@@ -169,19 +242,30 @@ export class JamScriptClient {
       signer,
       options,
     );
+    try {
+      await options.onSigned?.({ actionHash: prepared.actionHash, submittedSlot: prepared.submittedSlot, validUntil: prepared.validUntil });
+      } catch (error) {
+        if (this.nextNonces.get(signerKey) === prepared.nonce + 1n) this.nextNonces.delete(signerKey);
+        else {
+          const blocked = this.walletBlockedNonces.get(signerKey);
+          if (blocked === undefined || prepared.nonce < blocked) this.walletBlockedNonces.set(signerKey, prepared.nonce);
+        }
+        throw error;
+    }
     let submitted: SubmitTransactionResult;
     try {
       submitted = await this.rpc.submitTransaction(prepared.request);
     } catch (error) {
-      // Only rewind a reservation when no later concurrent action has already
-      // reserved a nonce.  This keeps the common single-admission-failure
-      // recovery while avoiding duplicate nonces for an active batch.
-      if (this.nextNonces.get(signerKey) === prepared.nonce + 1n) {
-        this.nextNonces.delete(signerKey);
+      if (isDefiniteSubmissionRejection(error)) {
+        if (this.nextNonces.get(signerKey) === prepared.nonce + 1n) this.nextNonces.delete(signerKey);
+      } else {
+        const blocked = this.walletBlockedNonces.get(signerKey);
+        if (blocked === undefined || prepared.nonce < blocked) this.walletBlockedNonces.set(signerKey, prepared.nonce);
       }
       throw error;
     }
     this.actionHashes.set(submitted.transactionId.toLowerCase(), prepared.actionHash);
+    this.walletTransactionNonces.set(submitted.transactionId.toLowerCase(), { signerKey, nonce: prepared.nonce });
     return {
       ...submitted,
       actionHash: prepared.actionHash,
@@ -194,8 +278,17 @@ export class JamScriptClient {
     actionName: string,
     input: Record<string, CodecValue>,
     signer: OwnershipSigner,
-    options: { actAs?: Ownership; ttl?: bigint; extrinsics?: Uint8Array[] } = {},
+    options: {
+      actAs?: Ownership;
+      ttl?: bigint;
+      extrinsics?: Uint8Array[];
+      onPrepared?: (info: PreparedActionTrackingInfo) => void | Promise<void>;
+      onSigned?: (info: SignedActionTrackingInfo) => void | Promise<void>;
+    } = {},
   ): Promise<SubmitActionResult> {
+    // Fail before deriving nonces or prompting the Ownership signer when the
+    // configured Backend cannot provide the lifecycle evidence Locus requires.
+    await this.assertTransactionLifecycleSupport();
     const controller = await signer.getController();
     const nonceLane = toHex(ownershipNonceKey(options.actAs ?? controller)).toLowerCase();
     const previous = this.ownershipSubmitTails.get(nonceLane) ?? Promise.resolve();
@@ -205,8 +298,20 @@ export class JamScriptClient {
     await previous;
     try {
       const prepared = await this.prepareOwnershipAction(actionName, input, signer, options);
+      const preparedData = preparedOwnershipActions.get(prepared);
+      try {
+        if (!preparedData) throw new Error("prepared Ownership action is unavailable");
+        await options.onPrepared?.({
+          actionName,
+          submittedSlot: preparedData.submittedSlot,
+          validUntil: preparedData.validUntil,
+        });
+      } catch (error) {
+        this.abandonPreparedOwnershipAction(prepared);
+        throw error;
+      }
       const signed = await this.signPreparedOwnershipAction(prepared);
-      return await this.submitSignedOwnershipAction(signed);
+      return await this.submitSignedOwnershipAction(signed, { onSigned: options.onSigned });
     } finally {
       release();
       if (this.ownershipSubmitTails.get(nonceLane) === lane) this.ownershipSubmitTails.delete(nonceLane);
@@ -223,6 +328,7 @@ export class JamScriptClient {
     signer: OwnershipSigner,
     options: { actAs?: Ownership; ttl?: bigint; extrinsics?: Uint8Array[]; onProgress?: (phase: OwnershipPreparationPhase) => void } = {},
   ): Promise<PreparedOwnershipAction> {
+    await this.assertTransactionLifecycleSupport();
     const controller = await signer.getController();
     const effectiveOwner = options.actAs ?? controller;
     const nonceLane = toHex(ownershipNonceKey(effectiveOwner)).toLowerCase();
@@ -410,25 +516,34 @@ export class JamScriptClient {
   }
 
   /** Submit one signed payload. This method never retries a transport error. */
-  async submitSignedOwnershipAction(signed: SignedOwnershipAction): Promise<SubmitActionResult> {
+  async submitSignedOwnershipAction(
+    signed: SignedOwnershipAction,
+    options: { onSigned?: (info: SignedActionTrackingInfo) => void | Promise<void> } = {},
+  ): Promise<SubmitActionResult> {
+    await this.assertTransactionLifecycleSupport();
     const data = signedOwnershipActions.get(signed);
     if (!data || this.ownershipReservation(data.nonceLane, data.nonce) !== signed) {
       throw new Error("signed Ownership action is unavailable or already submitted");
     }
     const blockedNonce = this.ownershipBlockedNonces.get(data.nonceLane);
     if (blockedNonce !== undefined && data.nonce >= blockedNonce) {
+      this.abandonSignedOwnershipAction(signed);
       throw new Error("OWNERSHIP_NONCE_RECONCILIATION_REQUIRED: resolve the earlier Ownership nonce before submitting this action");
+    }
+    try {
+      await options.onSigned?.({ actionHash: data.actionHash, submittedSlot: data.submittedSlot, validUntil: data.validUntil });
+    } catch (error) {
+      this.abandonSignedOwnershipAction(signed);
+      throw error;
     }
     let submitted: SubmitTransactionResult;
     try {
       submitted = await this.rpc.submitTransaction(data.request);
     } catch (error) {
-      // A JSON-RPC error is an explicit rejection. A transport failure is
-      // ambiguous: the backend may have accepted the payload before the
-      // response was lost, so keep the controller lane reserved and never
-      // silently sign or submit a replacement.
+      // Only explicit server-side rejection classes are safe to rewind.
+      // HTTP 5xx, timeouts, and network errors may follow an accepted request.
       signedOwnershipActions.delete(signed);
-      if (error instanceof RpcError && this.ownershipReservation(data.nonceLane, data.nonce) === signed) {
+      if (isDefiniteSubmissionRejection(error) && this.ownershipReservation(data.nonceLane, data.nonce) === signed) {
         this.deleteOwnershipReservation(data.nonceLane, data.nonce, signed);
         this.rewindOwnershipNonce(data.nonceLane, data.nonce);
       } else if (!(error instanceof RpcError)) {
@@ -465,10 +580,22 @@ export class JamScriptClient {
     await previous;
     try {
       const context = await this.rpc.finalizedContext();
-      const localNonce = this.nextNonces.get(signerKey);
-      const chainNonce = localNonce === undefined
+      let localNonce = this.nextNonces.get(signerKey);
+      let chainNonce = localNonce === undefined || this.walletBlockedNonces.has(signerKey)
         ? await this.readNonce(publicKey, context)
         : localNonce;
+      const blockedNonce = this.walletBlockedNonces.get(signerKey);
+      if (blockedNonce !== undefined) {
+        if (chainNonce <= blockedNonce) {
+          throw new Error("WALLET_NONCE_RECONCILIATION_REQUIRED: an earlier transaction has an unresolved submission or reorganization outcome");
+        }
+        this.walletBlockedNonces.delete(signerKey);
+        this.walletTransactionNonces.forEach((pending, transactionId) => {
+          if (pending.signerKey === signerKey && pending.nonce < chainNonce) this.walletTransactionNonces.delete(transactionId);
+        });
+        this.nextNonces.delete(signerKey);
+        localNonce = undefined;
+      }
       const nonce = localNonce === undefined || localNonce < chainNonce ? chainNonce : localNonce;
       this.nextNonces.set(signerKey, nonce + 1n);
       return { context, nonce };
@@ -532,6 +659,17 @@ export class JamScriptClient {
       submittedSlot: initialContext.slot,
       validUntil: Number(validUntil),
     };
+  }
+
+  /** Release a signature that has not yet been sent to the Backend. */
+  abandonSignedOwnershipAction(signed: SignedOwnershipAction): void {
+    const data = signedOwnershipActions.get(signed);
+    if (!data) return;
+    signedOwnershipActions.delete(signed);
+    if (this.ownershipReservation(data.nonceLane, data.nonce) === signed) {
+      this.deleteOwnershipReservation(data.nonceLane, data.nonce, signed);
+      this.rewindOwnershipNonce(data.nonceLane, data.nonce);
+    }
   }
 
   finalizedContext(): Promise<FinalizedContext> {
@@ -635,15 +773,32 @@ export class JamScriptClient {
   }
 
   async transactionStatus(transactionId: string): Promise<TransactionStatusResult> {
-    const status = await this.rpc.transactionStatus(transactionId);
+    const status = await this.readTransactionStatus(transactionId);
     const transactionKey = transactionId.toLowerCase();
+    const walletNonce = this.walletTransactionNonces.get(transactionKey);
+    if (walletNonce) {
+      const actionHash = this.actionHashes.get(transactionKey)?.toLowerCase();
+      const receipt = actionHash
+        ? status.actionReceipts?.find((candidate) => candidate.actionHash.toLowerCase() === actionHash)
+        : undefined;
+      if (status.status === "reorged" || status.status === "submission_unknown" || status.status === "failed"
+        || (status.bestChainStatus === "included" && status.finalized !== true)
+        || (receipt && receipt.status !== "applied")) {
+        const blocked = this.walletBlockedNonces.get(walletNonce.signerKey);
+        if (blocked === undefined || walletNonce.nonce < blocked) this.walletBlockedNonces.set(walletNonce.signerKey, walletNonce.nonce);
+      } else if (status.finalized === true && receipt?.status === "applied") {
+        this.walletTransactionNonces.delete(transactionKey);
+      }
+    }
     const ownershipNonce = this.ownershipTransactionNonces.get(transactionKey);
     if (ownershipNonce) {
       const actionHash = this.actionHashes.get(transactionKey)?.toLowerCase();
       const actionReceipt = actionHash
         ? status.actionReceipts?.find((receipt) => receipt.actionHash.toLowerCase() === actionHash)
         : undefined;
-      if (status.status === "reorged" || status.status === "failed" || (actionReceipt && actionReceipt.status !== "applied")) {
+      if (status.status === "reorged" || status.status === "failed" || status.status === "submission_unknown"
+        || (status.bestChainStatus === "included" && status.finalized !== true)
+        || (actionReceipt && actionReceipt.status !== "applied")) {
         const blocked = this.ownershipBlockedNonces.get(ownershipNonce.nonceLane);
         if (blocked === undefined || ownershipNonce.nonce < blocked) {
           this.ownershipBlockedNonces.set(ownershipNonce.nonceLane, ownershipNonce.nonce);
@@ -655,50 +810,185 @@ export class JamScriptClient {
     return status;
   }
 
-  async waitForTransaction(
+  private readTransactionStatus(transactionId: string): Promise<TransactionStatusResult> {
+    const key = transactionId.toLowerCase();
+    const current = this.statusReads.get(key);
+    if (current) return current;
+    const request = this.rpc.transactionStatus(transactionId);
+    this.statusReads.set(key, request);
+    void request.finally(() => {
+      if (this.statusReads.get(key) === request) this.statusReads.delete(key);
+    }).catch(() => undefined);
+    return request;
+  }
+
+  private async requireLifecycleCapabilities(transactionId: string, actionHash?: string): Promise<BackendCapabilitiesV1> {
+    this.lifecycleCapabilities ??= this.rpc.capabilities();
+    let capabilities: BackendCapabilitiesV1;
+    try {
+      capabilities = await this.lifecycleCapabilities;
+    } catch (cause) {
+      this.lifecycleCapabilities = undefined;
+      throw new TransactionTrackingError(
+        "the Backend does not expose verifiable transaction lifecycle capabilities",
+        "LIFECYCLE_UNSUPPORTED",
+        transactionId,
+        actionHash,
+        undefined,
+        "capability_check",
+        { cause },
+      );
+    }
+    if (capabilities.transactionLifecycleVersion !== 1
+      || capabilities.bestChainTracking !== true
+      || capabilities.strictFinalizedReceipts !== true) {
+      throw new TransactionTrackingError(
+        "the configured Backend does not support strict transaction lifecycle tracking; upgrade the Backend before submitting or confirming actions",
+        "LIFECYCLE_UNSUPPORTED",
+        transactionId,
+        actionHash,
+        undefined,
+        "capability_check",
+      );
+    }
+    return capabilities;
+  }
+
+  async assertTransactionLifecycleSupport(): Promise<BackendCapabilitiesV1> {
+    const capabilities = await this.requireLifecycleCapabilities("preflight");
+    return capabilities;
+  }
+
+  private async pollTransaction(
     transactionId: string,
-    options: { intervalMs?: number; timeoutMs?: number } = {},
+    options: TransactionTrackingOptions,
+    accept: (status: TransactionStatusResult) => boolean,
   ): Promise<TransactionStatusResult> {
-    const intervalMs = options.intervalMs ?? 1_000;
-    const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+    const intervalMs = Math.max(100, options.intervalMs ?? 1_000);
+    const deadline = Date.now() + Math.max(1, options.timeoutMs ?? 120_000);
     let lastStatus: TransactionStatusResult | undefined;
+    let previousUpdateKey = "";
+    let transientFailures = 0;
+    let lastCause: unknown;
+    const emit = (status: TransactionStatusResult) => {
+      const confirmation = status.finalized === true
+        ? "finalized"
+        : status.bestChainStatus === "included" && status.bestContext?.contextType === "best"
+          ? "best"
+          : "unknown";
+      const targetReceipt = this.resolveActionReceipt(status, options.actionHash, transactionId, false);
+      const update: TransactionLifecycleUpdate = {
+        transactionId,
+        status,
+        confirmation,
+        ...(targetReceipt ? { actionResult: targetReceipt.status } : {}),
+      };
+      const key = JSON.stringify(update);
+      if (key !== previousUpdateKey) {
+        previousUpdateKey = key;
+        options.onUpdate?.(update);
+      }
+    };
     for (;;) {
+      if (options.signal?.aborted) {
+        throw new TransactionTrackingAbortedError(transactionId, lastStatus, options.actionHash, options.signal.reason);
+      }
       try {
         const status = await this.transactionStatus(transactionId);
         lastStatus = status;
-        if (status.status === "failed" || status.status === "reorged") return status;
-        if (
-          status.status === "imported"
-          && (status.finalized === true || status.actionReceipts?.length)
-        ) return status;
-      } catch (error) {
-        if (!(error instanceof RpcError) || error.code !== -32013) throw error;
+        transientFailures = 0;
+        lastCause = undefined;
+        emit(status);
+        if (accept(status)) return status;
+      } catch (cause) {
+        if (cause instanceof TransactionTrackingError) throw cause;
+        if (!isRetryableTrackingError(cause)) throw cause;
+        transientFailures += 1;
+        lastCause = cause;
       }
-      if (Date.now() >= deadline) throw new TransactionWaitTimeoutError(transactionId, lastStatus);
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      if (Date.now() >= deadline) {
+        const reason = lastStatus?.finalized === true
+          ? "receipt_unavailable"
+          : lastStatus === undefined
+            ? "status_unavailable"
+            : "timeout";
+        throw new TransactionWaitTimeoutError(transactionId, lastStatus, options.actionHash, reason, lastCause);
+      }
+      const backoff = Math.min(intervalMs * 2 ** Math.min(transientFailures, 5), 10_000);
+      await waitForDelay(Math.min(backoff, Math.max(1, deadline - Date.now())), options.signal, transactionId, lastStatus, options.actionHash);
     }
+  }
+
+  private resolveActionReceipt(
+    status: TransactionStatusResult,
+    actionHash: string | undefined,
+    transactionId: string,
+    requireReceipt = true,
+  ): ActionReceipt | undefined {
+    if (!actionHash) {
+      if (!requireReceipt) return undefined;
+      throw new TransactionTrackingError(
+        "action hash is unavailable; restore tracking with the submitted actionHash",
+        "ACTION_IDENTITY_UNAVAILABLE",
+        transactionId,
+        undefined,
+        status,
+        "receipt_mapping",
+      );
+    }
+    const receipts = status.actionReceipts ?? [];
+    if (status.actionIndex !== null) {
+      const receipt = receipts[status.actionIndex];
+      if (!receipt) return undefined;
+      if (!sameHex(receipt.actionHash, actionHash)) {
+        throw new TransactionTrackingError(
+          "Backend actionIndex points to a receipt with a different actionHash",
+          "ACTION_IDENTITY_MISMATCH",
+          transactionId,
+          actionHash,
+          status,
+          "receipt_mapping",
+        );
+      }
+      return receipt;
+    }
+    const matches = receipts.filter((receipt) => sameHex(receipt.actionHash, actionHash));
+    if (matches.length > 1) {
+      throw new TransactionTrackingError(
+        "multiple action receipts match the saved actionHash",
+        "ACTION_IDENTITY_AMBIGUOUS",
+        transactionId,
+        actionHash,
+        status,
+        "receipt_mapping",
+      );
+    }
+    return matches[0];
+  }
+
+  async waitForTransaction(
+    transactionId: string,
+    options: TransactionTrackingOptions & { confirmation?: "best" | "finalized" } = {},
+  ): Promise<TransactionStatusResult> {
+    await this.requireLifecycleCapabilities(transactionId, options.actionHash);
+    const confirmation = options.confirmation ?? "finalized";
+    return this.pollTransaction(transactionId, options, (status) => status.status === "failed"
+      || status.status === "submission_unknown"
+      || (confirmation === "best"
+        ? status.finalized === true || (status.bestChainStatus === "included" && status.bestContext?.contextType === "best")
+        : status.finalized === true));
   }
 
   async waitForBest(
     transactionId: string,
-    options: { intervalMs?: number; timeoutMs?: number } = {},
+    options: TransactionTrackingOptions = {},
   ): Promise<TransactionStatusResult> {
-    const intervalMs = options.intervalMs ?? 500;
-    const deadline = Date.now() + (options.timeoutMs ?? 120_000);
-    let lastStatus: TransactionStatusResult | undefined;
-    for (;;) {
-      try {
-        const status = await this.transactionStatus(transactionId);
-        lastStatus = status;
-        if (status.status === "failed" || status.status === "reorged") return status;
-        if (status.status === "imported" && status.bestChainStatus === "included") return status;
-        if (status.finalized === true) return status;
-      } catch (error) {
-        if (!(error instanceof RpcError) || error.code !== -32013) throw error;
-      }
-      if (Date.now() >= deadline) throw new TransactionWaitTimeoutError(transactionId, lastStatus);
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
+    await this.requireLifecycleCapabilities(transactionId, options.actionHash);
+    return this.pollTransaction(transactionId, options, (status) => status.status === "failed"
+      || status.status === "reorged"
+      || status.status === "submission_unknown"
+      || status.finalized === true
+      || (status.bestChainStatus === "included" && status.bestContext?.contextType === "best"));
   }
 
   async waitForWork(
@@ -724,28 +1014,32 @@ export class JamScriptClient {
 
   async waitForAction(
     transactionId: string,
-    optionsOrActionHash: { intervalMs?: number; timeoutMs?: number } | string = {},
-    legacyOptions: { intervalMs?: number; timeoutMs?: number } = {},
+    optionsOrActionHash: TransactionTrackingOptions | string = {},
+    legacyOptions: TransactionTrackingOptions = {},
   ): Promise<WaitForActionResult> {
-    const options = typeof optionsOrActionHash === "string" ? legacyOptions : optionsOrActionHash;
-    const transaction = await this.waitForTransaction(transactionId, options);
-    if (transaction.status === "reorged") {
-      throw new RpcError("TRANSACTION_REORGED", -32042, transaction);
+    const options = { ...(typeof optionsOrActionHash === "string" ? legacyOptions : optionsOrActionHash) };
+    const legacyHash = typeof optionsOrActionHash === "string" ? optionsOrActionHash : undefined;
+    if (legacyHash && options.actionHash && !sameHex(legacyHash, options.actionHash)) {
+      throw new TransactionTrackingError("conflicting actionHash arguments were supplied", "ACTION_IDENTITY_MISMATCH", transactionId, options.actionHash);
+    }
+    const expected = options.actionHash ?? legacyHash ?? this.actionHashes.get(transactionId.toLowerCase());
+    if (!expected) {
+      throw new TransactionTrackingError("action hash is unavailable; pass actionHash to restore tracking", "ACTION_IDENTITY_UNAVAILABLE", transactionId);
+    }
+    options.actionHash = expected;
+    await this.requireLifecycleCapabilities(transactionId, expected);
+    const transaction = await this.pollTransaction(transactionId, options, (status) => status.finalized === true
+      && this.resolveActionReceipt(status, expected, transactionId) !== undefined
+      || status.status === "submission_unknown"
+      || status.status === "failed");
+    if (transaction.status === "submission_unknown") {
+      throw new TransactionTrackingError("the Backend cannot determine whether this transaction was submitted; keep it pending and do not resubmit automatically", "SUBMISSION_UNKNOWN", transactionId, expected, transaction, "submission");
     }
     if (transaction.status === "failed") {
-      throw new RpcError("transaction failed before an action receipt was produced", -32040, transaction);
+      throw new TransactionTrackingError(`transaction failed before a finalized action receipt was produced: ${transaction.error ?? "unknown Work failure"}`, "WORK_FAILED", transactionId, expected, transaction, "work");
     }
-    const expected = this.actionHashes.get(transactionId.toLowerCase())
-      ?? (typeof optionsOrActionHash === "string" ? optionsOrActionHash : undefined);
-    if (!expected) throw new Error("action hash is unavailable for this client instance");
-    const actionIndex = transaction.actionIndex;
-    const receipt = actionIndex === null ? undefined : transaction.actionReceipts?.[actionIndex];
-    if (!receipt) {
-      throw new Error("canonical action receipt is missing for the transaction action index");
-    }
-    if (!sameHex(receipt.actionHash, expected)) {
-      throw new Error("transaction action index resolved to a different action hash");
-    }
+    const receipt = this.resolveActionReceipt(transaction, expected, transactionId);
+    if (!receipt) throw new TransactionWaitTimeoutError(transactionId, transaction, expected, "receipt_unavailable");
     return {
       ...transaction,
       status: receipt.status,
@@ -758,10 +1052,55 @@ export class JamScriptClient {
 
   waitForFinalized(
     transactionId: string,
-    options: { intervalMs?: number; timeoutMs?: number } = {},
+    options: TransactionTrackingOptions = {},
   ): Promise<WaitForActionResult> {
     return this.waitForAction(transactionId, options);
   }
+
+  watchTransaction(transactionId: string, options: TransactionTrackingOptions = {}): Promise<WaitForActionResult> {
+    return this.waitForFinalized(transactionId, options);
+  }
+}
+
+function isRetryableTrackingError(error: unknown): boolean {
+  if (error instanceof RpcError) {
+    return error.code === -32013 || error.code === 408 || error.code === 429 || error.code >= 500;
+  }
+  return error instanceof TypeError
+    || (error instanceof Error && (error.name === "FetchError" || error.name === "NetworkError"));
+}
+
+function isDefiniteSubmissionRejection(error: unknown): boolean {
+  if (!(error instanceof RpcError)) return false;
+  if ([
+    -32600, -32601, -32602,
+    -32003, -32010, -32011, -32031, -32032, -32033, -32043, -32044, -32045,
+  ].includes(error.code)) return true;
+  return [400, 401, 403, 404, 409, 422].includes(error.code);
+}
+
+function waitForDelay(
+  milliseconds: number,
+  signal: AbortSignal | undefined,
+  transactionId: string,
+  lastStatus?: TransactionStatusResult,
+  actionHash?: string,
+): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new TransactionTrackingAbortedError(transactionId, lastStatus, actionHash, signal.reason));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, milliseconds);
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      reject(new TransactionTrackingAbortedError(transactionId, lastStatus, actionHash, signal?.reason));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function isUnitType(type: string | { kind: string }): boolean {
