@@ -1613,7 +1613,11 @@ impl TransactionCoordinator {
         });
         if queue >= self.max_queued_per_service || queued_for_sender >= self.max_queued_per_sender {
             return Err(BackendError::QueueFull {
-                retry_after_ms: self.flush_delay.as_millis().max(100).min(u128::from(u64::MAX)) as u64,
+                retry_after_ms: self
+                    .flush_delay
+                    .as_millis()
+                    .max(100)
+                    .min(u128::from(u64::MAX)) as u64,
             });
         }
         let sequence = state.next_sequences.entry(service_id).or_default();
@@ -3270,7 +3274,9 @@ impl BackendRpcHandler {
             .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
         let service_key = state.registry.get(service_id)?.service_key;
         if !state.provider.contains_root(service_key, root) {
-            if response_context.is_none() || !state.materialize_prediction_snapshot(service_id, root)? {
+            if response_context.is_none()
+                || !state.materialize_prediction_snapshot(service_id, root)?
+            {
                 return Err(BackendError::Provider(ProviderError::UnavailableRoot));
             }
         }
@@ -3890,7 +3896,9 @@ impl BackendRpcHandler {
                             best_context = Some(context);
                             best_included = true;
                         }
-                        Ok((_, root)) if transaction.best_included && root == prediction.parent_root => {
+                        Ok((_, root))
+                            if transaction.best_included && root == prediction.parent_root =>
+                        {
                             reorged = true;
                         }
                         Ok((_, root)) if root == prediction.parent_root => {}
@@ -3913,7 +3921,9 @@ impl BackendRpcHandler {
                 "insufficient_workers" | "pending" => "packaged",
                 "awaiting_candidate" => "refining",
                 "voting" | "accepted" => "reported",
-                "imported" if result.get("actionReceipts").is_some_and(Value::is_array) => "imported",
+                "imported" if result.get("actionReceipts").is_some_and(Value::is_array) => {
+                    "imported"
+                }
                 "imported" => "reported",
                 "failed" => "failed",
                 _ => "reported",
@@ -4622,9 +4632,7 @@ fn rpc_error(error: &BackendError) -> Value {
             (-32033, "backend data directory is already in use".into())
         }
         BackendError::StaleContext => (-32010, "STALE_CONTEXT".into()),
-        BackendError::BestContextUnavailable => {
-            (-32043, "BEST_CONTEXT_UNAVAILABLE".into())
-        }
+        BackendError::BestContextUnavailable => (-32043, "BEST_CONTEXT_UNAVAILABLE".into()),
         BackendError::QueueFull { .. } => unreachable!("queue full is handled above"),
         BackendError::WrongNetwork => (
             -32003,
@@ -4794,7 +4802,14 @@ impl BackendState {
             .predictions
             .iter()
             .find(|(key, output)| key.service_id == service_id && output.new_root == root)
-            .map(|(_, output)| (self.registry.get(service_id).map(|record| record.service_key), output.clone()))
+            .map(|(_, output)| {
+                (
+                    self.registry
+                        .get(service_id)
+                        .map(|record| record.service_key),
+                    output.clone(),
+                )
+            })
         else {
             return Ok(false);
         };
@@ -5353,7 +5368,12 @@ mod tests {
         };
         coordinator.enqueue(7, vec![1], json!({})).unwrap();
         let error = coordinator.enqueue(7, vec![2], json!({})).unwrap_err();
-        assert_eq!(error, BackendError::QueueFull { retry_after_ms: 100 });
+        assert_eq!(
+            error,
+            BackendError::QueueFull {
+                retry_after_ms: 100
+            }
+        );
         let rpc = rpc_error(&error);
         assert_eq!(rpc["code"], -32044);
         assert_eq!(rpc["message"], "QUEUE_FULL");
@@ -5544,7 +5564,9 @@ mod tests {
         let record = record(10, 1);
         let mut state = BackendState::default();
         state.register(record.clone()).unwrap();
-        state.provider.insert(record.service_key, FullState::empty());
+        state
+            .provider
+            .insert(record.service_key, FullState::empty());
         let handler = BackendRpcHandler::new(state, Arc::new(UnconfiguredWorkGateway))
             .with_network(Arc::new(WorkStatusNetwork {
                 result: Value::Null,
