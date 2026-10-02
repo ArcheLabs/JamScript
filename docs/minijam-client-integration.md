@@ -63,14 +63,15 @@ The endpoint also exposes GET `/healthz` and `/readinessz` after the artifact
 store is initialized and the configured node is reachable. It applies bounded
 headers and request bodies and a bounded connection admission limit.
 
-`queryLatest` first reads the managed-state commitment from finalized Service
-storage and asks the backend for the value through `jamscript_getStateV1` by
-default. The backend rejects a stale or unavailable materialization with
-`STATE_NOT_MATERIALIZED`; no proof object is exposed to application code in
-trusted mode. Set `stateVerification: "proof"` to request
-`jamscript_getStateProofV1` semantics and verify the LayoutV1 storage proof
-locally. Provider availability never selects the root, and implicit fallback to
-legacy Service KV is disabled by default.
+`queryFinalized` reads the managed-state commitment from the finalized Service
+snapshot. `queryBest` first obtains one best block context, then asks the
+backend for managed state at that exact context and verifies the Service's
+commitment. `query()` defaults to best; `queryLatest()` remains a deprecated
+finalized alias. The backend rejects stale contexts, unavailable roots, and
+best-context requests when the node cannot provide them; it never substitutes
+finalized state for a best read. Set `stateVerification: "proof"` to verify
+the LayoutV1 storage proof locally. Implicit fallback to legacy Service KV is
+disabled by default.
 
 ## Deployment and Network E2E
 

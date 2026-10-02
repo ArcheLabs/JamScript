@@ -1261,6 +1261,8 @@ pub enum BackendError {
     WrongNetwork,
     InvalidMetadata,
     StaleContext,
+    BestContextUnavailable,
+    QueueFull { retry_after_ms: u64 },
     PredictionStale,
     WorkNotFound,
     Rpc(String),
@@ -1345,6 +1347,20 @@ pub trait BackendNetwork: Send + Sync {
         self.genesis_hash()
     }
     fn finalized_context(&self) -> Result<FinalizedContextV1, BackendError>;
+    fn best_context(&self) -> Result<FinalizedContextV1, BackendError> {
+        Err(BackendError::BestContextUnavailable)
+    }
+    fn context_at(&self, block_hash: StateRoot) -> Result<FinalizedContextV1, BackendError> {
+        let finalized = self.finalized_context()?;
+        if finalized.block_hash == block_hash {
+            return Ok(finalized);
+        }
+        let best = self.best_context()?;
+        if best.block_hash == block_hash {
+            return Ok(best);
+        }
+        Err(BackendError::Rpc("STALE_CONTEXT".into()))
+    }
     fn service_info(
         &self,
         context: &FinalizedContextV1,
@@ -1375,6 +1391,8 @@ pub struct MiniJamNetworkGateway<T> {
 
 const DEFAULT_BATCH_MAX_ACTIONS: usize = 4;
 const DEFAULT_BATCH_FLUSH_MS: u64 = 50;
+const DEFAULT_MAX_QUEUED_PER_SERVICE: usize = 1024;
+const DEFAULT_MAX_QUEUED_PER_SENDER: usize = 64;
 const FUTURE_NONCE_RECHECK_DELAY: Duration = Duration::from_secs(1);
 const COORDINATOR_RECONCILE_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -1399,6 +1417,7 @@ struct LogicalTransaction {
     package_hash: Option<StateRoot>,
     action_index: Option<usize>,
     error: Option<String>,
+    best_included: bool,
 }
 
 #[derive(Clone)]
@@ -1465,6 +1484,8 @@ struct TransactionCoordinator {
     wake: Condvar,
     max_actions: usize,
     flush_delay: Duration,
+    max_queued_per_service: usize,
+    max_queued_per_sender: usize,
 }
 
 fn select_canonical_indices(
@@ -1530,6 +1551,16 @@ impl TransactionCoordinator {
                 "JAMSCRIPT_BATCH_FLUSH_MS",
                 DEFAULT_BATCH_FLUSH_MS,
             )),
+            max_queued_per_service: env_usize(
+                "JAMSCRIPT_MAX_QUEUED_PER_SERVICE",
+                DEFAULT_MAX_QUEUED_PER_SERVICE,
+            )
+            .max(1),
+            max_queued_per_sender: env_usize(
+                "JAMSCRIPT_MAX_QUEUED_PER_SENDER",
+                DEFAULT_MAX_QUEUED_PER_SENDER,
+            )
+            .max(1),
         }
     }
 
@@ -1539,18 +1570,6 @@ impl TransactionCoordinator {
         action: Vec<u8>,
         params: Value,
     ) -> Result<String, BackendError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| BackendError::Rpc("transaction coordinator lock poisoned".into()))?;
-        let sequence = state.next_sequences.entry(service_id).or_default();
-        let current = *sequence;
-        *sequence = sequence.saturating_add(1);
-        let mut id_input = Vec::with_capacity(4 + 8 + action.len());
-        id_input.extend_from_slice(&service_id.to_le_bytes());
-        id_input.extend_from_slice(&current.to_le_bytes());
-        id_input.extend_from_slice(&action);
-        let logical_id = hash_hex(&service_runtime_core::blake2_256(&id_input));
         let (sender, nonce, nonce_storage_key, valid_until) =
             if let Ok(signed) = jamscript_runtime_core::decode_signed_action_v1(&action) {
                 if signed.public_key.len() == 32 {
@@ -1578,6 +1597,33 @@ impl TransactionCoordinator {
             } else {
                 (None, None, None, None)
             };
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| BackendError::Rpc("transaction coordinator lock poisoned".into()))?;
+        let queue = state.queued.get(&service_id).map_or(0, Vec::len);
+        let queued_for_sender = sender.map_or(0, |sender| {
+            state
+                .queued
+                .get(&service_id)
+                .into_iter()
+                .flatten()
+                .filter(|item| item.sender == Some(sender))
+                .count()
+        });
+        if queue >= self.max_queued_per_service || queued_for_sender >= self.max_queued_per_sender {
+            return Err(BackendError::QueueFull {
+                retry_after_ms: self.flush_delay.as_millis().max(100).min(u128::from(u64::MAX)) as u64,
+            });
+        }
+        let sequence = state.next_sequences.entry(service_id).or_default();
+        let current = *sequence;
+        *sequence = sequence.saturating_add(1);
+        let mut id_input = Vec::with_capacity(4 + 8 + action.len());
+        id_input.extend_from_slice(&service_id.to_le_bytes());
+        id_input.extend_from_slice(&current.to_le_bytes());
+        id_input.extend_from_slice(&action);
+        let logical_id = hash_hex(&service_runtime_core::blake2_256(&id_input));
         let action_selector = jamscript_runtime_core::decode_signed_action_v1(&action)
             .map(|signed| signed.action_selector)
             .or_else(|_| {
@@ -1607,6 +1653,7 @@ impl TransactionCoordinator {
                 package_hash: None,
                 action_index: None,
                 error: None,
+                best_included: false,
             },
         );
         state
@@ -1892,6 +1939,14 @@ impl TransactionCoordinator {
             .lock()
             .ok()
             .and_then(|state| state.transactions.get(logical_id).cloned())
+    }
+
+    fn mark_best_included(&self, logical_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(transaction) = state.transactions.get_mut(logical_id) {
+                transaction.best_included = true;
+            }
+        }
     }
 
     fn finish_batch(
@@ -2419,6 +2474,86 @@ impl<T: JsonRpcTransport + Send + Sync> BackendNetwork for MiniJamNetworkGateway
         })
     }
 
+    fn best_context(&self) -> Result<FinalizedContextV1, BackendError> {
+        let value = self
+            .transport
+            .call(
+                &self.node_rpc,
+                "minijam_getBestContext",
+                json!([]),
+                self.timeout,
+                false,
+            )
+            .map_err(|_| BackendError::BestContextUnavailable)?;
+        Ok(FinalizedContextV1 {
+            block_hash: parse_hash(
+                value
+                    .get("blockHash")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| BackendError::Rpc("best context lacks blockHash".into()))?,
+            )?,
+            block_number: value
+                .get("blockNumber")
+                .and_then(Value::as_u64)
+                .and_then(|number| u32::try_from(number).ok())
+                .ok_or_else(|| BackendError::Rpc("best context lacks blockNumber".into()))?,
+            state_root: parse_hash(
+                value
+                    .get("stateRoot")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| BackendError::Rpc("best context lacks stateRoot".into()))?,
+            )?,
+            slot: value
+                .get("slot")
+                .and_then(Value::as_u64)
+                .and_then(|slot| u32::try_from(slot).ok())
+                .ok_or_else(|| BackendError::Rpc("best context lacks slot".into()))?,
+        })
+    }
+
+    fn context_at(&self, block_hash: StateRoot) -> Result<FinalizedContextV1, BackendError> {
+        let value = self
+            .transport
+            .call(
+                &self.node_rpc,
+                "chain_getHeader",
+                json!([hash_hex(&block_hash)]),
+                self.timeout,
+                false,
+            )
+            .map_err(|error| BackendError::Rpc(error.message))?;
+        let number = value
+            .get("number")
+            .and_then(Value::as_str)
+            .and_then(|number| u32::from_str_radix(number.trim_start_matches("0x"), 16).ok())
+            .ok_or_else(|| BackendError::Rpc("context header lacks a valid number".into()))?;
+        let state_root = parse_hash(
+            value
+                .get("stateRoot")
+                .and_then(Value::as_str)
+                .ok_or_else(|| BackendError::Rpc("context header lacks stateRoot".into()))?,
+        )?;
+        let canonical_hash = self
+            .transport
+            .call(
+                &self.node_rpc,
+                "chain_getBlockHash",
+                json!([number]),
+                self.timeout,
+                false,
+            )
+            .map_err(|_| BackendError::StaleContext)?;
+        if canonical_hash.as_str().map(parse_hash).transpose()? != Some(block_hash) {
+            return Err(BackendError::StaleContext);
+        }
+        Ok(FinalizedContextV1 {
+            block_hash,
+            block_number: number,
+            state_root,
+            slot: number,
+        })
+    }
+
     fn service_info(
         &self,
         context: &FinalizedContextV1,
@@ -2670,6 +2805,7 @@ impl BackendRpcHandler {
         match method {
             "chain_getBlockHash" => self.chain_get_block_hash(params),
             "minijam_getFinalizedContext" => self.finalized_context(),
+            "minijam_getBestContext" => self.best_context(),
             "minijam_getServiceStorageAt" => self.service_storage_at(params),
             "minijam_getServiceInfoAt" => self.service_info_at(params),
             "jamscript_getCapabilitiesV1" => Ok(serde_json::to_value(self.capabilities())
@@ -2728,6 +2864,22 @@ impl BackendRpcHandler {
             "blockNumber": context.block_number,
             "stateRoot": hash_hex(&context.state_root),
             "slot": context.slot,
+            "contextType": "finalized",
+        }))
+    }
+
+    fn best_context(&self) -> Result<Value, BackendError> {
+        let network = self
+            .network
+            .as_ref()
+            .ok_or_else(|| BackendError::Rpc("network gateway is not configured".into()))?;
+        let context = network.best_context()?;
+        Ok(json!({
+            "blockHash": hash_hex(&context.block_hash),
+            "blockNumber": context.block_number,
+            "stateRoot": hash_hex(&context.state_root),
+            "slot": context.slot,
+            "contextType": "best",
         }))
     }
 
@@ -2739,6 +2891,7 @@ impl BackendRpcHandler {
             .first()
             .and_then(Value::as_str)
             .ok_or_else(|| BackendError::Rpc("block hash is required".into()))?;
+        let block_hash = parse_hash(block_hash)?;
         let service_id = values
             .get(1)
             .and_then(Value::as_u64)
@@ -2754,12 +2907,7 @@ impl BackendRpcHandler {
             .network
             .as_ref()
             .ok_or_else(|| BackendError::Rpc("network gateway is not configured".into()))?;
-        let context = network.finalized_context()?;
-        if parse_hash(block_hash)? != context.block_hash {
-            return Err(BackendError::Rpc(
-                "historical block is not finalized".into(),
-            ));
-        }
+        let context = network.context_at(block_hash)?;
         let value = network.service_storage_at(&context, service_id, &key)?;
         let encoded = value
             .as_deref()
@@ -2774,6 +2922,11 @@ impl BackendRpcHandler {
         let values = params
             .as_array()
             .ok_or_else(|| BackendError::Rpc("service info params must be an array".into()))?;
+        let block_hash = values
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| BackendError::Rpc("block hash is required".into()))?;
+        let block_hash = parse_hash(block_hash)?;
         let service_id = values
             .get(1)
             .and_then(Value::as_u64)
@@ -2783,7 +2936,7 @@ impl BackendRpcHandler {
             .network
             .as_ref()
             .ok_or_else(|| BackendError::Rpc("network gateway is not configured".into()))?;
-        let context = network.finalized_context()?;
+        let context = network.context_at(block_hash)?;
         Ok(network
             .service_info(&context, service_id)?
             .map(|info| Value::String(hash_hex(&info.code_hash)))
@@ -3054,16 +3207,76 @@ impl BackendRpcHandler {
         let key = BASE64
             .decode(required_str(&params, "keyBase64")?)
             .map_err(|error| BackendError::Rpc(format!("invalid keyBase64: {error}")))?;
-        let state = self
+        let requested_context = params.get("context");
+        let mut response_context = None;
+        if let Some(requested_context) = requested_context {
+            let context_kind = required_str(requested_context, "contextType")?;
+            if !matches!(context_kind, "best" | "finalized") {
+                return Err(BackendError::Rpc("INVALID_CONTEXT_TYPE".into()));
+            }
+            let block_hash = parse_hash(required_str(requested_context, "blockHash")?)?;
+            let supplied_number = required_u32(requested_context, "blockNumber")?;
+            let supplied_root = parse_hash(required_str(requested_context, "stateRoot")?)?;
+            let supplied_slot = required_u32(requested_context, "slot")?;
+            let network = self
+                .network
+                .as_ref()
+                .ok_or_else(|| BackendError::Rpc("network gateway is not configured".into()))?;
+            let actual = network.context_at(block_hash)?;
+            if actual.block_number != supplied_number
+                || actual.state_root != supplied_root
+                || actual.slot != supplied_slot
+            {
+                return Err(BackendError::StaleContext);
+            }
+            if context_kind == "finalized"
+                && actual.block_number > network.finalized_context()?.block_number
+            {
+                return Err(BackendError::StaleContext);
+            }
+            let commitment = network.service_storage_at(
+                &actual,
+                service_id,
+                service_runtime_core::MANAGED_STATE_COMMITMENT_KEY_V1,
+            )?;
+            let committed_root = commitment
+                .map(|bytes| {
+                    service_runtime_core::ManagedStateCommitmentV1::decode(&bytes)
+                        .map(|commitment| commitment.root)
+                        .map_err(BackendError::Wire)
+                })
+                .transpose()?
+                .unwrap_or(EMPTY_STATE_ROOT_V1);
+            if committed_root != root {
+                return Err(BackendError::StaleContext);
+            }
+            response_context = Some((context_kind.to_owned(), actual));
+        }
+        let mut state = self
             .state
             .lock()
             .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
-        let record = state.registry.get(service_id)?;
+        let service_key = state.registry.get(service_id)?.service_key;
+        if !state.provider.contains_root(service_key, root) {
+            if response_context.is_none() || !state.materialize_prediction_snapshot(service_id, root)? {
+                return Err(BackendError::Provider(ProviderError::UnavailableRoot));
+            }
+        }
         let response = state
             .provider
-            .get(record.service_key, root, &key)
+            .get(service_key, root, &key)
             .map_err(BackendError::Provider)?;
-        query_json(service_id, &response)
+        let mut output = query_json(service_id, &response)?;
+        if let Some((kind, context)) = response_context {
+            output["context"] = json!({
+                "blockHash": hash_hex(&context.block_hash),
+                "blockNumber": context.block_number,
+                "stateRoot": hash_hex(&context.state_root),
+                "slot": context.slot,
+                "contextType": kind,
+            });
+        }
+        Ok(output)
     }
 
     fn canonical_state_root(
@@ -3630,14 +3843,69 @@ impl BackendRpcHandler {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let status = match work_status {
-            "insufficient_workers" | "pending" => "packaged",
-            "awaiting_candidate" => "refining",
-            "voting" | "accepted" => "reported",
-            "imported" if result.get("actionReceipts").is_some_and(Value::is_array) => "imported",
-            "imported" => "reported",
-            "failed" => "failed",
-            _ => "reported",
+        let finalized = result.get("actionReceipts").is_some_and(Value::is_array);
+        let mut best_context = None;
+        let mut best_included = finalized;
+        let mut best_chain_unknown = false;
+        let mut reorged = false;
+        if !finalized && (work_status == "imported" || transaction.best_included) {
+            if let Some(network) = &self.network {
+                let prediction = self
+                    .state
+                    .lock()
+                    .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?
+                    .prediction(transaction.service_id, package_hash)
+                    .cloned();
+                if let Some(prediction) = prediction {
+                    match network.best_context().and_then(|context| {
+                        let committed = network
+                            .service_storage_at(
+                                &context,
+                                transaction.service_id,
+                                service_runtime_core::MANAGED_STATE_COMMITMENT_KEY_V1,
+                            )?
+                            .map(|bytes| {
+                                service_runtime_core::ManagedStateCommitmentV1::decode(&bytes)
+                                    .map(|commitment| commitment.root)
+                                    .map_err(BackendError::Wire)
+                            })
+                            .transpose()?
+                            .unwrap_or(EMPTY_STATE_ROOT_V1);
+                        Ok((context, committed))
+                    }) {
+                        Ok((context, root)) if root == prediction.new_root => {
+                            self.transactions.mark_best_included(&logical_id);
+                            best_context = Some(context);
+                            best_included = true;
+                        }
+                        Ok((_, root)) if transaction.best_included && root == prediction.parent_root => {
+                            reorged = true;
+                        }
+                        Ok((_, root)) if root == prediction.parent_root => {}
+                        Ok(_) => best_chain_unknown = true,
+                        Err(_) => best_chain_unknown = true,
+                    }
+                } else {
+                    best_chain_unknown = true;
+                }
+            } else {
+                best_chain_unknown = true;
+            }
+        }
+        let status = if reorged {
+            "reorged"
+        } else if best_included || finalized {
+            "imported"
+        } else {
+            match work_status {
+                "insufficient_workers" | "pending" => "packaged",
+                "awaiting_candidate" => "refining",
+                "voting" | "accepted" => "reported",
+                "imported" if result.get("actionReceipts").is_some_and(Value::is_array) => "imported",
+                "imported" => "reported",
+                "failed" => "failed",
+                _ => "reported",
+            }
         };
         let mut output = json!({
             "transactionId": logical_id,
@@ -3650,8 +3918,29 @@ impl BackendRpcHandler {
                 .cloned()
                 .or_else(|| result.get("receipt").cloned())
                 .unwrap_or(Value::Null),
-            "error": result.get("error").cloned().unwrap_or(Value::Null),
+            "error": if reorged {
+                json!("TRANSACTION_REORGED")
+            } else {
+                result.get("error").cloned().unwrap_or(Value::Null)
+            },
+            "bestChainStatus": if best_included {
+                "included"
+            } else if best_chain_unknown {
+                "unknown"
+            } else {
+                "not_included"
+            },
+            "finalized": finalized,
         });
+        if let Some(context) = best_context {
+            output["bestContext"] = json!({
+                "blockHash": hash_hex(&context.block_hash),
+                "blockNumber": context.block_number,
+                "stateRoot": hash_hex(&context.state_root),
+                "slot": context.slot,
+                "contextType": "best",
+            });
+        }
         if let Some(receipts) = result.get("actionReceipts") {
             output["actionReceipts"] = receipts.clone();
         }
@@ -4298,10 +4587,17 @@ fn query_json(service_id: u32, response: &StateQueryResponseV1) -> Result<Value,
 }
 
 fn rpc_error(error: &BackendError) -> Value {
+    if let BackendError::QueueFull { retry_after_ms } = error {
+        return json!({
+            "code": -32044,
+            "message": "QUEUE_FULL",
+            "data": { "retryAfterMs": retry_after_ms },
+        });
+    }
     let (code, message) = match error {
         BackendError::Rpc(message) => (-32000, message.clone()),
         BackendError::Registry(_) => (-32011, "unknown or invalid Service".into()),
-        BackendError::Provider(_) => (-32030, "managed-state root is unavailable".into()),
+        BackendError::Provider(_) => (-32030, "STATE_ROOT_UNAVAILABLE".into()),
         BackendError::StateNotMaterialized => (
             -32031,
             "STATE_NOT_MATERIALIZED: finalized managed-state root is not materialized".into(),
@@ -4313,7 +4609,11 @@ fn rpc_error(error: &BackendError) -> Value {
         BackendError::DatabaseInUse(_) => {
             (-32033, "backend data directory is already in use".into())
         }
-        BackendError::StaleContext => (-32010, "stale finalized context".into()),
+        BackendError::StaleContext => (-32010, "STALE_CONTEXT".into()),
+        BackendError::BestContextUnavailable => {
+            (-32043, "BEST_CONTEXT_UNAVAILABLE".into())
+        }
+        BackendError::QueueFull { .. } => unreachable!("queue full is handled above"),
         BackendError::WrongNetwork => (
             -32003,
             "WrongNetwork: signed action network domain does not match the connected chain".into(),
@@ -4471,6 +4771,46 @@ impl BackendState {
             service_id,
             package_hash,
         })
+    }
+
+    pub fn materialize_prediction_snapshot(
+        &mut self,
+        service_id: u32,
+        root: StateRoot,
+    ) -> Result<bool, BackendError> {
+        let Some((service_key, output)) = self
+            .predictions
+            .iter()
+            .find(|(key, output)| key.service_id == service_id && output.new_root == root)
+            .map(|(_, output)| (self.registry.get(service_id).map(|record| record.service_key), output.clone()))
+        else {
+            return Ok(false);
+        };
+        let service_key = service_key?;
+        if self.provider.contains_root(service_key, root) {
+            return Ok(true);
+        }
+        let recovery = StateRecoveryV1::decode(&output.recovery_payload)
+            .map_err(|_| BackendError::InvalidEnvelope)?;
+        if recovery
+            .commitment()
+            .map_err(|_| BackendError::InvalidEnvelope)?
+            != output.recovery_commitment
+        {
+            return Err(BackendError::InvalidEnvelope);
+        }
+        let parent = self
+            .provider
+            .open(service_key, output.parent_root)
+            .map_err(BackendError::Provider)?;
+        let snapshot = parent
+            .apply_diff(&recovery.diff)
+            .map_err(|_| BackendError::Provider(ProviderError::MalformedResponse))?;
+        if snapshot.root() != output.new_root {
+            return Err(BackendError::InvalidEnvelope);
+        }
+        self.provider.insert_snapshot(service_key, snapshot);
+        Ok(true)
     }
 
     pub fn is_finalized(&self, key: WorkKey) -> bool {
@@ -4795,6 +5135,8 @@ mod tests {
             wake: Condvar::new(),
             max_actions: 3,
             flush_delay: Duration::ZERO,
+            max_queued_per_service: 1024,
+            max_queued_per_sender: 64,
         };
         {
             let mut state = coordinator.state.lock().unwrap();
@@ -4830,6 +5172,7 @@ mod tests {
                     package_hash: None,
                     action_index: None,
                     error: None,
+                    best_included: false,
                 },
             );
             state.queued.insert(7, vec![stale]);
@@ -4867,6 +5210,7 @@ mod tests {
                     package_hash: None,
                     action_index: None,
                     error: None,
+                    best_included: false,
                 },
             );
             state.queued.insert(7, vec![expired]);
@@ -4895,6 +5239,8 @@ mod tests {
             wake: Condvar::new(),
             max_actions: 3,
             flush_delay: Duration::ZERO,
+            max_queued_per_service: 1024,
+            max_queued_per_sender: 64,
         };
         let params = json!({"extrinsicsBase64": []});
         let first = coordinator.enqueue(7, vec![1], params.clone()).unwrap();
@@ -4942,6 +5288,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn transaction_coordinator_rejects_queue_overflow_with_retry_hint() {
+        let coordinator = TransactionCoordinator {
+            state: Mutex::new(TransactionCoordinatorState::default()),
+            wake: Condvar::new(),
+            max_actions: 1,
+            flush_delay: Duration::from_millis(50),
+            max_queued_per_service: 1,
+            max_queued_per_sender: 1,
+        };
+        coordinator.enqueue(7, vec![1], json!({})).unwrap();
+        let error = coordinator.enqueue(7, vec![2], json!({})).unwrap_err();
+        assert_eq!(error, BackendError::QueueFull { retry_after_ms: 100 });
+        let rpc = rpc_error(&error);
+        assert_eq!(rpc["code"], -32044);
+        assert_eq!(rpc["message"], "QUEUE_FULL");
+        assert_eq!(rpc["data"]["retryAfterMs"], 100);
+    }
+
     fn handler_with_in_flight_batch(
         work_status: &str,
     ) -> (BackendRpcHandler, tempfile::TempDir, String, String) {
@@ -4958,6 +5323,7 @@ mod tests {
         let network = WorkStatusNetwork {
             result: work_status_result(work_status),
             canonical_root: Some(canonical_root),
+            best_root: None,
         };
         let handler = BackendRpcHandler::new(
             state_with_prediction(package_hash, prediction.clone()),
@@ -5050,6 +5416,7 @@ mod tests {
     struct WorkStatusNetwork {
         result: Value,
         canonical_root: Option<StateRoot>,
+        best_root: Option<StateRoot>,
     }
 
     impl BackendNetwork for WorkStatusNetwork {
@@ -5066,6 +5433,15 @@ mod tests {
             })
         }
 
+        fn best_context(&self) -> Result<FinalizedContextV1, BackendError> {
+            Ok(FinalizedContextV1 {
+                block_hash: [0x66; 32],
+                block_number: 11,
+                state_root: [0x77; 32],
+                slot: 12,
+            })
+        }
+
         fn service_info(
             &self,
             _context: &FinalizedContextV1,
@@ -5076,11 +5452,16 @@ mod tests {
 
         fn service_storage_at(
             &self,
-            _context: &FinalizedContextV1,
+            context: &FinalizedContextV1,
             _service_id: u32,
             _key: &[u8],
         ) -> Result<Option<Vec<u8>>, BackendError> {
-            Ok(self.canonical_root.map(|root| {
+            let root = if context.block_hash == [0x66; 32] {
+                self.best_root
+            } else {
+                self.canonical_root
+            };
+            Ok(root.map(|root| {
                 service_runtime_core::ManagedStateCommitmentV1::new(root)
                     .encode()
                     .to_vec()
@@ -5103,6 +5484,37 @@ mod tests {
         fn work_status(&self, _params: Value) -> Result<Value, BackendError> {
             Ok(self.result.clone())
         }
+    }
+
+    #[test]
+    fn managed_state_cannot_label_an_unfinalized_context_as_finalized() {
+        let record = record(10, 1);
+        let mut state = BackendState::default();
+        state.register(record.clone()).unwrap();
+        state.provider.insert(record.service_key, FullState::empty());
+        let handler = BackendRpcHandler::new(state, Arc::new(UnconfiguredWorkGateway))
+            .with_network(Arc::new(WorkStatusNetwork {
+                result: Value::Null,
+                canonical_root: Some(EMPTY_STATE_ROOT_V1),
+                best_root: Some(EMPTY_STATE_ROOT_V1),
+            }));
+
+        let error = handler
+            .get_managed_state(json!({
+                "serviceId": 10,
+                "stateRoot": hash_hex(&EMPTY_STATE_ROOT_V1),
+                "keyBase64": "",
+                "context": {
+                    "blockHash": hash_hex(&[0x66; 32]),
+                    "blockNumber": 11,
+                    "stateRoot": hash_hex(&[0x77; 32]),
+                    "slot": 12,
+                    "contextType": "finalized",
+                }
+            }))
+            .unwrap_err();
+
+        assert_eq!(error, BackendError::StaleContext);
     }
 
     fn work_status_result(status: &str) -> Value {
@@ -5178,6 +5590,7 @@ mod tests {
                 WorkStatusNetwork {
                     result: work_status_result(status),
                     canonical_root: Some(canonical_root),
+                    best_root: None,
                 },
                 &mut state,
                 status_params(package_hash),
@@ -5213,6 +5626,7 @@ mod tests {
             WorkStatusNetwork {
                 result: work_status_result("imported"),
                 canonical_root: Some(canonical_root),
+                best_root: None,
             },
             &mut state,
             status_params(package_hash),
@@ -5242,6 +5656,63 @@ mod tests {
     }
 
     #[test]
+    fn transaction_status_distinguishes_best_inclusion_from_finality_and_reorg() {
+        let package_hash = [0x84; 32];
+        let (prediction, included_root) = output_with_receipts(vec![ActionReceiptV1 {
+            action_hash: [0x85; 32],
+            status: ActionStatusV1::Applied,
+            error_code: None,
+        }]);
+        let directory = tempfile::tempdir().unwrap();
+        let loader = Arc::new(PvmArtifactLoader::new(Arc::new(
+            DiskArtifactStore::new(directory.path()).unwrap(),
+        )));
+        let make_handler = |best_root, was_best_included| {
+            let mut state = state_with_prediction(package_hash, prediction.clone());
+            let handler = BackendRpcHandler::new(
+                std::mem::take(&mut state),
+                Arc::new(UnconfiguredWorkGateway),
+            )
+            .with_network(Arc::new(WorkStatusNetwork {
+                result: work_status_result("imported"),
+                canonical_root: Some(EMPTY_STATE_ROOT_V1),
+                best_root: Some(best_root),
+            }))
+            .with_pvm_artifact_loader(Arc::clone(&loader));
+            let transaction_id = handler
+                .transactions
+                .enqueue(10, vec![0x01], json!({}))
+                .unwrap();
+            {
+                let mut state = handler.transactions.state.lock().unwrap();
+                let transaction = state.transactions.get_mut(&transaction_id).unwrap();
+                transaction.batch_id = Some("best-status-test".into());
+                transaction.package_hash = Some(package_hash);
+                transaction.action_index = Some(0);
+                transaction.best_included = was_best_included;
+            }
+            (handler, transaction_id)
+        };
+
+        let (handler, transaction_id) = make_handler(included_root, false);
+        let included = handler
+            .transaction_status(json!({"transactionId": transaction_id}))
+            .unwrap();
+        assert_eq!(included["status"], "imported");
+        assert_eq!(included["bestChainStatus"], "included");
+        assert_eq!(included["finalized"], false);
+        assert_eq!(included["bestContext"]["contextType"], "best");
+        assert!(included.get("actionReceipts").is_none());
+
+        let (handler, transaction_id) = make_handler(EMPTY_STATE_ROOT_V1, true);
+        let reorged = handler
+            .transaction_status(json!({"transactionId": transaction_id}))
+            .unwrap();
+        assert_eq!(reorged["status"], "reorged");
+        assert_eq!(reorged["error"], "TRANSACTION_REORGED");
+    }
+
+    #[test]
     fn stale_prediction_never_exposes_action_receipts() {
         let package_hash = [0x91; 32];
         let (output, _canonical_root) = output_with_receipts(vec![ActionReceiptV1 {
@@ -5254,6 +5725,7 @@ mod tests {
             WorkStatusNetwork {
                 result: work_status_result("imported"),
                 canonical_root: Some([0x93; 32]),
+                best_root: None,
             },
             &mut state,
             status_params(package_hash),

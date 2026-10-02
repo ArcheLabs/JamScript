@@ -565,6 +565,7 @@ pub struct FullStateProvider {
     states: BTreeMap<ServiceKeyV1, BTreeMap<StateRoot, FullState>>,
     materialized: BTreeMap<ServiceKeyV1, StateRoot>,
     history: BTreeMap<ServiceKeyV1, Vec<StateRoot>>,
+    snapshot_history: BTreeMap<ServiceKeyV1, Vec<StateRoot>>,
 }
 
 const MAX_MATERIALIZED_ROOTS_PER_SERVICE: usize = 8;
@@ -593,6 +594,40 @@ impl FullStateProvider {
         }
         self.materialized.insert(service, root);
         root
+    }
+
+    /// Stores a content-addressed snapshot without making it the canonical
+    /// materialized head. This is used for verified best-chain predictions;
+    /// a reorg cannot move the finalized state pointer.
+    pub fn insert_snapshot(&mut self, service: ServiceKeyV1, state: FullState) -> StateRoot {
+        let root = state.root();
+        self.states.entry(service).or_default().insert(root, state);
+        let snapshots = self.snapshot_history.entry(service).or_default();
+        if !snapshots.contains(&root) {
+            snapshots.push(root);
+        }
+        while snapshots.len() > MAX_MATERIALIZED_ROOTS_PER_SERVICE {
+            let evicted = snapshots.remove(0);
+            let is_canonical = self.materialized.get(&service) == Some(&evicted);
+            let is_finalized_history = self
+                .history
+                .get(&service)
+                .is_some_and(|history| history.contains(&evicted));
+            if !is_canonical && !is_finalized_history {
+                if let Some(states) = self.states.get_mut(&service) {
+                    states.remove(&evicted);
+                }
+            }
+        }
+        root
+    }
+
+    pub fn contains_root(&self, service: ServiceKeyV1, root: StateRoot) -> bool {
+        root == EMPTY_STATE_ROOT_V1
+            || self
+                .states
+                .get(&service)
+                .is_some_and(|states| states.contains_key(&root))
     }
 
     fn state_at(&self, service: ServiceKeyV1, root: StateRoot) -> Result<FullState, ProviderError> {
@@ -884,6 +919,29 @@ mod tests {
                 value: Some(b"updated".to_vec()),
             }]
         );
+    }
+
+    #[test]
+    fn best_snapshot_is_queryable_without_moving_finalized_materialized_root() {
+        let mut provider = FullStateProvider::default();
+        let finalized_state = FullState::from_pairs([(b"counter".as_slice(), b"1".as_slice())]).unwrap();
+        let finalized_root = provider.insert(SERVICE, finalized_state);
+        let best_state = provider
+            .open(SERVICE, finalized_root)
+            .unwrap()
+            .apply_diff(&StateDiffV1 {
+                changes: vec![service_runtime_core::StateChangeV1 {
+                    key: b"counter".to_vec(),
+                    value: Some(b"2".to_vec()),
+                }],
+            })
+            .unwrap();
+        let best_root = provider.insert_snapshot(SERVICE, best_state);
+
+        assert_ne!(best_root, finalized_root);
+        assert_eq!(provider.materialized_root(SERVICE).unwrap(), finalized_root);
+        assert_eq!(provider.value_at(SERVICE, best_root, b"counter").unwrap(), Some(b"2".to_vec()));
+        assert_eq!(provider.value_at(SERVICE, finalized_root, b"counter").unwrap(), Some(b"1".to_vec()));
     }
 
     const NETWORK: [u8; 32] = [11; 32];

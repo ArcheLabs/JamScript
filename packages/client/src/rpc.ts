@@ -3,7 +3,10 @@ export type FinalizedContext = {
   blockNumber: number;
   stateRoot: string;
   slot: number;
+  contextType?: "best" | "finalized";
 };
+
+export type BestContext = FinalizedContext & { contextType: "best" };
 
 export type SubmitWorkRequest = {
   context: { blockHash: string; stateRoot: string; slot: number };
@@ -34,6 +37,7 @@ export type TransactionState =
   | "refining"
   | "reported"
   | "imported"
+  | "reorged"
   | "failed";
 
 export type SubmitTransactionResult = {
@@ -58,6 +62,9 @@ export type TransactionStatusResult = {
   actionIndex: number | null;
   executionReceipt: string | null;
   error: string | null;
+  bestChainStatus?: "included" | "not_included" | "unknown";
+  bestContext?: BestContext;
+  finalized?: boolean;
   actionReceipts?: ActionReceipt[];
 };
 
@@ -169,12 +176,14 @@ export class FetchRpcTransport implements RpcTransport {
 
 export type WorkRpc = RpcTransport & {
   finalizedContext(): Promise<FinalizedContext>;
+  bestContext(): Promise<BestContext>;
   genesisHash(): Promise<string>;
   serviceStorageAt(blockHash: string, serviceId: number, key: string): Promise<string | null>;
   managedStateAt(
     serviceId: number,
     stateRoot: string,
     keyBase64: string,
+    context?: FinalizedContext,
   ): Promise<ManagedStateResult>;
   submitWork(request: SubmitWorkRequest): Promise<SubmitWorkResult>;
   workStatus(packageHash: string, serviceId?: number): Promise<WorkStatusResult>;
@@ -185,12 +194,24 @@ export type WorkRpc = RpcTransport & {
 export function asWorkRpc(transport: RpcTransport): WorkRpc {
   return {
     call: transport.call.bind(transport),
-    finalizedContext: () => transport.call("minijam_getFinalizedContext"),
+    finalizedContext: async () => ({
+      ...await transport.call<FinalizedContext>("minijam_getFinalizedContext"),
+      contextType: "finalized",
+    }),
+    bestContext: async () => ({
+      ...await transport.call<FinalizedContext>("minijam_getBestContext"),
+      contextType: "best",
+    }),
     genesisHash: () => transport.call("chain_getBlockHash", [0]),
     serviceStorageAt: (blockHash, serviceId, key) =>
       transport.call("minijam_getServiceStorageAt", [blockHash, serviceId, key]),
-    managedStateAt: (serviceId, stateRoot, keyBase64) =>
-      transport.call("minijam_getManagedStateV1", { serviceId, stateRoot, keyBase64 }),
+    managedStateAt: (serviceId, stateRoot, keyBase64, context) =>
+      transport.call("minijam_getManagedStateV1", {
+        serviceId,
+        stateRoot,
+        keyBase64,
+        ...(context ? { context } : {}),
+      }),
     submitWork: (request) => transport.call("minijam_submitWorkV1", request),
     workStatus: (packageHash, serviceId) =>
       transport.call(

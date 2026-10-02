@@ -16,7 +16,7 @@ import {
   type Ownership,
   type SignedActionV2,
 } from "./crypto.js";
-import { asWorkRpc, RpcError, type ActionReceipt, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionRequest, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, RpcError, type ActionReceipt, type BestContext, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionRequest, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner, OwnershipSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
@@ -64,13 +64,14 @@ export type SignedOwnershipAction = {
 
 export type OwnershipPreparationPhase =
   | "VALIDATING_DEPLOYMENT"
-  | "READING_FINALIZED_CONTEXT"
+  | "READING_BEST_CONTEXT"
   | "READING_MANAGED_STATE"
   | "READING_NONCE";
 
 type PreparedOwnershipActionData = {
   signer: OwnershipSigner;
-  signerLane: string;
+  nonceLane: string;
+  nonce: bigint;
   unsigned: Omit<SignedActionV2, "authorizationProof">;
   message: Uint8Array;
   requestOptions: Pick<SubmitTransactionRequest, "extrinsicsBase64">;
@@ -79,7 +80,8 @@ type PreparedOwnershipActionData = {
 };
 
 type SignedOwnershipActionData = {
-  signerLane: string;
+  nonceLane: string;
+  nonce: bigint;
   request: SubmitTransactionRequest;
   actionHash: string;
   submittedSlot: number;
@@ -109,7 +111,11 @@ export class JamScriptClient {
   private readonly nextNonces = new Map<string, bigint>();
   private readonly nonceTails = new Map<string, Promise<void>>();
   private readonly ownershipTails = new Map<string, Promise<void>>();
-  private readonly ownershipReservations = new Map<string, object>();
+  private readonly ownershipSubmitTails = new Map<string, Promise<void>>();
+  private readonly ownershipReservations = new Map<string, Map<bigint, object>>();
+  private readonly nextOwnershipNonces = new Map<string, bigint>();
+  private readonly ownershipBlockedNonces = new Map<string, bigint>();
+  private readonly ownershipTransactionNonces = new Map<string, { nonceLane: string; nonce: bigint }>();
 
   constructor(
     private readonly deployment: DeploymentDescriptor,
@@ -139,10 +145,10 @@ export class JamScriptClient {
 
   async readNonce(publicKey: Uint8Array, context?: FinalizedContext): Promise<bigint> {
     if (publicKey.length !== 32) throw new Error("sr25519 public key must be 32 bytes");
-    const finalized = context ?? (await this.rpc.finalizedContext());
+    const finalized = { ...(context ?? await this.rpc.finalizedContext()), contextType: "finalized" as const };
     const root = await this.managedStateRoot(finalized);
     const key = nonceKey(publicKey);
-    const valueBytes = await this.readManagedValue(root, key);
+    const valueBytes = await this.readManagedValue(root, key, finalized);
     if (valueBytes === null) return 0n;
     const value = decodeValue("u64", valueBytes);
     if (typeof value !== "bigint") throw new Error("nonce storage is not u64");
@@ -190,9 +196,21 @@ export class JamScriptClient {
     signer: OwnershipSigner,
     options: { actAs?: Ownership; ttl?: bigint; extrinsics?: Uint8Array[] } = {},
   ): Promise<SubmitActionResult> {
-    const prepared = await this.prepareOwnershipAction(actionName, input, signer, options);
-    const signed = await this.signPreparedOwnershipAction(prepared);
-    return this.submitSignedOwnershipAction(signed);
+    const controller = await signer.getController();
+    const nonceLane = toHex(ownershipNonceKey(options.actAs ?? controller)).toLowerCase();
+    const previous = this.ownershipSubmitTails.get(nonceLane) ?? Promise.resolve();
+    let release!: () => void;
+    const lane = new Promise<void>((resolve) => { release = resolve; });
+    this.ownershipSubmitTails.set(nonceLane, lane);
+    await previous;
+    try {
+      const prepared = await this.prepareOwnershipAction(actionName, input, signer, options);
+      const signed = await this.signPreparedOwnershipAction(prepared);
+      return await this.submitSignedOwnershipAction(signed);
+    } finally {
+      release();
+      if (this.ownershipSubmitTails.get(nonceLane) === lane) this.ownershipSubmitTails.delete(nonceLane);
+    }
   }
 
   /**
@@ -206,16 +224,14 @@ export class JamScriptClient {
     options: { actAs?: Ownership; ttl?: bigint; extrinsics?: Uint8Array[]; onProgress?: (phase: OwnershipPreparationPhase) => void } = {},
   ): Promise<PreparedOwnershipAction> {
     const controller = await signer.getController();
-    const signerLane = toHex(controller.public).toLowerCase();
-    const previous = this.ownershipTails.get(signerLane) ?? Promise.resolve();
+    const effectiveOwner = options.actAs ?? controller;
+    const nonceLane = toHex(ownershipNonceKey(effectiveOwner)).toLowerCase();
+    const previous = this.ownershipTails.get(nonceLane) ?? Promise.resolve();
     let release!: () => void;
     const lane = new Promise<void>((resolve) => { release = resolve; });
-    this.ownershipTails.set(signerLane, lane);
+    this.ownershipTails.set(nonceLane, lane);
     await previous;
     try {
-      if (this.ownershipReservations.has(signerLane)) {
-        throw new Error("another Ownership action is already awaiting signature or submission for this controller");
-      }
       options.onProgress?.("VALIDATING_DEPLOYMENT");
       await this.validateDeployment();
       const action = actionByName(this.deployment.abi, actionName);
@@ -223,15 +239,37 @@ export class JamScriptClient {
       const payload = encodeActionPayload(this.deployment.abi, actionName, input);
       const selector = actionSelector(actionName);
       if (!sameHex(toHex(selector), action.selector)) throw new Error("deployment ABI selector does not match the canonical selector");
-      options.onProgress?.("READING_FINALIZED_CONTEXT");
-      const context = await this.rpc.finalizedContext();
-      const effectiveOwner = options.actAs ?? controller;
+      options.onProgress?.("READING_BEST_CONTEXT");
+      const context = await this.rpc.bestContext();
       options.onProgress?.("READING_MANAGED_STATE");
       const root = await this.managedStateRoot(context);
       options.onProgress?.("READING_NONCE");
-      const nonceBytes = await this.readManagedValue(root, ownershipNonceKey(effectiveOwner));
+      const nonceBytes = await this.readManagedValue(root, ownershipNonceKey(effectiveOwner), context);
       const chainNonce = nonceBytes === null ? 0n : decodeValue("u64", nonceBytes);
       if (typeof chainNonce !== "bigint") throw new Error("ownership nonce storage is not u64");
+      const blockedNonce = this.ownershipBlockedNonces.get(nonceLane);
+      if (blockedNonce !== undefined) {
+        if (chainNonce <= blockedNonce) {
+          throw new Error("OWNERSHIP_NONCE_RECONCILIATION_REQUIRED: an earlier Ownership submission or reservation has an unresolved outcome");
+        }
+        this.ownershipBlockedNonces.delete(nonceLane);
+        const laneReservations = this.ownershipReservations.get(nonceLane);
+        if (laneReservations) {
+          for (const [reservedNonce, reservation] of laneReservations) {
+            if (reservedNonce < chainNonce) {
+              this.deleteOwnershipReservation(nonceLane, reservedNonce, reservation);
+            }
+          }
+        }
+        for (const [transactionId, pendingNonce] of this.ownershipTransactionNonces) {
+          if (pendingNonce.nonceLane === nonceLane && pendingNonce.nonce < chainNonce) {
+            this.ownershipTransactionNonces.delete(transactionId);
+          }
+        }
+      }
+      const localNonce = this.nextOwnershipNonces.get(nonceLane);
+      const nonce = localNonce === undefined || localNonce < chainNonce ? chainNonce : localNonce;
+      this.nextOwnershipNonces.set(nonceLane, nonce + 1n);
       const unsigned: Omit<SignedActionV2, "authorizationProof"> = {
         version: 2,
         networkDomain: parseHex(this.deployment.networkDomain, 32),
@@ -239,7 +277,7 @@ export class JamScriptClient {
         actionSelector: selector,
         controller,
         actAs: options.actAs ?? null,
-        nonce: chainNonce,
+        nonce,
         validUntil: BigInt(context.slot) + (options.ttl ?? 64n),
         payloadHash: blake2(payload),
         payload,
@@ -249,18 +287,19 @@ export class JamScriptClient {
       const validUntil = Number(unsigned.validUntil);
       preparedOwnershipActions.set(prepared, {
         signer,
-        signerLane,
+        nonceLane,
+        nonce,
         unsigned,
         message,
         requestOptions: { extrinsicsBase64: (options.extrinsics ?? []).map(toBase64) },
         submittedSlot: context.slot,
         validUntil,
       });
-      this.ownershipReservations.set(signerLane, prepared);
+      this.setOwnershipReservation(nonceLane, nonce, prepared);
       return prepared;
     } finally {
       release();
-      if (this.ownershipTails.get(signerLane) === lane) this.ownershipTails.delete(signerLane);
+      if (this.ownershipTails.get(nonceLane) === lane) this.ownershipTails.delete(nonceLane);
     }
   }
 
@@ -270,7 +309,7 @@ export class JamScriptClient {
    */
   signPreparedOwnershipAction(prepared: PreparedOwnershipAction): Promise<SignedOwnershipAction> {
     const data = preparedOwnershipActions.get(prepared);
-    if (!data || this.ownershipReservations.get(data.signerLane) !== prepared) {
+    if (!data || this.ownershipReservation(data.nonceLane, data.nonce) !== prepared) {
       return Promise.reject(new Error("prepared Ownership action is unavailable or already consumed"));
     }
 
@@ -279,12 +318,13 @@ export class JamScriptClient {
       signature = data.signer.signJamScriptAction({ ...data.unsigned, message: data.message });
     } catch (error) {
       preparedOwnershipActions.delete(prepared);
-      this.ownershipReservations.delete(data.signerLane);
+      this.deleteOwnershipReservation(data.nonceLane, data.nonce, prepared);
+      this.rewindOwnershipNonce(data.nonceLane, data.nonce);
       return Promise.reject(error);
     }
 
     return signature.then((authorizationProof) => {
-      if (this.ownershipReservations.get(data.signerLane) !== prepared) {
+      if (this.ownershipReservation(data.nonceLane, data.nonce) !== prepared) {
         throw new Error("prepared Ownership action was abandoned while the wallet request was open");
       }
       if (authorizationProof.length === 0 || authorizationProof.length > 65536) {
@@ -307,17 +347,21 @@ export class JamScriptClient {
       };
       preparedOwnershipActions.delete(prepared);
       signedOwnershipActions.set(signed, {
-        signerLane: data.signerLane,
+        nonceLane: data.nonceLane,
+        nonce: data.nonce,
         request,
         actionHash,
         submittedSlot: data.submittedSlot,
         validUntil: data.validUntil,
       });
-      this.ownershipReservations.set(data.signerLane, signed);
+      this.setOwnershipReservation(data.nonceLane, data.nonce, signed);
       return signed;
     }).catch((error) => {
       preparedOwnershipActions.delete(prepared);
-      if (this.ownershipReservations.get(data.signerLane) === prepared) this.ownershipReservations.delete(data.signerLane);
+      if (this.ownershipReservation(data.nonceLane, data.nonce) === prepared) {
+        this.deleteOwnershipReservation(data.nonceLane, data.nonce, prepared);
+        this.rewindOwnershipNonce(data.nonceLane, data.nonce);
+      }
       throw error;
     });
   }
@@ -327,14 +371,53 @@ export class JamScriptClient {
     const data = preparedOwnershipActions.get(prepared);
     if (!data) return;
     preparedOwnershipActions.delete(prepared);
-    if (this.ownershipReservations.get(data.signerLane) === prepared) this.ownershipReservations.delete(data.signerLane);
+    if (this.ownershipReservation(data.nonceLane, data.nonce) === prepared) {
+      this.deleteOwnershipReservation(data.nonceLane, data.nonce, prepared);
+      this.rewindOwnershipNonce(data.nonceLane, data.nonce);
+    }
+  }
+
+  private rewindOwnershipNonce(nonceLane: string, nonce: bigint): void {
+    const hasHigherReservation = this.nextOwnershipNonces.get(nonceLane)! > nonce + 1n
+      || [...(this.ownershipReservations.get(nonceLane)?.keys() ?? [])]
+        .some((reservedNonce) => reservedNonce > nonce);
+    if (hasHigherReservation) {
+      const blocked = this.ownershipBlockedNonces.get(nonceLane);
+      if (blocked === undefined || nonce < blocked) this.ownershipBlockedNonces.set(nonceLane, nonce);
+      return;
+    }
+    if (this.nextOwnershipNonces.get(nonceLane) === nonce + 1n) this.nextOwnershipNonces.delete(nonceLane);
+  }
+
+  private ownershipReservation(nonceLane: string, nonce: bigint): object | undefined {
+    return this.ownershipReservations.get(nonceLane)?.get(nonce);
+  }
+
+  private setOwnershipReservation(nonceLane: string, nonce: bigint, reservation: object): void {
+    let lane = this.ownershipReservations.get(nonceLane);
+    if (!lane) {
+      lane = new Map();
+      this.ownershipReservations.set(nonceLane, lane);
+    }
+    lane.set(nonce, reservation);
+  }
+
+  private deleteOwnershipReservation(nonceLane: string, nonce: bigint, expected: object): void {
+    const lane = this.ownershipReservations.get(nonceLane);
+    if (!lane || lane.get(nonce) !== expected) return;
+    lane.delete(nonce);
+    if (lane.size === 0) this.ownershipReservations.delete(nonceLane);
   }
 
   /** Submit one signed payload. This method never retries a transport error. */
   async submitSignedOwnershipAction(signed: SignedOwnershipAction): Promise<SubmitActionResult> {
     const data = signedOwnershipActions.get(signed);
-    if (!data || this.ownershipReservations.get(data.signerLane) !== signed) {
+    if (!data || this.ownershipReservation(data.nonceLane, data.nonce) !== signed) {
       throw new Error("signed Ownership action is unavailable or already submitted");
+    }
+    const blockedNonce = this.ownershipBlockedNonces.get(data.nonceLane);
+    if (blockedNonce !== undefined && data.nonce >= blockedNonce) {
+      throw new Error("OWNERSHIP_NONCE_RECONCILIATION_REQUIRED: resolve the earlier Ownership nonce before submitting this action");
     }
     let submitted: SubmitTransactionResult;
     try {
@@ -345,12 +428,24 @@ export class JamScriptClient {
       // response was lost, so keep the controller lane reserved and never
       // silently sign or submit a replacement.
       signedOwnershipActions.delete(signed);
-      if (error instanceof RpcError) this.ownershipReservations.delete(data.signerLane);
+      if (error instanceof RpcError && this.ownershipReservation(data.nonceLane, data.nonce) === signed) {
+        this.deleteOwnershipReservation(data.nonceLane, data.nonce, signed);
+        this.rewindOwnershipNonce(data.nonceLane, data.nonce);
+      } else if (!(error instanceof RpcError)) {
+        const blocked = this.ownershipBlockedNonces.get(data.nonceLane);
+        if (blocked === undefined || data.nonce < blocked) this.ownershipBlockedNonces.set(data.nonceLane, data.nonce);
+      }
       throw error;
     }
     this.actionHashes.set(submitted.transactionId.toLowerCase(), data.actionHash);
+    this.ownershipTransactionNonces.set(submitted.transactionId.toLowerCase(), {
+      nonceLane: data.nonceLane,
+      nonce: data.nonce,
+    });
     signedOwnershipActions.delete(signed);
-    this.ownershipReservations.delete(data.signerLane);
+    if (this.ownershipReservation(data.nonceLane, data.nonce) === signed) {
+      this.deleteOwnershipReservation(data.nonceLane, data.nonce, signed);
+    }
       return {
         ...submitted,
         actionHash: data.actionHash,
@@ -443,18 +538,41 @@ export class JamScriptClient {
     return this.rpc.finalizedContext();
   }
 
-  async queryLatest(queryName: string, key?: CodecValue): Promise<QueryResult> {
+  bestContext(): Promise<BestContext> {
+    return this.rpc.bestContext();
+  }
+
+  async queryFinalized(queryName: string, key?: CodecValue): Promise<QueryResult> {
+    const context = { ...await this.rpc.finalizedContext(), contextType: "finalized" as const };
+    return this.queryAtContext(queryName, key, context);
+  }
+
+  async queryBest(queryName: string, key?: CodecValue): Promise<QueryResult> {
+    const context = await this.rpc.bestContext();
+    return this.queryAtContext(queryName, key, context);
+  }
+
+  /** @deprecated Select queryBest or queryFinalized explicitly. */
+  queryLatest(queryName: string, key?: CodecValue): Promise<QueryResult> {
+    return this.queryFinalized(queryName, key);
+  }
+
+  private async queryAtContext(
+    queryName: string,
+    key: CodecValue | undefined,
+    context: FinalizedContext,
+  ): Promise<QueryResult> {
     const query = queryByName(this.deployment.abi, queryName);
     const state = stateByName(this.deployment.abi, query.state);
     const keyBytes = isUnitType(state.keyType)
       ? new Uint8Array()
       : encodeValue(state.keyType, key === undefined ? null : key);
     if (JSON.stringify(query.keyType) !== JSON.stringify(state.keyType)) throw new Error("query key type does not match state key type");
-    const context = await this.rpc.finalizedContext();
     const root = await this.managedStateRoot(context);
     const valueBytes = await this.readManagedValue(
       root,
       stateKey(state.schema, keyBytes),
+      context,
     );
     return {
       value: valueBytes === null
@@ -466,7 +584,7 @@ export class JamScriptClient {
   }
 
   async query(queryName: string, key?: CodecValue): Promise<QueryResult> {
-    return this.queryLatest(queryName, key);
+    return this.queryBest(queryName, key);
   }
 
   private async managedStateRoot(context: FinalizedContext): Promise<Uint8Array> {
@@ -489,16 +607,18 @@ export class JamScriptClient {
   private async readManagedValue(
     root: Uint8Array,
     key: Uint8Array,
+    context?: FinalizedContext,
   ): Promise<Uint8Array | null> {
-    return this.readManagedValueFor(root, this.deployment, key);
+    return this.readManagedValueFor(root, this.deployment, key, context);
   }
 
   private async readManagedValueFor(
     root: Uint8Array,
     deployment: Pick<DeploymentDescriptor, "serviceId" | "serviceKey">,
     key: Uint8Array,
+    context?: FinalizedContext,
   ): Promise<Uint8Array | null> {
-    const response = await this.stateProvider.get({ serviceId: deployment.serviceId, serviceKey: deployment.serviceKey, stateRoot: toHex(root), key });
+    const response = await this.stateProvider.get({ serviceId: deployment.serviceId, serviceKey: deployment.serviceKey, stateRoot: toHex(root), key, context });
     if (
       response.serviceId !== this.deployment.serviceId
       || response.stateRoot.toLowerCase() !== toHex(root).toLowerCase()
@@ -514,8 +634,25 @@ export class JamScriptClient {
     return this.rpc.workStatus(packageHash, this.deployment.serviceId);
   }
 
-  transactionStatus(transactionId: string): Promise<TransactionStatusResult> {
-    return this.rpc.transactionStatus(transactionId);
+  async transactionStatus(transactionId: string): Promise<TransactionStatusResult> {
+    const status = await this.rpc.transactionStatus(transactionId);
+    const transactionKey = transactionId.toLowerCase();
+    const ownershipNonce = this.ownershipTransactionNonces.get(transactionKey);
+    if (ownershipNonce) {
+      const actionHash = this.actionHashes.get(transactionKey)?.toLowerCase();
+      const actionReceipt = actionHash
+        ? status.actionReceipts?.find((receipt) => receipt.actionHash.toLowerCase() === actionHash)
+        : undefined;
+      if (status.status === "reorged" || status.status === "failed" || (actionReceipt && actionReceipt.status !== "applied")) {
+        const blocked = this.ownershipBlockedNonces.get(ownershipNonce.nonceLane);
+        if (blocked === undefined || ownershipNonce.nonce < blocked) {
+          this.ownershipBlockedNonces.set(ownershipNonce.nonceLane, ownershipNonce.nonce);
+        }
+      } else if (status.finalized === true) {
+        this.ownershipTransactionNonces.delete(transactionKey);
+      }
+    }
+    return status;
   }
 
   async waitForTransaction(
@@ -529,7 +666,33 @@ export class JamScriptClient {
       try {
         const status = await this.transactionStatus(transactionId);
         lastStatus = status;
-        if (status.status === "imported" || status.status === "failed") return status;
+        if (status.status === "failed" || status.status === "reorged") return status;
+        if (
+          status.status === "imported"
+          && (status.finalized === true || status.actionReceipts?.length)
+        ) return status;
+      } catch (error) {
+        if (!(error instanceof RpcError) || error.code !== -32013) throw error;
+      }
+      if (Date.now() >= deadline) throw new TransactionWaitTimeoutError(transactionId, lastStatus);
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+
+  async waitForBest(
+    transactionId: string,
+    options: { intervalMs?: number; timeoutMs?: number } = {},
+  ): Promise<TransactionStatusResult> {
+    const intervalMs = options.intervalMs ?? 500;
+    const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+    let lastStatus: TransactionStatusResult | undefined;
+    for (;;) {
+      try {
+        const status = await this.transactionStatus(transactionId);
+        lastStatus = status;
+        if (status.status === "failed" || status.status === "reorged") return status;
+        if (status.status === "imported" && status.bestChainStatus === "included") return status;
+        if (status.finalized === true) return status;
       } catch (error) {
         if (!(error instanceof RpcError) || error.code !== -32013) throw error;
       }
@@ -566,6 +729,9 @@ export class JamScriptClient {
   ): Promise<WaitForActionResult> {
     const options = typeof optionsOrActionHash === "string" ? legacyOptions : optionsOrActionHash;
     const transaction = await this.waitForTransaction(transactionId, options);
+    if (transaction.status === "reorged") {
+      throw new RpcError("TRANSACTION_REORGED", -32042, transaction);
+    }
     if (transaction.status === "failed") {
       throw new RpcError("transaction failed before an action receipt was produced", -32040, transaction);
     }
@@ -588,6 +754,13 @@ export class JamScriptClient {
       errorCode: receipt.errorCode,
       actionReceipt: receipt,
     };
+  }
+
+  waitForFinalized(
+    transactionId: string,
+    options: { intervalMs?: number; timeoutMs?: number } = {},
+  ): Promise<WaitForActionResult> {
+    return this.waitForAction(transactionId, options);
   }
 }
 
