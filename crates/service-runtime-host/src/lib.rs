@@ -924,7 +924,8 @@ mod tests {
     #[test]
     fn best_snapshot_is_queryable_without_moving_finalized_materialized_root() {
         let mut provider = FullStateProvider::default();
-        let finalized_state = FullState::from_pairs([(b"counter".as_slice(), b"1".as_slice())]).unwrap();
+        let finalized_state =
+            FullState::from_pairs([(b"counter".as_slice(), b"1".as_slice())]).unwrap();
         let finalized_root = provider.insert(SERVICE, finalized_state);
         let best_state = provider
             .open(SERVICE, finalized_root)
@@ -940,8 +941,16 @@ mod tests {
 
         assert_ne!(best_root, finalized_root);
         assert_eq!(provider.materialized_root(SERVICE).unwrap(), finalized_root);
-        assert_eq!(provider.value_at(SERVICE, best_root, b"counter").unwrap(), Some(b"2".to_vec()));
-        assert_eq!(provider.value_at(SERVICE, finalized_root, b"counter").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(
+            provider.value_at(SERVICE, best_root, b"counter").unwrap(),
+            Some(b"2".to_vec())
+        );
+        assert_eq!(
+            provider
+                .value_at(SERVICE, finalized_root, b"counter")
+                .unwrap(),
+            Some(b"1".to_vec())
+        );
     }
 
     const NETWORK: [u8; 32] = [11; 32];
