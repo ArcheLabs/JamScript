@@ -3273,12 +3273,11 @@ impl BackendRpcHandler {
             .lock()
             .map_err(|_| BackendError::Rpc("state lock poisoned".into()))?;
         let service_key = state.registry.get(service_id)?.service_key;
-        if !state.provider.contains_root(service_key, root) {
-            if response_context.is_none()
-                || !state.materialize_prediction_snapshot(service_id, root)?
-            {
-                return Err(BackendError::Provider(ProviderError::UnavailableRoot));
-            }
+        if !state.provider.contains_root(service_key, root)
+            && (response_context.is_none()
+                || !state.materialize_prediction_snapshot(service_id, root)?)
+        {
+            return Err(BackendError::Provider(ProviderError::UnavailableRoot));
         }
         let response = state
             .provider
