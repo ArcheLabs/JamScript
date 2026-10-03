@@ -34,9 +34,17 @@ test -s "${limited_output}/service.polkavm"
 grep -q '"heapMaxBytes": 16777216' "${default_output}/build.json"
 grep -q '"heapMaxBytes": 524288' "${limited_output}/build.json"
 
+run_with_libclang_path() {
+  if [[ -n "${LIBCLANG_PATH:-}" ]]; then
+    LD_LIBRARY_PATH="${LIBCLANG_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" "$@"
+  else
+    "$@"
+  fi
+}
+
 JAMSCRIPT_GUEST_MEMORY_TEST_ARTIFACT="${default_output}/service.polkavm" \
 JAMSCRIPT_GUEST_MEMORY_LIMIT_TEST_ARTIFACT="${limited_output}/service.polkavm" \
-cargo test --locked --release -p jamscript-service-backend --features pvm-memory-tests actual_pvm_guest
-cargo clippy --locked -p jamscript-service-backend --release --features pvm-memory-tests --tests -- -D warnings
+run_with_libclang_path cargo test --locked --release -p jamscript-service-backend --features pvm-memory-tests actual_pvm_guest
+run_with_libclang_path cargo clippy --locked -p jamscript-service-backend --release --features pvm-memory-tests --tests -- -D warnings
 
 echo "GUEST_MEMORY_ACTUAL_PVM_REGRESSION=PASS"
