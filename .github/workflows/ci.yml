@@ -150,6 +150,7 @@ jobs:
           set -a
           source "${RUNNER_TEMP}/host.env"
           set +a
+          export RUSTFLAGS="${RUSTFLAGS:-} ${JAMSCRIPT_HOST_RPATH_FLAG}"
           cargo build --locked --release --bin jams
           JAMSCRIPT_DEV_TOOLCHAIN=1 \
             JAMSCRIPT_CLANG="${JAMSCRIPT_CLANG}" \
