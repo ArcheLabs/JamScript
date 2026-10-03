@@ -128,6 +128,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "buddy_system_allocator"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1af5a01adeeade54c9f5060300227a8ee64c05b6376f28e9b8ee3b72dd2056f"
+dependencies = [
+ "spin",
+]
+
+[[package]]
 name = "byte-slice-cast"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1201,6 +1210,7 @@ dependencies = [
 name = "service-runtime-guest"
 version = "0.1.0"
 dependencies = [
+ "buddy_system_allocator",
  "jamscript-crypto",
  "polkavm-derive",
  "service-runtime-core",
@@ -1365,6 +1375,12 @@ dependencies = [
  "trie-db",
  "trie-root",
 ]
+
+[[package]]
+name = "spin"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "spki"
