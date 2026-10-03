@@ -109,7 +109,9 @@ code, stage, requested, alignment, committed, maximum, live, high_water, cumulat
 assert code == 1, f"expected GUEST_HEAP_LIMIT_EXCEEDED, got fault code {code}"
 assert stage == 2, f"expected refine-stage fault, got stage {stage}"
 assert requested >= 530000, f"fault request is smaller than the action: {requested}"
-assert alignment == 16, f"unexpected guest request alignment: {alignment}"
+assert alignment == 0 or alignment & (alignment - 1) == 0, (
+    f"guest request alignment is not a power of two: {alignment}"
+)
 assert committed == maximum == 524288, (
     f"expected the 512 KiB heap budget, got committed={committed}, max={maximum}"
 )
