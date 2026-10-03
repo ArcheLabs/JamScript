@@ -1,7 +1,7 @@
 # Guest memory upgrade design record
 
-Date: 2026-10-03. This record is written before implementation and is based on
-the checked-in release source and the MiniJAM source revision pinned by
+Date: 2026-10-03. This record describes the implementation and is based on the
+checked-in release source and the MiniJAM source revision pinned by
 `toolchains/minijam.lock` (`1000bd7504a61010b5e83b1cae5a651b9373ae08`, with
 Jambda gitlink `440ea20528bf16c716c249bcdf8c9f781ad0b087`).
 
@@ -65,9 +65,14 @@ Jambda gitlink `440ea20528bf16c716c249bcdf8c9f781ad0b087`).
   traps and out-of-gas remain unclassified unless the execution environment
   identifies them. Older artifacts without the record remain generic traps.
 - Preserve old readable RPC error fields and add a versioned structured error
-  object. Planner failures remain pre-submission failures. Formal/unknown
-  submission results retain the existing `submission_unknown` lifecycle and
-  are never retried based on a guest diagnostic.
+  object for local PVM preflight faults. Planner failures remain
+  pre-submission failures. Unknown Formal submission outcomes retain the
+  existing `submission_unknown` lifecycle and are never retried based on a
+  guest diagnostic.
+- Scope typed memory-fault classification to synchronous local PVM preflight.
+  Formal reports a generic `Panic` result; its JSGF host log remains a
+  diagnostic record and is not propagated by Backend reconciliation or the
+  TypeScript client.
 
 ## Release boundary
 
@@ -89,9 +94,10 @@ allocator and must be rebuilt and redeployed separately.
   with an `Applied` receipt at 100 M refine gas; measured refine gas was
   50,652,196. A 5 M or 20 M gas limit exhausted gas independently of heap
   availability.
-- At 512 KiB, both local PVM and Formal MiniJAM classified the 530 KiB request
-  as `GUEST_HEAP_LIMIT_EXCEEDED`. The Formal work item failed before
-  Accumulate, and the harness confirmed unchanged state root and nonce.
+- At 512 KiB, local PVM returned the typed `GUEST_HEAP_LIMIT_EXCEEDED` fault.
+  Formal returned its protocol-level `Panic` result while emitting a JSGF host
+  log with the same heap-limit code. The harness checks that code and confirms
+  the work item failed before Accumulate with unchanged state root and nonce.
 - `sbrk` behavior and return values were verified against the pinned MiniJAM
   source and PolkaVM 0.30.0. The allocator checks only the zero failure
   sentinel because the two runners return different successful break values.

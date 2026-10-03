@@ -76,6 +76,10 @@ pub enum GuestMemoryBudgetError {
 pub const GUEST_FAULT_MAGIC_V1: [u8; 4] = *b"JSGF";
 pub const GUEST_FAULT_RECORD_VERSION_V1: u16 = 1;
 pub const GUEST_FAULT_RECORD_V1_LEN: usize = 44;
+/// Fixed stack-buffer capacity for the human-readable host log representation
+/// of a guest fault record. It is sized to hold all version 1 field values
+/// without allocating or truncating.
+pub const GUEST_FAULT_LOG_MESSAGE_CAPACITY_V1: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -198,6 +202,32 @@ impl GuestFaultRecordV1 {
         output
     }
 
+    /// Write the complete text form used by the guest's no-allocation host
+    /// log call. Returns `None` instead of silently truncating if the caller's
+    /// fixed buffer is too small.
+    pub fn write_log_message_v1(self, output: &mut [u8]) -> Option<usize> {
+        let mut writer = GuestFaultLogWriter { output, offset: 0 };
+        writer.bytes(b"JSGF;v=1;code=")?;
+        writer.number(self.code)?;
+        writer.bytes(b";stage=")?;
+        writer.number(self.stage)?;
+        writer.bytes(b";req=")?;
+        writer.number(self.requested_bytes)?;
+        writer.bytes(b";align=")?;
+        writer.number(self.alignment)?;
+        writer.bytes(b";committed=")?;
+        writer.number(self.heap_committed_bytes)?;
+        writer.bytes(b";max=")?;
+        writer.number(self.heap_max_bytes)?;
+        writer.bytes(b";allocator_live_requested=")?;
+        writer.number(self.live_requested_bytes)?;
+        writer.bytes(b";allocator_high_water_requested=")?;
+        writer.number(self.high_water_requested_bytes)?;
+        writer.bytes(b";allocator_cumulative_requested=")?;
+        writer.number(self.cumulative_requested_bytes)?;
+        Some(writer.offset)
+    }
+
     pub fn decode(input: &[u8]) -> Result<Self, GuestFaultRecordError> {
         if input.len() != GUEST_FAULT_RECORD_V1_LEN {
             return Err(GuestFaultRecordError::InvalidLength(input.len()));
@@ -272,6 +302,38 @@ impl GuestFaultRecordV1 {
             return Err(GuestFaultRecordError::InvalidAlignment(self.alignment));
         }
         Ok(())
+    }
+}
+
+struct GuestFaultLogWriter<'a> {
+    output: &'a mut [u8],
+    offset: usize,
+}
+
+impl GuestFaultLogWriter<'_> {
+    fn bytes(&mut self, bytes: &[u8]) -> Option<()> {
+        let end = self.offset.checked_add(bytes.len())?;
+        let target = self.output.get_mut(self.offset..end)?;
+        target.copy_from_slice(bytes);
+        self.offset = end;
+        Some(())
+    }
+
+    fn number(&mut self, mut value: u32) -> Option<()> {
+        let mut reversed = [0u8; 10];
+        let mut length = 0usize;
+        loop {
+            reversed[length] = b'0' + (value % 10) as u8;
+            length += 1;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        for digit in reversed[..length].iter().rev() {
+            self.bytes(core::slice::from_ref(digit))?;
+        }
+        Some(())
     }
 }
 
@@ -350,5 +412,36 @@ mod tests {
             GuestFaultRecordV1::decode(&encoded[..encoded.len() - 1]),
             Err(GuestFaultRecordError::InvalidLength(encoded.len() - 1))
         );
+    }
+
+    #[test]
+    fn fault_log_message_keeps_maximum_fields_complete_without_truncation() {
+        let record = GuestFaultRecordV1 {
+            code: GuestFaultCodeV1::HeapLimitExceeded as u32,
+            stage: GuestFaultStageV1::Refine as u32,
+            requested_bytes: u32::MAX,
+            alignment: 16,
+            heap_committed_bytes: 64 * 1024 * 1024,
+            heap_max_bytes: 64 * 1024 * 1024,
+            live_requested_bytes: 50_000_000,
+            high_water_requested_bytes: 50_000_000,
+            cumulative_requested_bytes: u32::MAX,
+            ..GuestFaultRecordV1::EMPTY
+        };
+        let mut full = [0u8; GUEST_FAULT_LOG_MESSAGE_CAPACITY_V1];
+        let length = record
+            .write_log_message_v1(&mut full)
+            .expect("256-byte log buffer holds every v1 u32 field");
+        let message = &full[..length];
+        assert_eq!(length, 195);
+        assert!(core::str::from_utf8(message)
+            .unwrap()
+            .ends_with(";allocator_cumulative_requested=4294967295"));
+        assert!(core::str::from_utf8(message)
+            .unwrap()
+            .contains(";req=4294967295;"));
+
+        let mut legacy_sized = [0u8; 192];
+        assert_eq!(record.write_log_message_v1(&mut legacy_sized), None);
     }
 }

@@ -77,13 +77,15 @@ Operators should measure their own signed actions and proofs against the
 Formal runner.
 
 At a configured 512 KiB maximum, the local PVM classified the same allocation
-as `GUEST_HEAP_LIMIT_EXCEEDED`. MiniJAM emitted the versioned fault record
-(`code=1`, refine stage, 530,227-byte request, 512 KiB committed and maximum),
-and returned a failed work item. No Accumulate ran; both the service state root
-and nonce stayed unchanged. The 16 MiB default provides growth headroom over
-the measured 2.81 MiB committed region without approaching the 64 MiB policy
-cap. Production workload distributions beyond this tested action remain a
-deployment-specific sizing input.
+as `GUEST_HEAP_LIMIT_EXCEEDED`. Formal emitted the versioned JSGF host log
+(`code=1`, refine stage, 530,227-byte request, 512 KiB committed and maximum)
+and returned its generic `Panic` result. The automated harness checks both,
+then confirms that no Accumulate ran and the service state root and nonce stayed
+unchanged. The Backend does not propagate this Formal log as a typed RPC/client
+error. The 16 MiB default provides growth headroom over the measured 2.81 MiB
+committed region without approaching the 64 MiB policy cap. Production workload
+distributions beyond this tested action remain a deployment-specific sizing
+input.
 
 ## Formal and local PVM behavior
 
@@ -159,19 +161,22 @@ under `data`:
 ```
 
 The TypeScript client's `RpcError.structuredError` unwraps the nested cause
-while preserving `submissionState: "not_submitted"`. Transaction tracking
-retains `errorInfo`, code, stage, and details. A later Formal submission whose
-outcome is unknown remains `SUBMISSION_UNKNOWN`; this diagnostic never triggers
-an automatic retry. Logs include Service/code-hash routing data, not action
-payloads, signatures, or wallet secrets.
+for a local preflight fault while preserving
+`submissionState: "not_submitted"`. Formal execution reports a protocol-level
+`Panic` for this failure; the JSGF record is a host log only. Current Backend
+reconciliation does not parse that log, so it stores a generic Formal terminal
+failure and does not send a specific memory-fault code to RPC or the client.
+Unknown Formal submission outcomes remain `SUBMISSION_UNKNOWN`; a guest
+diagnostic never triggers an automatic retry. Logs include Service/code-hash
+routing data, not action payloads, signatures, or wallet secrets.
 
 ## Compatibility and upgrade
 
 | Component | Compatibility |
 |---|---|
-| New Backend with V2 guest | Reads the structured fault record; validates it before classification. |
+| New Backend with V2 guest | Reads and validates the structured fault record after a local PVM preflight trap. |
 | New Backend with an older guest lacking the fault export | Continues to report generic `PVM_TRAP` with PC where available. |
-| New CLI with V2 guest | Displays known fault code/stage/budget; gas exhaustion and unknown traps remain distinct. |
+| New CLI with V2 guest | Displays known code/stage/budget for local PVM preflight faults; gas exhaustion and unknown traps remain distinct. |
 | New client with older Backend | Existing RPC fields continue to work; no structured fault data is available. |
 | Older client with new Backend | Existing numeric RPC code/message remain; structured data is an additional field. |
 | V2 guest with older Backend | Normal execution may still work, but that Backend will not classify the new fault record; upgrade the Backend first when structured fault reporting is required. |

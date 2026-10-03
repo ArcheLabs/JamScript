@@ -7,7 +7,7 @@ use core::{
 };
 use service_runtime_core::{
     GuestFaultCodeV1, GuestFaultRecordV1, GuestFaultStageV1, GuestMemoryBudgetV1,
-    GUEST_HEAP_PLATFORM_MAX_BYTES, GUEST_MEMORY_PAGE_BYTES,
+    GUEST_FAULT_LOG_MESSAGE_CAPACITY_V1, GUEST_HEAP_PLATFORM_MAX_BYTES, GUEST_MEMORY_PAGE_BYTES,
 };
 
 const MAX_BUDDY_ORDER: usize = 32;
@@ -448,40 +448,22 @@ pub fn emit_fault_record() {
     if record.code == 0 {
         return;
     }
-    let mut message = [0u8; 192];
-    let mut offset = 0usize;
-    append_bytes(&mut message, &mut offset, b"JSGF;v=1;code=");
-    append_number(&mut message, &mut offset, record.code);
-    append_bytes(&mut message, &mut offset, b";stage=");
-    append_number(&mut message, &mut offset, record.stage);
-    append_bytes(&mut message, &mut offset, b";req=");
-    append_number(&mut message, &mut offset, record.requested_bytes);
-    append_bytes(&mut message, &mut offset, b";align=");
-    append_number(&mut message, &mut offset, record.alignment);
-    append_bytes(&mut message, &mut offset, b";committed=");
-    append_number(&mut message, &mut offset, record.heap_committed_bytes);
-    append_bytes(&mut message, &mut offset, b";max=");
-    append_number(&mut message, &mut offset, record.heap_max_bytes);
-    append_bytes(&mut message, &mut offset, b";allocator_live_requested=");
-    append_number(&mut message, &mut offset, record.live_requested_bytes);
-    append_bytes(
-        &mut message,
-        &mut offset,
-        b";allocator_high_water_requested=",
-    );
-    append_number(&mut message, &mut offset, record.high_water_requested_bytes);
-    append_bytes(
-        &mut message,
-        &mut offset,
-        b";allocator_cumulative_requested=",
-    );
-    append_number(&mut message, &mut offset, record.cumulative_requested_bytes);
+    let mut message = [0u8; GUEST_FAULT_LOG_MESSAGE_CAPACITY_V1];
+    let length = record
+        .write_log_message_v1(&mut message)
+        .unwrap_or_else(|| {
+            // Keep a visible diagnostic if the format ever grows beyond its
+            // reviewed capacity; never pass a syntactically valid truncated value.
+            const TRUNCATED: &[u8] = b"JSGF;v=1;error=log-record-truncated";
+            message[..TRUNCATED.len()].copy_from_slice(TRUNCATED);
+            TRUNCATED.len()
+        });
     let args = [
         1u64,
         0,
         0,
         message.as_ptr() as usize as u64,
-        offset as u64,
+        length as u64,
         0,
     ];
     unsafe { minijam_host_call(100, args.as_ptr()) };
@@ -491,31 +473,5 @@ pub fn trap_with_fault_record() -> ! {
     emit_fault_record();
     unsafe {
         core::arch::asm!(".4byte 0xc0001073", options(noreturn));
-    }
-}
-
-fn append_bytes(output: &mut [u8], offset: &mut usize, bytes: &[u8]) {
-    for byte in bytes {
-        if *offset >= output.len() {
-            return;
-        }
-        output[*offset] = *byte;
-        *offset += 1;
-    }
-}
-
-fn append_number(output: &mut [u8], offset: &mut usize, mut value: u32) {
-    let mut reversed = [0u8; 10];
-    let mut length = 0usize;
-    loop {
-        reversed[length] = b'0' + (value % 10) as u8;
-        length += 1;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-    for digit in reversed[..length].iter().rev() {
-        append_bytes(output, offset, core::slice::from_ref(digit));
     }
 }

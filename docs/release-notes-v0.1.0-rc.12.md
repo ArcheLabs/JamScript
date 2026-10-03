@@ -1,7 +1,8 @@
 # JamScript v0.1.0-rc.12 (candidate)
 
-This release candidate upgrades the guest allocator and surfaces known guest
-memory failures through the CLI, Backend RPC, and TypeScript client.
+This release candidate upgrades the guest allocator and surfaces known memory
+faults detected by synchronous local PVM preflight through the CLI, Backend
+RPC, and TypeScript client.
 
 ## Guest memory
 
@@ -13,11 +14,15 @@ memory failures through the CLI, Backend RPC, and TypeScript client.
   and page growth. Projects can set `[guest.memory]` in `jamscript.toml`.
 - Embed budget values in service descriptor V2 and `build.json`; validate the
   final artifact's effective heap separately from the existing 2 MiB stack.
-- Add fixed-width JSGF v1 fatal fault diagnostics. New Backend and CLI
-  distinguish known memory faults, explicit out-of-gas, and unknown traps.
-- Preserve allocator details in JSON-RPC and typed client errors. A preflight
-  resource failure stays `NOT_SUBMITTED`; unknown Formal submission outcome
-  keeps its existing pending/`SUBMISSION_UNKNOWN` behavior.
+- Add fixed-width JSGF v1 fatal fault diagnostics. Local PVM preflight
+  distinguishes known memory faults, explicit out-of-gas, and unknown traps.
+- Preserve local preflight allocator details in JSON-RPC and typed client
+  errors. A preflight resource failure stays `NOT_SUBMITTED`.
+- Formal reports a protocol-level `Panic` and emits the JSGF record only as a
+  host log. Backend reconciliation does not parse that log, so the Formal
+  terminal failure is not exposed to RPC or the client as a typed memory fault.
+  Unknown Formal submission outcome keeps its existing
+  `pending`/`SUBMISSION_UNKNOWN` behavior.
 
 ## Verification evidence
 
@@ -35,9 +40,9 @@ memory failures through the CLI, Backend RPC, and TypeScript client.
   maximum of 1,000 M per WorkItem. This is separate from `minItemGas`, which
   is the Service fee floor; local PolkaVM and Formal gas values remain
   different measures.
-- A 512 KiB artifact returned `GUEST_HEAP_LIMIT_EXCEEDED` in both local PVM and
-  Formal MiniJAM. The Formal work item failed before Accumulate, and the E2E
-  harness verified unchanged state root and nonce.
+- A 512 KiB artifact returned `GUEST_HEAP_LIMIT_EXCEEDED` through local PVM
+  preflight. The Formal test asserts the JSGF host log's heap-limit code, its
+  generic `Panic` result, and unchanged state root and nonce before Accumulate.
 - Rust tests and `-D warnings` Clippy pass for the guest, codegen, target,
   Backend, and CLI packages; Client build and flow tests pass.
 

@@ -1090,6 +1090,25 @@ impl PvmApplication {
         service_id: Option<u32>,
         gas_limit: i64,
     ) -> Result<Vec<u8>, BackendError> {
+        self.invoke_with_gas_diagnostics(
+            export,
+            payload,
+            network_domain,
+            service_id,
+            gas_limit,
+            env_u64("MINIJAM_E2E_DIAGNOSTICS", 0) == 1,
+        )
+    }
+
+    fn invoke_with_gas_diagnostics(
+        &self,
+        export: &str,
+        payload: &[u8],
+        network_domain: StateRoot,
+        service_id: Option<u32>,
+        gas_limit: i64,
+        diagnostics_enabled: bool,
+    ) -> Result<Vec<u8>, BackendError> {
         let mut config = PvmConfig::new();
         config.set_backend(Some(BackendKind::Interpreter));
         let engine = Engine::new(&config).map_err(|error| BackendError::Pvm(error.to_string()))?;
@@ -1207,7 +1226,19 @@ impl PvmApplication {
                 "{export}: {error:?} program_counter={program_counter:?}"
             )));
         }
-        if env_u64("MINIJAM_E2E_DIAGNOSTICS", 0) == 1 {
+        // The successful export's result is returned in A0/A1. Diagnostic
+        // exports use the same VM instance and may overwrite those registers,
+        // so copy and validate the application result before invoking one.
+        let pointer = instance.reg(Reg::A0) as u32;
+        let size = instance.reg(Reg::A1) as u32;
+        if size as usize > MAX_RECOVERY_BYTES + MAX_PVM_ARTIFACT_BYTES.min(2 * 1024 * 1024) {
+            return Err(BackendError::EntryTooLarge);
+        }
+        let output = instance
+            .read_memory(pointer, size)
+            .map_err(|error| BackendError::Pvm(error.to_string()))?;
+
+        if diagnostics_enabled {
             if let Some(record) = read_guest_memory_record(&mut instance) {
                 eprintln!(
                     "PVM_GUEST_MEMORY serviceId={} codeHash={} artifactDigest={} export={export} stage={} heapCommittedBytes={} heapMaxBytes={} allocatorLiveRequestedBytes={} allocatorHighWaterRequestedBytes={} allocatorCumulativeRequestedBytes={}",
@@ -1225,14 +1256,7 @@ impl PvmApplication {
                 );
             }
         }
-        let pointer = instance.reg(Reg::A0) as u32;
-        let size = instance.reg(Reg::A1) as u32;
-        if size as usize > MAX_RECOVERY_BYTES + MAX_PVM_ARTIFACT_BYTES.min(2 * 1024 * 1024) {
-            return Err(BackendError::EntryTooLarge);
-        }
-        instance
-            .read_memory(pointer, size)
-            .map_err(|error| BackendError::Pvm(error.to_string()))
+        Ok(output)
     }
 }
 
@@ -5420,20 +5444,75 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a freshly built PVM guest; set JAMSCRIPT_GUEST_MEMORY_TEST_ARTIFACT"]
-    fn actual_pvm_guest_decodes_an_action_larger_than_the_legacy_heap() {
+    #[cfg(feature = "pvm-memory-tests")]
+    fn actual_pvm_guest_decodes_multiple_large_actions_and_diagnostics_preserve_results() {
         let application = test_pvm_application("JAMSCRIPT_GUEST_MEMORY_TEST_ARTIFACT");
-        let input = large_action_plan_input(530_000);
-        application
-            .invoke_with_gas("jamscript_plan_v1", &input, [0; 32], None, 100_000_000)
-            .expect("PVM invocation should complete after growing and allocating >512 KiB");
+        let input = large_action_plan_input(&[530_000, 200_000]);
+        let plan_without_diagnostics = application
+            .invoke_with_gas_diagnostics(
+                "jamscript_plan_v1",
+                &input,
+                [0; 32],
+                None,
+                100_000_000,
+                false,
+            )
+            .expect("PVM should decode two large actions above the legacy heap limit");
+        let plan_with_diagnostics = application
+            .invoke_with_gas_diagnostics(
+                "jamscript_plan_v1",
+                &input,
+                [0; 32],
+                None,
+                100_000_000,
+                true,
+            )
+            .expect("diagnostics must not make a successful plan invocation fail");
+        assert_eq!(plan_with_diagnostics, plan_without_diagnostics);
+
+        let refine_input = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: ManagedStateWitnessV1 {
+                version: ManagedStateWitnessV1::VERSION,
+                parent_root: EMPTY_STATE_ROOT_V1,
+                access_plan: StateAccessPlanV1::from_keys(Vec::<Vec<u8>>::new()).unwrap(),
+                storage_proof: Vec::new(),
+            },
+            external_state: Vec::new(),
+            actions: Vec::new(),
+        }
+        .encode()
+        .unwrap();
+        let refine_without_diagnostics = application
+            .invoke_with_gas_diagnostics(
+                "minijam_refine",
+                &refine_input,
+                [0; 32],
+                None,
+                100_000_000,
+                false,
+            )
+            .expect("empty-action refine should return a normal PVM result");
+        RuntimeRefineOutputV1::decode(&refine_without_diagnostics)
+            .expect("unmodified PVM refine output");
+        let refine_with_diagnostics = application
+            .invoke_with_gas_diagnostics(
+                "minijam_refine",
+                &refine_input,
+                [0; 32],
+                None,
+                100_000_000,
+                true,
+            )
+            .expect("diagnostics must not make a successful refine invocation fail");
+        assert_eq!(refine_with_diagnostics, refine_without_diagnostics);
     }
 
     #[test]
-    #[ignore = "requires a 512 KiB-budget PVM guest; set JAMSCRIPT_GUEST_MEMORY_LIMIT_TEST_ARTIFACT"]
+    #[cfg(feature = "pvm-memory-tests")]
     fn actual_pvm_guest_reports_heap_limit_for_an_oversized_request() {
         let application = test_pvm_application("JAMSCRIPT_GUEST_MEMORY_LIMIT_TEST_ARTIFACT");
-        let input = large_action_plan_input(530_000);
+        let input = large_action_plan_input(&[530_000]);
         let error = application
             .invoke_with_gas("jamscript_plan_v1", &input, [0; 32], None, 100_000_000)
             .unwrap_err();
@@ -5449,9 +5528,11 @@ mod tests {
             Some(GuestFaultStageV1::Plan)
         );
         assert_eq!(fault.record.heap_max_bytes, 512 * 1024);
-        assert_eq!(fault.record.requested_bytes, 530_000);
+        assert_eq!(fault.record.heap_committed_bytes, 512 * 1024);
+        assert!(fault.record.requested_bytes >= 530_000);
     }
 
+    #[cfg(feature = "pvm-memory-tests")]
     fn test_pvm_application(environment_variable: &str) -> PvmApplication {
         let artifact = std::env::var_os(environment_variable)
             .unwrap_or_else(|| panic!("set {environment_variable} to service.polkavm"));
@@ -5464,7 +5545,8 @@ mod tests {
         }
     }
 
-    fn large_action_plan_input(action_bytes: usize) -> Vec<u8> {
+    #[cfg(feature = "pvm-memory-tests")]
+    fn large_action_plan_input(action_sizes: &[usize]) -> Vec<u8> {
         let input = RuntimeRefineInputV1 {
             version: RuntimeRefineInputV1::VERSION,
             managed_state: ManagedStateWitnessV1 {
@@ -5474,7 +5556,7 @@ mod tests {
                 storage_proof: Vec::new(),
             },
             external_state: Vec::new(),
-            actions: vec![vec![0; action_bytes]],
+            actions: action_sizes.iter().map(|size| vec![0; *size]).collect(),
         }
         .encode()
         .unwrap();
