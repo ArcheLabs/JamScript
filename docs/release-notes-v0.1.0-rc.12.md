@@ -28,7 +28,7 @@ memory failures through the CLI, Backend RPC, and TypeScript client.
   2,945,024 bytes were committed and the requested-byte high-water mark was
   530,026 bytes.
 - The pinned MiniJAM Formal V1 executor applied the same large ScriptC action
-  with a receipt at 100 M refine gas. It used 50,669,370 gas. At 5 M and 20 M,
+  with a receipt at 100 M refine gas. It used 50,652,196 gas. At 5 M and 20 M,
   the same workload exhausted gas; increasing heap does not remove that gas
   requirement.
 - Backend and CLI local preflight gas metering use the pinned MiniJAM Stage-1

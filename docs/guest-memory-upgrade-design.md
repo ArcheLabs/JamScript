@@ -87,7 +87,7 @@ allocator and must be rebuilt and redeployed separately.
   high-water, and zero live requested bytes after completion.
 - The same ScriptC service succeeded in the pinned MiniJAM Formal V1 runner
   with an `Applied` receipt at 100 M refine gas; measured refine gas was
-  50,669,370. A 5 M or 20 M gas limit exhausted gas independently of heap
+  50,652,196. A 5 M or 20 M gas limit exhausted gas independently of heap
   availability.
 - At 512 KiB, both local PVM and Formal MiniJAM classified the 530 KiB request
   as `GUEST_HEAP_LIMIT_EXCEEDED`. The Formal work item failed before

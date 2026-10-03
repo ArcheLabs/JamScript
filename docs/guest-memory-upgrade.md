@@ -65,8 +65,8 @@ same measure as requested live bytes.
 
 The same artifact then ran in the pinned MiniJAM Formal V1 executor. The
 530,000-byte ScriptC action returned an `Applied` receipt and the accumulated
-state root matched the expected result. That refine used 50,669,370 gas. The
-ordinary seed and advance actions used about 1.84 M and 1.95 M gas. The large
+state root matched the expected result. That refine used 50,652,196 gas. The
+ordinary seed and advance actions used about 1.83 M and 1.92 M gas. The large
 action exhausted gas at both 5 M and 20 M limits even though the heap could
 serve it; at 100 M it passed. The pinned MiniJAM Stage-1 protocol allows at
 most 1,000 M refine gas per WorkItem. The `minItemGas` value set at Service
