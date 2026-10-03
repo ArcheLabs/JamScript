@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix="jamscript-release-manifest-test-") as d
     ]
     for platform in ("linux-x86_64", "macos-arm64"):
         cli = root / f"jamscript-v0.1.0-rc.2-{platform}.tar.gz"
-        bundle = root / f"jamscript-toolchain-scriptc-m2-v1-{platform}.tar.zst"
+        bundle = root / f"jamscript-toolchain-scriptc-m2-v2-{platform}.tar.zst"
         manifest = root / f"toolchain-manifest-{platform}.json"
         metadata = root / f"bundle-metadata-{platform}.json"
         cli.write_bytes(platform.encode())
@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix="jamscript-release-manifest-test-") as d
         write_json(
             manifest,
             {
-                "toolchainId": "scriptc-m2-v1",
+                "toolchainId": "scriptc-m2-v2",
                 "platform": platform,
                 "nodeVersion": "24.15.0",
                 "clangVersion": "20.1.8",
@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix="jamscript-release-manifest-test-") as d
         write_json(
             metadata,
             {
-                "toolchainId": "scriptc-m2-v1",
+                "toolchainId": "scriptc-m2-v2",
                 "platform": platform,
                 "archive": bundle.name,
                 "sourceRevision": SOURCE_SHA,

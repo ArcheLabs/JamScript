@@ -1,6 +1,6 @@
 # JamScript Toolchain Bundle Inventory
 
-This is the closure contract for `scriptc-m2-v1` on `linux-x86_64`. The
+This is the closure contract for `scriptc-m2-v2` on `linux-x86_64`. The
 producer's `manifest.json` is authoritative for the exact file count, hashes,
 and unpacked byte set; `verify-bundle.py` rejects any missing or modified file.
 

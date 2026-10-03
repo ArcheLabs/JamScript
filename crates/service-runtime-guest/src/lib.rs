@@ -2,6 +2,8 @@
 #![allow(unexpected_cfgs)]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -12,6 +14,12 @@ use service_runtime_core::{
     RuntimeRefineOutputV1, ServiceApplication, StateAccessError,
 };
 use service_runtime_state::ProofState;
+
+#[cfg(any(target_env = "polkavm", test))]
+mod allocator_abi;
+
+#[cfg(target_env = "polkavm")]
+mod guest_allocator;
 
 #[cfg(target_env = "polkavm")]
 unsafe extern "C" {
@@ -67,127 +75,41 @@ fn host_execution_environment() -> Result<ExecutionEnvironmentV1, GuestError> {
     })
 }
 
-/// Fixed production arena budget for one guest invocation.
-///
-/// The previous 256 KiB limit was below the measured peak allocation for a
-/// valid delegated ownership transfer through the full Locus ScriptC service.
-/// Keep room for the planner/refine state proof and application runtime while
-/// retaining a deterministic per-invocation memory bound.
-pub const GUEST_HEAP_LIMIT: usize = 512 * 1024;
-
-#[cfg(any(target_env = "polkavm", test))]
-#[inline]
-fn bump_allocation_range(offset: usize, layout: core::alloc::Layout) -> (usize, usize) {
-    let alignment_mask = layout.align() - 1;
-    let aligned_offset = offset.saturating_add(alignment_mask) & !alignment_mask;
-    let end = aligned_offset.saturating_add(layout.size());
-    (aligned_offset, end)
-}
-
-#[cfg(test)]
-#[inline]
-fn try_bump_allocation(
-    offset: usize,
-    heap_size: usize,
-    layout: core::alloc::Layout,
-) -> Option<(usize, usize)> {
-    let range = bump_allocation_range(offset, layout);
-    (range.1 <= heap_size).then_some(range)
-}
-
 #[cfg(target_env = "polkavm")]
 pub mod guest_support {
     use super::{
-        bump_allocation_range, RefineObserver, GUEST_HEAP_LIMIT, STAGE_APPLICATION,
-        STAGE_APPLICATION_COMMIT, STAGE_APPLICATION_COMMITTED, STAGE_APPLICATION_DONE,
-        STAGE_FINISH, STAGE_FINISH_DONE, STAGE_FIRST_TRIE_GET, STAGE_PROOF_READY,
-        STAGE_PROOF_STATE, STAGE_STATE_ERROR,
+        guest_allocator, RefineObserver, STAGE_APPLICATION, STAGE_APPLICATION_COMMIT,
+        STAGE_APPLICATION_COMMITTED, STAGE_APPLICATION_DONE, STAGE_FINISH, STAGE_FINISH_DONE,
+        STAGE_FIRST_TRIE_GET, STAGE_PROOF_READY, STAGE_PROOF_STATE, STAGE_STATE_ERROR,
     };
-    use core::alloc::{GlobalAlloc, Layout};
+    use service_runtime_core::{
+        GuestFaultCodeV1, GuestFaultRecordV1, GuestFaultStageV1, GuestMemoryBudgetV1,
+    };
 
     polkavm_derive::min_stack_size!(2 * 1024 * 1024);
 
-    const HEAP_SIZE: usize = if cfg!(feature = "diagnostic") {
-        16 * 1024 * 1024
-    } else {
-        GUEST_HEAP_LIMIT
-    };
-    static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-    static mut HEAP_OFFSET: usize = 0;
-
-    const C_ALLOCATION_MAGIC: u32 = 0x4a53_4354;
-
-    #[repr(C)]
-    struct CAllocationHeader {
-        magic: u32,
-        freed: u32,
-        size: usize,
+    pub fn reset_runtime(budget: GuestMemoryBudgetV1, stage: GuestFaultStageV1) -> bool {
+        guest_allocator::reset_runtime(budget, stage)
     }
 
-    #[cfg(feature = "diagnostic")]
-    static mut ALLOCATION_COUNT: usize = 0;
-    #[cfg(feature = "diagnostic")]
-    static mut REQUESTED_BYTES: usize = 0;
-    #[cfg(feature = "diagnostic")]
-    static mut HIGH_WATER_MARK: usize = 0;
-    #[cfg(feature = "diagnostic")]
-    static mut FAILED_REQUEST_BYTES: usize = 0;
-    #[cfg(feature = "diagnostic")]
-    static mut FAILED_OFFSET: usize = 0;
-    #[cfg(feature = "diagnostic")]
-    static mut FAILED_END: usize = 0;
-
-    struct RuntimeAllocator;
-
-    unsafe impl GlobalAlloc for RuntimeAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let base = HEAP.as_mut_ptr() as usize;
-            let (offset, end) = bump_allocation_range(HEAP_OFFSET, layout);
-            if end > HEAP_SIZE {
-                #[cfg(feature = "diagnostic")]
-                {
-                    FAILED_REQUEST_BYTES = layout.size();
-                    FAILED_OFFSET = offset;
-                    FAILED_END = end;
-                    diagnostic_trap(0xE001);
-                }
-                #[cfg(not(feature = "diagnostic"))]
-                abort();
-            }
-            #[cfg(feature = "diagnostic")]
-            {
-                ALLOCATION_COUNT = ALLOCATION_COUNT.saturating_add(1);
-                REQUESTED_BYTES = REQUESTED_BYTES.saturating_add(layout.size());
-                HIGH_WATER_MARK = HIGH_WATER_MARK.max(end);
-            }
-            HEAP_OFFSET = end;
-            base.saturating_add(offset) as *mut u8
-        }
-
-        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    pub fn fault_record() -> GuestFaultRecordV1 {
+        guest_allocator::fault_record()
     }
 
-    #[global_allocator]
-    static ALLOCATOR: RuntimeAllocator = RuntimeAllocator;
+    pub fn fault_record_ptr() -> *const u8 {
+        guest_allocator::fault_record_ptr()
+    }
 
-    /// Reset all guest allocations at the beginning of a refine invocation.
-    ///
-    /// The PVM service is single threaded and the host owns the invocation
-    /// boundary, so an arena reset is the deterministic lifecycle boundary for
-    /// both Rust and ScriptC allocations.
-    pub fn reset_runtime() {
-        unsafe {
-            HEAP_OFFSET = 0;
-            #[cfg(feature = "diagnostic")]
-            {
-                ALLOCATION_COUNT = 0;
-                REQUESTED_BYTES = 0;
-                HIGH_WATER_MARK = 0;
-                FAILED_REQUEST_BYTES = 0;
-                FAILED_OFFSET = 0;
-                FAILED_END = 0;
-            }
-        }
+    pub fn has_fault() -> bool {
+        guest_allocator::has_fault()
+    }
+
+    pub fn emit_fault_record() {
+        guest_allocator::emit_fault_record();
+    }
+
+    pub fn trap_with_fault_record() -> ! {
+        guest_allocator::trap_with_fault_record()
     }
 
     #[cfg(feature = "diagnostic")]
@@ -224,18 +146,45 @@ pub mod guest_support {
         append_bytes(&mut message, &mut offset, stage);
         append_bytes(&mut message, &mut offset, b" gas_remaining=");
         append_decimal(&mut message, &mut offset, gas_remaining as usize);
-        append_bytes(&mut message, &mut offset, b" allocation_count=");
-        append_decimal(&mut message, &mut offset, unsafe { ALLOCATION_COUNT });
-        append_bytes(&mut message, &mut offset, b" requested_bytes=");
-        append_decimal(&mut message, &mut offset, unsafe { REQUESTED_BYTES });
-        append_bytes(&mut message, &mut offset, b" high_water_mark=");
-        append_decimal(&mut message, &mut offset, unsafe { HIGH_WATER_MARK });
-        append_bytes(&mut message, &mut offset, b" failed_request_bytes=");
-        append_decimal(&mut message, &mut offset, unsafe { FAILED_REQUEST_BYTES });
-        append_bytes(&mut message, &mut offset, b" failed_offset=");
-        append_decimal(&mut message, &mut offset, unsafe { FAILED_OFFSET });
-        append_bytes(&mut message, &mut offset, b" failed_end=");
-        append_decimal(&mut message, &mut offset, unsafe { FAILED_END });
+        let record = guest_allocator::fault_record();
+        append_bytes(
+            &mut message,
+            &mut offset,
+            b" allocator_live_requested_bytes=",
+        );
+        append_decimal(
+            &mut message,
+            &mut offset,
+            record.live_requested_bytes as usize,
+        );
+        append_bytes(
+            &mut message,
+            &mut offset,
+            b" allocator_high_water_requested_bytes=",
+        );
+        append_decimal(
+            &mut message,
+            &mut offset,
+            record.high_water_requested_bytes as usize,
+        );
+        append_bytes(
+            &mut message,
+            &mut offset,
+            b" allocator_cumulative_requested_bytes=",
+        );
+        append_decimal(
+            &mut message,
+            &mut offset,
+            record.cumulative_requested_bytes as usize,
+        );
+        append_bytes(&mut message, &mut offset, b" heap_committed_bytes=");
+        append_decimal(
+            &mut message,
+            &mut offset,
+            record.heap_committed_bytes as usize,
+        );
+        append_bytes(&mut message, &mut offset, b" heap_max_bytes=");
+        append_decimal(&mut message, &mut offset, record.heap_max_bytes as usize);
 
         args[0] = 1;
         args[3] = message.as_ptr() as usize as u64;
@@ -279,106 +228,43 @@ pub mod guest_support {
     #[no_mangle]
     #[inline(never)]
     pub unsafe extern "C" fn jamscript_guest_malloc(size: usize) -> *mut u8 {
-        let header_size = core::mem::size_of::<CAllocationHeader>();
-        let total = match header_size.checked_add(size.max(1)) {
-            Some(value) => value,
-            None => return core::ptr::null_mut(),
-        };
-        let layout =
-            match Layout::from_size_align(total, core::mem::align_of::<CAllocationHeader>()) {
-                Ok(layout) => layout,
-                Err(_) => return core::ptr::null_mut(),
-            };
-        let base = ALLOCATOR.alloc(layout);
-        if base.is_null() {
-            return base;
-        }
-        let header = base.cast::<CAllocationHeader>();
-        header.write(CAllocationHeader {
-            magic: C_ALLOCATION_MAGIC,
-            freed: 0,
-            size,
-        });
-        base.add(header_size)
+        unsafe { guest_allocator::c_malloc(size) }
     }
 
     #[no_mangle]
     #[inline(never)]
     pub unsafe extern "C" fn jamscript_guest_calloc(count: usize, size: usize) -> *mut u8 {
-        let total = match count.checked_mul(size) {
-            Some(value) => value,
-            None => return core::ptr::null_mut(),
-        };
-        let pointer = jamscript_guest_malloc(total);
-        if !pointer.is_null() {
-            memset(pointer, 0, total);
-        }
-        pointer
+        unsafe { guest_allocator::c_calloc(count, size) }
     }
 
     #[no_mangle]
     #[inline(never)]
     pub unsafe extern "C" fn jamscript_guest_realloc(pointer: *mut u8, size: usize) -> *mut u8 {
-        if pointer.is_null() {
-            return jamscript_guest_malloc(size);
-        }
-        if size == 0 {
-            jamscript_guest_free(pointer);
-            return core::ptr::null_mut();
-        }
-        let header_size = core::mem::size_of::<CAllocationHeader>();
-        let header = pointer.sub(header_size).cast::<CAllocationHeader>();
-        if (*header).magic != C_ALLOCATION_MAGIC || (*header).freed != 0 {
-            return core::ptr::null_mut();
-        }
-        let replacement = jamscript_guest_malloc(size);
-        if replacement.is_null() {
-            return replacement;
-        }
-        memcpy(replacement, pointer, (*header).size.min(size));
-        jamscript_guest_free(pointer);
-        replacement
+        unsafe { guest_allocator::c_realloc(pointer, size) }
     }
 
     #[no_mangle]
     #[inline(never)]
     pub unsafe extern "C" fn jamscript_guest_free(pointer: *mut u8) {
-        if pointer.is_null() {
-            return;
-        }
-        let header = pointer
-            .sub(core::mem::size_of::<CAllocationHeader>())
-            .cast::<CAllocationHeader>();
-        if (*header).magic == C_ALLOCATION_MAGIC {
-            (*header).freed = 1;
-        }
+        unsafe { guest_allocator::c_free(pointer) }
     }
 
     #[cfg(feature = "diagnostic")]
     #[inline(never)]
     pub fn diagnostic_trap(code: u32) -> ! {
-        let message: &'static [u8] = match code {
-            0xE001 => b"jamscript:trap=allocator",
-            0xE002 => b"jamscript:trap=panic",
-            0xE003 => b"jamscript:trap=observer",
-            _ => b"jamscript:trap=unknown",
+        let fault = if code == 0xE002 {
+            GuestFaultCodeV1::Panic
+        } else {
+            GuestFaultCodeV1::Abort
         };
-        diagnostic_stage(message);
-        unsafe {
-            core::arch::asm!(".4byte 0xc0001073", options(noreturn));
-        }
+        guest_allocator::record_failure(fault, 0, 0);
+        trap_with_fault_record()
     }
 
-    #[cfg(feature = "diagnostic")]
     #[panic_handler]
     fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-        diagnostic_trap(0xE002)
-    }
-
-    #[cfg(not(feature = "diagnostic"))]
-    #[panic_handler]
-    fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-        unsafe { abort() }
+        guest_allocator::record_failure(GuestFaultCodeV1::Panic, 0, 0);
+        trap_with_fault_record()
     }
 
     pub struct DiagnosticObserver;
@@ -512,10 +398,8 @@ pub mod guest_support {
 
     #[no_mangle]
     pub unsafe extern "C" fn abort() -> ! {
-        #[cfg(feature = "diagnostic")]
-        diagnostic_trap(0xE004);
-        #[cfg(not(feature = "diagnostic"))]
-        core::arch::asm!(".4byte 0xc0001073", options(noreturn));
+        guest_allocator::record_failure(GuestFaultCodeV1::Abort, 0, 0);
+        trap_with_fault_record()
     }
 
     #[no_mangle]
@@ -531,28 +415,20 @@ pub mod guest_support {
 
 #[cfg(not(target_env = "polkavm"))]
 pub mod guest_support {
+    use service_runtime_core::{GuestFaultRecordV1, GuestFaultStageV1, GuestMemoryBudgetV1};
+
     pub struct DiagnosticObserver;
     pub fn diagnostic_stage(_message: &'static [u8]) {}
-    pub fn reset_runtime() {}
-}
-
-#[cfg(test)]
-mod allocator_tests {
-    use super::{try_bump_allocation, GUEST_HEAP_LIMIT};
-    use core::alloc::Layout;
-
-    #[test]
-    fn production_arena_exhaustion_is_bounded_without_hang() {
-        assert_eq!(GUEST_HEAP_LIMIT, 524_288);
-
-        // This models the top-level runtime allocation repro: once the shared
-        // arena is full, the next allocation must fail as a bounded decision.
-        let almost_full = Layout::from_size_align(GUEST_HEAP_LIMIT - 32, 8).unwrap();
-        let (_, used) = try_bump_allocation(0, GUEST_HEAP_LIMIT, almost_full).unwrap();
-        let final_allocation = Layout::from_size_align(64, 8).unwrap();
-
-        assert!(try_bump_allocation(used, GUEST_HEAP_LIMIT, final_allocation).is_none());
+    pub fn reset_runtime(_budget: GuestMemoryBudgetV1, _stage: GuestFaultStageV1) -> bool {
+        true
     }
+    pub fn fault_record() -> GuestFaultRecordV1 {
+        GuestFaultRecordV1::EMPTY
+    }
+    pub fn has_fault() -> bool {
+        false
+    }
+    pub fn emit_fault_record() {}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

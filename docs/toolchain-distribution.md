@@ -71,7 +71,7 @@ prerequisite.
 The cache is platform-specific and immutable:
 
 ```text
-<cache>/scriptc-m2-v1/<platform>/<bundle-sha256>/
+<cache>/scriptc-m2-v2/<platform>/<bundle-sha256>/
 ```
 
 `JAMSCRIPT_TOOLCHAIN_HOME` can relocate the cache for CI or enterprise

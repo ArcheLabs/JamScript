@@ -53,7 +53,7 @@ esac
 
 cargo test --locked -p jamscript-toolchain
 cargo run --quiet --locked --bin jams -- toolchain status --json > "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
-grep -q '"toolchainId": "scriptc-m2-v1"' "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
+grep -q '"toolchainId": "scriptc-m2-v2"' "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
 grep -q "\"platform\": \"${expected_platform}\"" "${TMPDIR:-/tmp}/jamscript-toolchain-status.json"
 grep -q 'canonical_toolchain' crates/jamscript-target-jam/src/lib.rs
 grep -q 'JAMSCRIPT_OFFLINE' crates/jamscript-toolchain/src/lib.rs

@@ -16,7 +16,7 @@ import {
   type Ownership,
   type SignedActionV2,
 } from "./crypto.js";
-import { asWorkRpc, RpcError, type ActionReceipt, type BackendCapabilitiesV1, type BestContext, type FinalizedContext, type RpcTransport, type SubmitActionResult, type SubmitTransactionRequest, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
+import { asWorkRpc, RpcError, type ActionReceipt, type BackendCapabilitiesV1, type BestContext, type FinalizedContext, type RpcTransport, type StructuredExecutionError, type SubmitActionResult, type SubmitTransactionRequest, type SubmitTransactionResult, type TransactionStatusResult, type WorkRpc, type WorkStatusResult } from "./rpc.js";
 import type { JamSigner, OwnershipSigner } from "./signer.js";
 import { blake2AsU8a } from "@polkadot/util-crypto";
 import { verifyManagedStateProof } from "./proof.js";
@@ -123,6 +123,7 @@ export class TransactionTrackingError extends Error {
     readonly lastStatus?: TransactionStatusResult,
     readonly failureStage?: string,
     options?: ErrorOptions,
+    readonly errorInfo?: StructuredExecutionError,
   ) {
     super(message, options);
     this.name = "TransactionTrackingError";
@@ -1036,7 +1037,16 @@ export class JamScriptClient {
       throw new TransactionTrackingError("the Backend cannot determine whether this transaction was submitted; keep it pending and do not resubmit automatically", "SUBMISSION_UNKNOWN", transactionId, expected, transaction, "submission");
     }
     if (transaction.status === "failed") {
-      throw new TransactionTrackingError(`transaction failed before a finalized action receipt was produced: ${transaction.error ?? "unknown Work failure"}`, "WORK_FAILED", transactionId, expected, transaction, "work");
+      throw new TransactionTrackingError(
+        `transaction failed before a finalized action receipt was produced: ${transaction.error ?? "unknown Work failure"}`,
+        transaction.errorInfo?.code ?? "WORK_FAILED",
+        transactionId,
+        expected,
+        transaction,
+        "work",
+        undefined,
+        transaction.errorInfo ?? undefined,
+      );
     }
     const receipt = this.resolveActionReceipt(transaction, expected, transactionId);
     if (!receipt) throw new TransactionWaitTimeoutError(transactionId, transaction, expected, "receipt_unavailable");

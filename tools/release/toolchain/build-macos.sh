@@ -279,7 +279,7 @@ llvm_ar_sha256="$(sha256_file "${LLVM_AR_BIN}")"
 ld_lld_sha256="$(sha256_file "${LLD_BIN}")"
 python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
   --root "${STAGE}" --output "${STAGE}/manifest.json" \
-  --platform macos-arm64 --toolchain-id scriptc-m2-v1 \
+  --platform macos-arm64 --toolchain-id scriptc-m2-v2 \
   --node-version "$(tr -d '\r\n' < "${ROOT}/toolchains/scriptc/NODE_VERSION")" \
   --clang-version "${LLVM_VERSION}" \
   --llvm-distribution "${LLVM_DISTRIBUTION}" --llvm-archive-sha256 "${LLVM_ARCHIVE_SHA256}" \
@@ -292,7 +292,7 @@ python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
 # zstd remains an internal bundle format; it is never required by the end-user
 # CLI bootstrap archive. The packer fixes tar metadata and member ordering so
 # independent stages produce byte-identical archives on native macOS runners.
-ARCHIVE="${OUT}/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
+ARCHIVE="${OUT}/jamscript-toolchain-scriptc-m2-v2-macos-arm64.tar.zst"
 (python3 "${ROOT}/tools/release/toolchain/create-deterministic-archive.py" \
   --root "${STAGE}" --source-date-epoch "${SOURCE_DATE_EPOCH}" | \
   zstd -q -T1 -19 -o "${ARCHIVE}")
@@ -301,7 +301,7 @@ wc -c < "${ARCHIVE}"
 cp -L "${STAGE}/manifest.json" "${OUT}/toolchain-manifest-macos-arm64.json"
 python3 "${ROOT}/tools/release/toolchain/write-bundle-metadata.py" \
   --output "${OUT}/bundle-metadata-macos-arm64.json" \
-  --toolchain-id scriptc-m2-v1 --platform macos-arm64 \
+  --toolchain-id scriptc-m2-v2 --platform macos-arm64 \
   --archive "$(basename -- "${ARCHIVE}")" \
   --source-revision "$(git -C "${ROOT}" rev-parse HEAD)"
 echo "BUNDLE_PATH=${ARCHIVE}"

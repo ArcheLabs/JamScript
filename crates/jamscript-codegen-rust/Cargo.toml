@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 jamscript-ir = { path = "../jamscript-ir" }
+service-runtime-core = { path = "../service-runtime-core" }

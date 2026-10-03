@@ -1,5 +1,5 @@
 format = 1
-toolchain_id = "scriptc-m2-v1"
+toolchain_id = "scriptc-m2-v2"
 language = "0.2"
 backend = "scriptc-m2"
 node_version = "24.15.0"
@@ -18,14 +18,14 @@ scriptc_revision = "d7b4480"
 # the CLI rejects incomplete records instead of resolving "latest" or using a
 # host compiler.
 [platforms.linux-x86_64]
-url = "https://github.com/ArcheLabs/JamScript/releases/download/toolchain-scriptc-m2-v1/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+url = "https://github.com/ArcheLabs/JamScript/releases/download/toolchain-scriptc-m2-v2/jamscript-toolchain-scriptc-m2-v2-linux-x86_64.tar.zst"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 size = 1
 archive = "tar.zst"
 published = false
 
 [platforms.macos-arm64]
-url = "https://github.com/ArcheLabs/JamScript/releases/download/v0.1.0-rc.2/jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
+url = "https://github.com/ArcheLabs/JamScript/releases/download/v0.1.0-rc.2/jamscript-toolchain-scriptc-m2-v2-macos-arm64.tar.zst"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 size = 1
 archive = "tar.zst"

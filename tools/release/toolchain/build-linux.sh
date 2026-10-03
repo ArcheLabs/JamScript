@@ -175,7 +175,7 @@ echo "CONSUMER_RUST_REMOVED=PASS"
 
 python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
   --root "${STAGE}" --output "${STAGE}/manifest.json" \
-  --platform linux-x86_64 --toolchain-id scriptc-m2-v1 \
+  --platform linux-x86_64 --toolchain-id scriptc-m2-v2 \
   --node-version "$(tr -d '\r\n' < "${ROOT}/toolchains/scriptc/NODE_VERSION")" \
   --clang-version "${LLVM_VERSION}" \
   --llvm-distribution "${LLVM_DISTRIBUTION}" --llvm-archive-sha256 "${LLVM_ARCHIVE_SHA256}" \
@@ -185,7 +185,7 @@ python3 "${ROOT}/tools/release/toolchain/write-manifest.py" \
   --jam-blob-encoder-version "$(sed -n 's/^jam_blob_encoder_version = "\(.*\)"/\1/p' "${ROOT}/toolchains/distribution-v1.toml")" \
   --scriptc-revision "$(sed -n 's/^commit=//p' "${ROOT}/toolchains/scriptc/REVISION")"
 
-ARCHIVE="${OUT}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+ARCHIVE="${OUT}/jamscript-toolchain-scriptc-m2-v2-linux-x86_64.tar.zst"
 if command -v zstd >/dev/null 2>&1; then
   python3 "${ROOT}/tools/release/toolchain/create-deterministic-archive.py" \
     --root "${STAGE}" --source-date-epoch "${SOURCE_DATE_EPOCH}" | \
@@ -206,7 +206,7 @@ stat -c '%s' "${ARCHIVE}"
 cp -L "${STAGE}/manifest.json" "${OUT}/toolchain-manifest.json"
 python3 "${ROOT}/tools/release/toolchain/write-bundle-metadata.py" \
   --output "${OUT}/bundle-metadata.json" \
-  --toolchain-id scriptc-m2-v1 --platform linux-x86_64 \
+  --toolchain-id scriptc-m2-v2 --platform linux-x86_64 \
   --archive "$(basename -- "${ARCHIVE}")" \
   --source-revision "$(git -C "${ROOT}" rev-parse HEAD)"
 echo "BUNDLE_PATH=${ARCHIVE}"

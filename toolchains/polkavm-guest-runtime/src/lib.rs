@@ -12,13 +12,14 @@ use jamscript_runtime_core::{
     verify_signed_action_v1, verify_signed_action_v2,
 };
 use service_runtime_core::{
-    BackendMetadataV1, RuntimeRefineInputV1, RuntimeRefineOutputV1, ScriptActionResultV1,
-    ServiceApplication, ServiceKeyV1, StateAccessError, MAX_SCRIPT_ACTION_RESULT_BYTES,
+    BackendMetadataV1, GuestFaultStageV1, GuestMemoryBudgetV1, RuntimeRefineInputV1,
+    RuntimeRefineOutputV1, ScriptActionResultV1, ServiceApplication, ServiceKeyV1,
+    StateAccessError, MAX_SCRIPT_ACTION_RESULT_BYTES,
 };
 #[cfg(target_env = "polkavm")]
 use service_runtime_core::{ManagedStateCommitmentV1, StateRoot, MANAGED_STATE_COMMITMENT_KEY_V1};
 
-const DESCRIPTOR_VERSION: u32 = 1;
+const DESCRIPTOR_VERSION: u32 = 2;
 const AUTH_PUBLIC: u8 = 0;
 const AUTH_WALLET: u8 = 1;
 const AUTH_OWNERSHIP: u8 = 2;
@@ -59,7 +60,7 @@ struct JamScriptNamespaceDescriptorV1 {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct JamScriptServiceDescriptorV1 {
+struct JamScriptServiceDescriptorV2 {
     version: u32,
     action_count: u32,
     actions: *const JamScriptActionDescriptorV1,
@@ -71,6 +72,8 @@ struct JamScriptServiceDescriptorV1 {
     reserved: [u8; 7],
     management_account: [u8; 32],
     init: Option<unsafe extern "C" fn()>,
+    heap_initial_bytes: u32,
+    heap_max_bytes: u32,
 }
 
 #[repr(C)]
@@ -80,7 +83,7 @@ pub struct RefineOutput {
 }
 
 unsafe extern "C" {
-    static jamscript_service_descriptor_v1: JamScriptServiceDescriptorV1;
+    static jamscript_service_descriptor_v2: JamScriptServiceDescriptorV2;
 
     fn minijam_payload(output: *mut u8, capacity: usize, output_size: *mut usize) -> u32;
 }
@@ -122,9 +125,9 @@ static mut INPUT: [u8; 1_048_576] = [0; 1_048_576];
 static mut RESULT: [u8; 2_097_152] = [0; 2_097_152];
 static mut OUTPUT: [u8; 2_097_152] = [0; 2_097_152];
 
-fn descriptor() -> Result<&'static JamScriptServiceDescriptorV1, service_runtime_guest::GuestError>
+fn descriptor() -> Result<&'static JamScriptServiceDescriptorV2, service_runtime_guest::GuestError>
 {
-    let descriptor = unsafe { &jamscript_service_descriptor_v1 };
+    let descriptor = unsafe { &jamscript_service_descriptor_v2 };
     if descriptor.version != DESCRIPTOR_VERSION
         || descriptor.action_count == 0
         || descriptor.action_count > MAX_DESCRIPTOR_ACTIONS
@@ -149,12 +152,12 @@ fn descriptor() -> Result<&'static JamScriptServiceDescriptorV1, service_runtime
     Ok(descriptor)
 }
 
-fn service_key(descriptor: &JamScriptServiceDescriptorV1) -> ServiceKeyV1 {
+fn service_key(descriptor: &JamScriptServiceDescriptorV2) -> ServiceKeyV1 {
     ServiceKeyV1::new(descriptor.service_key)
 }
 
 fn find_action(
-    descriptor: &JamScriptServiceDescriptorV1,
+    descriptor: &JamScriptServiceDescriptorV2,
     selector: [u8; 8],
 ) -> Result<&'static JamScriptActionDescriptorV1, StateAccessError> {
     for index in 0..descriptor.action_count as usize {
@@ -203,7 +206,7 @@ impl ServiceApplication for DescriptorApplication {
 
 fn authenticate<'a>(
     context: &mut service_runtime_core::ExecutionContext<'_>,
-    descriptor: &JamScriptServiceDescriptorV1,
+    descriptor: &JamScriptServiceDescriptorV2,
     action: &JamScriptActionDescriptorV1,
     raw_action: &'a [u8],
 ) -> Result<(&'a [u8], Vec<u8>), StateAccessError> {
@@ -301,7 +304,7 @@ fn read_nonce(
     }
 }
 
-fn application_key_allowed(descriptor: &JamScriptServiceDescriptorV1, key: &[u8]) -> bool {
+fn application_key_allowed(descriptor: &JamScriptServiceDescriptorV2, key: &[u8]) -> bool {
     if key.len() < 3 || key[0] != service_runtime_core::APPLICATION_KEY_CLASS_V1 {
         return false;
     }
@@ -323,7 +326,7 @@ fn application_key_allowed(descriptor: &JamScriptServiceDescriptorV1, key: &[u8]
 
 fn apply_script_result(
     context: &mut service_runtime_core::ExecutionContext<'_>,
-    descriptor: &JamScriptServiceDescriptorV1,
+    descriptor: &JamScriptServiceDescriptorV2,
     result: ScriptActionResultV1,
 ) -> Result<(), StateAccessError> {
     match result {
@@ -398,7 +401,14 @@ fn execute_scriptc(
 }
 
 fn run_refine() -> Result<RuntimeRefineOutputV1, service_runtime_guest::GuestError> {
-    service_runtime_guest::guest_support::reset_runtime();
+    let descriptor = descriptor()?;
+    let budget = GuestMemoryBudgetV1 {
+        heap_initial_bytes: descriptor.heap_initial_bytes,
+        heap_max_bytes: descriptor.heap_max_bytes,
+    };
+    if !service_runtime_guest::guest_support::reset_runtime(budget, GuestFaultStageV1::Refine) {
+        return Err(service_runtime_guest::GuestError::Environment);
+    }
     let mut input_size = 0usize;
     let status = unsafe { minijam_payload(INPUT.as_mut_ptr(), INPUT.len(), &mut input_size) };
     if status != 0 {
@@ -411,7 +421,14 @@ fn run_refine() -> Result<RuntimeRefineOutputV1, service_runtime_guest::GuestErr
 }
 
 fn run_plan() -> Result<(), service_runtime_guest::GuestError> {
-    service_runtime_guest::guest_support::reset_runtime();
+    let descriptor = descriptor()?;
+    let budget = GuestMemoryBudgetV1 {
+        heap_initial_bytes: descriptor.heap_initial_bytes,
+        heap_max_bytes: descriptor.heap_max_bytes,
+    };
+    if !service_runtime_guest::guest_support::reset_runtime(budget, GuestFaultStageV1::Plan) {
+        return Err(service_runtime_guest::GuestError::Environment);
+    }
     let mut input_size = 0usize;
     let status = unsafe { minijam_payload(INPUT.as_mut_ptr(), INPUT.len(), &mut input_size) };
     if status != 0 {
@@ -425,7 +442,11 @@ fn run_plan() -> Result<(), service_runtime_guest::GuestError> {
 
 fn output_for(planning: bool) -> RefineOutput {
     if planning {
-        return match run_plan() {
+        let result = run_plan();
+        if service_runtime_guest::guest_support::has_fault() {
+            service_runtime_guest::guest_support::trap_with_fault_record();
+        }
+        return match result {
             Ok(()) => planner_done_output(),
             Err(service_runtime_guest::GuestError::NeedState(key)) => {
                 let encoded = match service_runtime_core::encode_planner_need_state(&key) {
@@ -446,7 +467,11 @@ fn output_for(planning: bool) -> RefineOutput {
             Err(_) => error_output(2),
         };
     }
-    let output = match run_refine() {
+    let result = run_refine();
+    if service_runtime_guest::guest_support::has_fault() {
+        service_runtime_guest::guest_support::trap_with_fault_record();
+    }
+    let output = match result {
         Ok(output) => output,
         Err(service_runtime_guest::GuestError::NeedState(key)) => {
             let encoded = match service_runtime_core::encode_planner_need_state(&key) {

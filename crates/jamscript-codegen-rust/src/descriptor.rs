@@ -13,7 +13,7 @@ pub fn generate_service_descriptor_c(
     }
 
     let mut source = String::from(
-        "#include <stdint.h>\n#include <stddef.h>\n#include \"jam/service-descriptor-v1.h\"\n\n",
+        "#include <stdint.h>\n#include <stddef.h>\n#include \"jam/service-descriptor-v2.h\"\n\n",
     );
     source.push_str("extern void jamscript_scriptc_service_init(void);\n");
     for action in &ir.actions {
@@ -76,8 +76,8 @@ pub fn generate_service_descriptor_c(
     let namespace_count = ir.states.len();
     source.push_str(&format!(
         concat!(
-            "const JamScriptServiceDescriptorV1 jamscript_service_descriptor_v1 = {{\n",
-            "    1,\n",
+            "const JamScriptServiceDescriptorV2 jamscript_service_descriptor_v2 = {{\n",
+            "    JAMSCRIPT_SERVICE_DESCRIPTOR_V2,\n",
             "    {},\n",
             "    jamscript_actions,\n",
             "    {},\n",
@@ -87,7 +87,9 @@ pub fn generate_service_descriptor_c(
             "    {},\n",
             "    {{ 0 }},\n",
             "    {{ {} }},\n",
-            "    jamscript_scriptc_service_init\n",
+            "    jamscript_scriptc_service_init,\n",
+            "    {},\n",
+            "    {}\n",
             "}};\n"
         ),
         ir.actions.len(),
@@ -104,7 +106,9 @@ pub fn generate_service_descriptor_c(
             .iter()
             .map(|byte| byte.to_string())
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        context.memory_budget.heap_initial_bytes,
+        context.memory_budget.heap_max_bytes
     ));
     Ok(source)
 }

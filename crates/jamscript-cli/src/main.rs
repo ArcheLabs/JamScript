@@ -14,10 +14,14 @@ use jamscript_parser::{parse_service_v02, parse_service_v03};
 use jamscript_target_jam::{verify_deployment_bundle, JamTarget, NativeModule};
 use jamscript_toolchain::ToolchainManager;
 use polkavm::{
-    BackendKind, Config as PvmConfig, Engine, Linker, MemoryAccessError, Module, ModuleConfig, Reg,
+    BackendKind, CallError as PvmCallError, Config as PvmConfig, Engine, GasMeteringKind, Linker,
+    MemoryAccessError, Module, ModuleConfig, Reg,
 };
 use serde::Deserialize;
-use service_runtime_core::ServiceKeyV1;
+use service_runtime_core::{
+    GuestFaultCodeV1, GuestFaultRecordV1, GuestFaultStageV1, GuestMemoryBudgetV1, ServiceKeyV1,
+    GUEST_FAULT_RECORD_V1_LEN,
+};
 use std::{
     collections::BTreeMap,
     fs,
@@ -170,10 +174,24 @@ struct DeployOptions {
 struct Manifest {
     package: Package,
     compiler: Option<CompilerConfig>,
+    guest: Option<GuestConfig>,
     native: Option<BTreeMap<String, NativeConfig>>,
     management: Option<ManagementConfig>,
     networks: Option<BTreeMap<String, NetworkConfig>>,
     deployment: Option<DeploymentConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuestConfig {
+    memory: Option<GuestMemoryConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuestMemoryConfig {
+    heap_initial_bytes: Option<u32>,
+    heap_max_bytes: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -529,8 +547,10 @@ fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Re
     let mut config = PvmConfig::new();
     config.set_backend(Some(BackendKind::Interpreter));
     let engine = Engine::new(&config).context("creating PolkaVM interpreter")?;
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
     let module =
-        Module::new(&engine, &ModuleConfig::new(), bytes.into()).context("loading PVM artifact")?;
+        Module::new(&engine, &module_config, bytes.into()).context("loading PVM artifact")?;
     let payload = empty_refine_input();
     let mut linker: Linker<(), MemoryAccessError> = Linker::new();
     linker
@@ -565,7 +585,9 @@ fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Re
         .instantiate_pre(&module)
         .context("linking PVM artifact")?;
     let mut instance = pre.instantiate().context("instantiating PVM artifact")?;
-    instance.set_gas(5_000_000);
+    // Match the pinned MiniJAM Stage-1 maximum work-item refine budget.
+    // Local PolkaVM gas units remain diagnostic and are not chain tariff units.
+    instance.set_gas(1_000_000_000);
     if export == "minijam_accumulate" {
         instance
             .call_typed_and_get_result::<(), _>(&mut (), export, ())
@@ -574,9 +596,34 @@ fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Re
         export,
         "minijam_refine" | "jamscript_plan_v1" | "jamscript_backend_metadata_v1"
     ) {
-        instance
-            .call_typed_and_get_result::<u64, _>(&mut (), export, ())
-            .map_err(|error| anyhow::anyhow!("PVM execution: {error:?}"))?;
+        if let Err(error) = instance.call_typed_and_get_result::<u64, _>(&mut (), export, ()) {
+            let program_counter = instance.program_counter();
+            if matches!(&error, PvmCallError::NotEnoughGas) {
+                bail!("PVM_OUT_OF_GAS: PolkaVM execution exhausted its configured gas budget; program_counter={program_counter:?}");
+            }
+            if matches!(&error, PvmCallError::Trap) {
+                if let Some(record) = read_guest_fault_record(&mut instance) {
+                    let code = GuestFaultCodeV1::from_u32(record.code)
+                        .map(GuestFaultCodeV1::as_str)
+                        .unwrap_or("GUEST_FAULT_UNKNOWN");
+                    let stage = GuestFaultStageV1::from_u32(record.stage)
+                        .map(GuestFaultStageV1::as_str)
+                        .unwrap_or("unknown");
+                    bail!(
+                        "{code}: stage={stage} requestedBytes={} alignment={} heapCommittedBytes={} heapMaxBytes={} allocatorLiveRequestedBytes={} allocatorHighWaterRequestedBytes={} allocatorCumulativeRequestedBytes={}",
+                        record.requested_bytes,
+                        record.alignment,
+                        record.heap_committed_bytes,
+                        record.heap_max_bytes,
+                        record.live_requested_bytes,
+                        record.high_water_requested_bytes,
+                        record.cumulative_requested_bytes,
+                    );
+                }
+                bail!("PVM_TRAP: {export}: execution trapped at {program_counter:?}; guest fault diagnostics unavailable");
+            }
+            bail!("PVM execution: {error:?}; program_counter={program_counter:?}");
+        }
         let pointer = instance.reg(Reg::A0) as u32;
         let size = instance.reg(Reg::A1) as u32;
         let output = instance
@@ -598,6 +645,22 @@ fn run_artifact(artifact: &Path, export: &str, result_path: Option<&Path>) -> Re
     println!("PVM_EXPORT={export}");
     println!("PVM_EXECUTION=PASS");
     Ok(())
+}
+
+fn read_guest_fault_record(
+    instance: &mut polkavm::Instance<(), MemoryAccessError>,
+) -> Option<GuestFaultRecordV1> {
+    let address = instance
+        .call_typed_and_get_result::<u64, _>(&mut (), "jamscript_guest_fault_record_v1", ())
+        .ok()? as u32;
+    if address == 0 {
+        return None;
+    }
+    let bytes = instance
+        .read_memory(address, GUEST_FAULT_RECORD_V1_LEN as u32)
+        .ok()?;
+    let record = GuestFaultRecordV1::decode(&bytes).ok()?;
+    (record.code != 0).then_some(record)
 }
 
 fn empty_refine_input() -> Vec<u8> {
@@ -1079,11 +1142,13 @@ fn build(path: &Path, output: &Path) -> Result<()> {
     };
     let (service_key, service_instance_id) = load_service_identity(path)?;
     let management_policy = resolve_management_policy(manifest.management.as_ref(), &service_key)?;
+    let memory_budget = resolve_guest_memory_budget(manifest.guest.as_ref())?;
     let context = ArtifactBuildContext {
         service_key: service_key.into_bytes(),
         service_instance_id,
         management_policy,
         diagnostic: std::env::var_os("JAMSCRIPT_DIAGNOSTIC_GUEST").is_some(),
+        memory_budget,
     };
     fs::create_dir_all(output)?;
     let abi = abi_for_language(&ir, &ir.language_version)?;
@@ -1116,6 +1181,26 @@ fn build(path: &Path, output: &Path) -> Result<()> {
         .context("JAM target build")?;
     println!("built {}", output.display());
     Ok(())
+}
+
+fn resolve_guest_memory_budget(config: Option<&GuestConfig>) -> Result<GuestMemoryBudgetV1> {
+    let memory = config.and_then(|guest| guest.memory.as_ref());
+    let budget = GuestMemoryBudgetV1 {
+        heap_initial_bytes: memory
+            .and_then(|memory| memory.heap_initial_bytes)
+            .unwrap_or(GuestMemoryBudgetV1::DEFAULT.heap_initial_bytes),
+        heap_max_bytes: memory
+            .and_then(|memory| memory.heap_max_bytes)
+            .unwrap_or(GuestMemoryBudgetV1::DEFAULT.heap_max_bytes),
+    };
+    budget.validate().map_err(|error| {
+        anyhow::anyhow!(
+            "invalid [guest.memory] heap budget (heap_initial_bytes={}, heap_max_bytes={}): {error:?}",
+            budget.heap_initial_bytes,
+            budget.heap_max_bytes
+        )
+    })?;
+    Ok(budget)
 }
 
 fn resolve_management_policy(
@@ -1258,6 +1343,7 @@ mod tests {
                 language: "0.2".into(),
             },
             compiler: None,
+            guest: None,
             native: None,
             management: None,
             networks: Some(BTreeMap::from([
@@ -1351,6 +1437,43 @@ mod tests {
         assert!(error
             .to_string()
             .contains("network 'local' is not configured"));
+    }
+
+    #[test]
+    fn guest_memory_budget_defaults_and_accepts_project_overrides() {
+        let default_manifest: Manifest = toml::from_str(
+            "[package]\nname='memory-fixture'\nversion='0.1.0'\nentry='src/service.ts'\nlanguage='0.2'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_guest_memory_budget(default_manifest.guest.as_ref()).unwrap(),
+            GuestMemoryBudgetV1::DEFAULT
+        );
+
+        let configured_manifest: Manifest = toml::from_str(
+            "[package]\nname='memory-fixture'\nversion='0.1.0'\nentry='src/service.ts'\nlanguage='0.2'\n[guest.memory]\nheap_initial_bytes=2097152\nheap_max_bytes=33554432\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_guest_memory_budget(configured_manifest.guest.as_ref()).unwrap(),
+            GuestMemoryBudgetV1 {
+                heap_initial_bytes: 2 * 1024 * 1024,
+                heap_max_bytes: 32 * 1024 * 1024,
+            }
+        );
+    }
+
+    #[test]
+    fn guest_memory_budget_reports_invalid_project_values() {
+        let configured_manifest: Manifest = toml::from_str(
+            "[package]\nname='memory-fixture'\nversion='0.1.0'\nentry='src/service.ts'\nlanguage='0.2'\n[guest.memory]\nheap_initial_bytes=2097153\nheap_max_bytes=33554432\n",
+        )
+        .unwrap();
+        let error = resolve_guest_memory_budget(configured_manifest.guest.as_ref()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("invalid [guest.memory] heap budget"));
+        assert!(error.to_string().contains("2097153"));
     }
 
     #[test]

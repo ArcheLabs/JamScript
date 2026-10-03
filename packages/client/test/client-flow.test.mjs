@@ -623,6 +623,76 @@ test("waitForAction distinguishes an imported failed application receipt", async
   assert.equal(result.actionReceipt.errorCode, 2);
 });
 
+test("waitForAction preserves structured guest faults and future details", async () => {
+  const errorInfo = {
+    code: "GUEST_HEAP_LIMIT_EXCEEDED",
+    message: "Guest allocation exceeded the configured heap budget",
+    stage: "plan",
+    serviceId: 7,
+    codeHash,
+    details: { requestedBytes: 65536, heapMaxBytes: 16777216, futureMetric: "kept" },
+  };
+  const transport = {
+    async call(method) {
+      if (method === "jamscript_getCapabilitiesV1") return lifecycleCapabilities;
+      if (method !== "jamscript_getTransactionStatusV1") throw new Error("unexpected RPC method");
+      return {
+        transactionId: "0x" + "77".repeat(32),
+        status: "failed",
+        packageHash: null,
+        itemIndex: null,
+        actionIndex: 0,
+        executionReceipt: null,
+        error: `${errorInfo.code}: ${errorInfo.message}`,
+        errorInfo,
+      };
+    },
+  };
+  const client = clientWithCapabilities(deployment, transport);
+  await assert.rejects(
+    client.waitForAction(
+      "0x" + "77".repeat(32),
+      "0x" + "aa".repeat(32),
+      { intervalMs: 0, timeoutMs: 1000 },
+    ),
+    (error) => {
+      assert.equal(error.code, errorInfo.code);
+      assert.equal(error.errorInfo.stage, "plan");
+      assert.equal(error.errorInfo.details.futureMetric, "kept");
+      assert.equal(error.lastStatus.status, "failed");
+      return true;
+    },
+  );
+});
+
+test("RpcError exposes structured data while retaining unknown fields", () => {
+  const data = {
+    code: "GUEST_MEMORY_GROW_FAILED",
+    message: "Guest memory growth was rejected",
+    stage: "refine",
+    details: { heapMaxBytes: 16777216, futureField: true },
+  };
+  const error = new RpcError("guest failed", -32046, data);
+  assert.equal(error.structuredError.code, data.code);
+  assert.equal(error.structuredError.details.futureField, true);
+  assert.equal(error.data, data);
+});
+
+test("RpcError preserves structured preflight cause and no-submit lifecycle", () => {
+  const cause = {
+    code: "GUEST_HEAP_LIMIT_EXCEEDED",
+    message: "Guest allocation exceeded the configured heap budget",
+    stage: "plan",
+    details: { heapMaxBytes: 16777216 },
+  };
+  const data = { code: "NOT_SUBMITTED", cause };
+  const error = new RpcError("NOT_SUBMITTED: GUEST_HEAP_LIMIT_EXCEEDED", -32045, data);
+  assert.equal(error.structuredError.code, cause.code);
+  assert.equal(error.structuredError.submissionState, "not_submitted");
+  assert.equal(error.structuredError.details.heapMaxBytes, 16777216);
+  assert.equal(error.data, data);
+});
+
 test("waitForTransaction timeout carries the last queued status without calling it failed", async () => {
   let reads = 0;
   const transport = {

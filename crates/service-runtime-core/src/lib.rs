@@ -2,6 +2,9 @@
 
 extern crate alloc;
 
+pub mod guest_memory;
+pub use guest_memory::*;
+
 use alloc::vec::Vec;
 pub use jamscript_crypto::blake2_256;
 

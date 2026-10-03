@@ -93,7 +93,7 @@ fi
 echo "K0_BOOTSTRAP=PASS"
 
 cli_asset="jamscript-${release_version}-${target}.tar.gz"
-toolchain_asset="jamscript-toolchain-scriptc-m2-v1-${target}.tar.zst"
+toolchain_asset="jamscript-toolchain-scriptc-m2-v2-${target}.tar.zst"
 for required_asset in "${cli_asset}" "${toolchain_asset}"; do
   if [[ -n "${release_url}" ]]; then
     curl --fail --location --retry 3 --silent --show-error "${release_url}/${required_asset}" -o "${bootstrap}/${required_asset}"

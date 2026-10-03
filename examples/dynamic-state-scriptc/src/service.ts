@@ -51,3 +51,12 @@ export const advance = action({
     });
   },
 });
+
+// Exercises the guest's dynamic heap using a payload larger than the legacy
+// 512 KiB arena. The runtime must decode this action without requiring
+// applications to manage guest memory themselves.
+export const memoryProbe = action({
+  auth: wallet(),
+  input: { workload: bytes(530000) },
+  execute(_ctx, _input) {},
+});

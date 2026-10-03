@@ -2,8 +2,20 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-output="$(mktemp -d "${TMPDIR:-/tmp}/jamscript-e2e.XXXXXX")"
-trap 'rm -rf "$output"' EXIT
+if [[ -n "${JAMSCRIPT_E2E_OUTPUT_DIR:-}" ]]; then
+  output="${JAMSCRIPT_E2E_OUTPUT_DIR}"
+  mkdir -p "$output"
+  keep_output=1
+else
+  output="$(mktemp -d "${TMPDIR:-/tmp}/jamscript-e2e.XXXXXX")"
+  keep_output=0
+fi
+cleanup() {
+  if [[ "$keep_output" == 0 ]]; then
+    rm -rf "$output"
+  fi
+}
+trap cleanup EXIT
 
 if [[ -s "${SCRIPTC_NVM_SH:-/home/libingjiang/.nvm/nvm.sh}" ]]; then
   # The release gate is pinned to the toolchain's Node version.
@@ -34,6 +46,10 @@ rg -q '"language_version": "0.2"' "$dynamic_output/build.json"
 rg -q '"backend": "scriptc-m2"' "$dynamic_output/build.json"
 rg -q '"runtime_profile_version": "scriptc-deterministic-v1"' "$dynamic_output/build.json"
 rg -q '"runtimeRefineInputVersion": 1' "$dynamic_output/build.json"
+rg -q '"serviceDescriptorVersion": 2' "$dynamic_output/build.json"
+rg -q '"heapInitialBytes": 1048576' "$dynamic_output/build.json"
+rg -q '"heapMaxBytes": 16777216' "$dynamic_output/build.json"
+rg -q '"effectiveHeapMaxBytes": 16777216' "$dynamic_output/build.json"
 rg -q '"typedRuntimeVersion": 1' "$dynamic_output/build.json"
 rg -q '"stateViewVersion": 1' "$dynamic_output/build.json"
 rg -q 'JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = 1' "$dynamic_output/generated_builder_application.rs"
@@ -42,3 +58,9 @@ JAMSCRIPT_E2E_BUILDER_APPLICATION_RS="$dynamic_output/generated_builder_applicat
 JAMSCRIPT_E2E_SCRIPTC_ARCHIVE="$dynamic_output/scriptc/scriptc_service.lib.a" \
 cargo run --locked --offline \
   --manifest-path tools/minijam-e2e/Cargo.toml -- --dynamic-only "$dynamic_output/service.blob"
+
+JAMSCRIPT_E2E_BUILDER_APPLICATION_RS="$dynamic_output/generated_builder_application.rs" \
+JAMSCRIPT_E2E_SCRIPTC_ARCHIVE="$dynamic_output/scriptc/scriptc_service.lib.a" \
+cargo run --locked --offline \
+  --manifest-path tools/minijam-e2e/Cargo.toml -- --dynamic-only --memory-probe \
+  --diagnostic-item-gas 100000000 "$dynamic_output/service.blob"

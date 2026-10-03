@@ -1,10 +1,10 @@
-#ifndef JAMSCRIPT_SERVICE_DESCRIPTOR_V1_H
-#define JAMSCRIPT_SERVICE_DESCRIPTOR_V1_H
+#ifndef JAMSCRIPT_SERVICE_DESCRIPTOR_V2_H
+#define JAMSCRIPT_SERVICE_DESCRIPTOR_V2_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#define JAMSCRIPT_SERVICE_DESCRIPTOR_V1 1u
+#define JAMSCRIPT_SERVICE_DESCRIPTOR_V2 2u
 #define JAMSCRIPT_AUTH_PUBLIC_V1 0u
 #define JAMSCRIPT_AUTH_WALLET_V1 1u
 #define JAMSCRIPT_AUTH_OWNERSHIP_V1 2u
@@ -45,8 +45,10 @@ typedef struct {
     uint8_t reserved[7];
     uint8_t management_account[32];
     JamScriptServiceInitV1 init;
-} JamScriptServiceDescriptorV1;
+    uint32_t heap_initial_bytes;
+    uint32_t heap_max_bytes;
+} JamScriptServiceDescriptorV2;
 
-extern const JamScriptServiceDescriptorV1 jamscript_service_descriptor_v1;
+extern const JamScriptServiceDescriptorV2 jamscript_service_descriptor_v2;
 
 #endif

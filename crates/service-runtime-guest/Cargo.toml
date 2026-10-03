@@ -13,6 +13,7 @@ jamscript-crypto = { path = "../jamscript-crypto", default-features = false }
 service-runtime-core = { path = "../service-runtime-core", default-features = false }
 service-runtime-state = { path = "../service-runtime-state", default-features = false }
 polkavm-derive = "=0.30.0"
+buddy_system_allocator.workspace = true
 
 [dev-dependencies]
 service-runtime-state = { path = "../service-runtime-state", features = ["std"] }

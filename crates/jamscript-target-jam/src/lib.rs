@@ -8,13 +8,15 @@ use jamscript_codegen_rust::{
 use jamscript_deployment::{DEFAULT_MIN_ITEM_GAS, DEFAULT_MIN_MEMO_GAS};
 use jamscript_ir::{abi_for_language, ServiceIr, NATIVE_ABI_VERSION};
 use jamscript_toolchain::InstalledToolchain;
+use polkavm::{BackendKind, Config as PvmConfig, Engine, Module, ModuleConfig};
 use serde::{Deserialize, Serialize};
 use service_build_polkavm::{
     CargoNetworkPolicy, GuestBuildArtifacts, GuestBuildMode, NativeArchive, PolkaVmBuildConfig,
     PolkaVmBuildRequest, PolkaVmBuilder,
 };
 use service_runtime_core::{
-    MANAGED_STATE_LAYOUT_VERSION, MANAGED_STATE_PROTOCOL_VERSION, RECOVERY_FORMAT_VERSION,
+    GuestMemoryBudgetV1, GUEST_HEAP_PLATFORM_MAX_BYTES, MANAGED_STATE_LAYOUT_VERSION,
+    MANAGED_STATE_PROTOCOL_VERSION, RECOVERY_FORMAT_VERSION,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -48,6 +50,8 @@ pub struct BuildMetadata {
     pub managed_state_layout_version: u8,
     #[serde(rename = "runtimeRefineInputVersion")]
     pub runtime_refine_input_version: u8,
+    #[serde(rename = "serviceDescriptorVersion")]
+    pub service_descriptor_version: u8,
     #[serde(rename = "signedActionVersion")]
     pub signed_action_version: u8,
     #[serde(rename = "recoveryFormatVersion")]
@@ -83,6 +87,8 @@ pub struct BuildMetadata {
     pub target_environment: String,
     #[serde(rename = "minimumStackBytes")]
     pub minimum_stack_bytes: u64,
+    #[serde(rename = "guestMemory")]
+    pub guest_memory: GuestMemoryMetadata,
     pub clang_version: String,
     pub source_hash: String,
     pub abi_hash: String,
@@ -101,6 +107,21 @@ pub struct BuildMetadata {
     pub jam_runtime_archive: Option<RuntimeArtifactMetadata>,
     #[serde(flatten)]
     pub scriptc: Option<ScriptcBuildMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GuestMemoryMetadata {
+    pub page_bytes: u32,
+    #[serde(rename = "heapInitialBytes")]
+    pub heap_initial_bytes: u32,
+    #[serde(rename = "heapMaxBytes")]
+    pub heap_max_bytes: u32,
+    #[serde(rename = "effectiveHeapMaxBytes")]
+    pub effective_heap_max_bytes: u32,
+    #[serde(rename = "artifactMaxHeapBytes")]
+    pub artifact_max_heap_bytes: u32,
+    #[serde(rename = "policyMaxHeapBytes")]
+    pub policy_max_heap_bytes: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -166,6 +187,8 @@ struct ProtocolBoundaryV0 {
     managed_state_layout: u8,
     #[serde(rename = "runtimeRefineInputVersion")]
     runtime_refine_input: u8,
+    #[serde(rename = "serviceDescriptorVersion")]
+    service_descriptor: u8,
     recovery_format: u8,
     builder_artifact: u8,
 }
@@ -308,6 +331,7 @@ impl JamTarget {
                 managed_state_protocol: MANAGED_STATE_PROTOCOL_VERSION,
                 managed_state_layout: MANAGED_STATE_LAYOUT_VERSION,
                 runtime_refine_input: 1,
+                service_descriptor: 2,
                 recovery_format: RECOVERY_FORMAT_VERSION,
                 builder_artifact: 1,
             })?,
@@ -488,6 +512,7 @@ impl JamTarget {
                 "minijam_accumulate".into(),
                 "jamscript_plan_v1".into(),
                 "jamscript_backend_metadata_v1".into(),
+                "jamscript_guest_fault_record_v1".into(),
             ],
             require_relocations: true,
         })?;
@@ -496,6 +521,7 @@ impl JamTarget {
         let blob = output_dir.join("service.blob");
         let polkavm = output_dir.join("service.polkavm");
         link_elf_to_jam(&artifacts.elf, &blob, &polkavm)?;
+        let guest_memory = validate_guest_memory(&polkavm, context.memory_budget)?;
         fs::copy(&polkavm, output_dir.join("service.pvm"))?;
         let clang_version = command_version(&clang)?;
         let native_metadata = native_metadata(project_root, native_modules)?;
@@ -510,6 +536,7 @@ impl JamTarget {
             Some(scriptc.metadata.clone()),
             &ir.language_version,
             self.toolchain.as_ref(),
+            guest_memory,
         );
         fs::write(
             output_dir.join("build.json"),
@@ -575,7 +602,7 @@ impl JamTarget {
             ..Default::default()
         })
         .build(&PolkaVmBuildRequest {
-            manifest_path: self.sdk_root.join("include/jam/service-descriptor-v1.h"),
+            manifest_path: self.sdk_root.join("include/jam/service-descriptor-v2.h"),
             output_dir: backend_output,
             native_archives: archives,
             required_exports: vec![
@@ -583,6 +610,7 @@ impl JamTarget {
                 "minijam_accumulate".into(),
                 "jamscript_plan_v1".into(),
                 "jamscript_backend_metadata_v1".into(),
+                "jamscript_guest_fault_record_v1".into(),
             ],
             require_relocations: true,
         })?;
@@ -590,6 +618,7 @@ impl JamTarget {
         let blob = output_dir.join("service.blob");
         let polkavm = output_dir.join("service.polkavm");
         link_elf_to_jam(&artifacts.elf, &blob, &polkavm)?;
+        let guest_memory = validate_guest_memory(&polkavm, context.memory_budget)?;
         fs::copy(&polkavm, output_dir.join("service.pvm"))?;
         let clang_version = command_version(&clang)?;
         let native_metadata = native_metadata(project_root, native_modules)?;
@@ -604,6 +633,7 @@ impl JamTarget {
             Some(scriptc.metadata.clone()),
             &ir.language_version,
             Some(toolchain),
+            guest_memory,
         );
         fs::write(
             output_dir.join("build.json"),
@@ -630,6 +660,7 @@ pub fn elf_to_jam_blob(elf: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         b"minijam_accumulate".to_vec(),
         b"jamscript_plan_v1".to_vec(),
         b"jamscript_backend_metadata_v1".to_vec(),
+        b"jamscript_guest_fault_record_v1".to_vec(),
     ]);
     let linked =
         polkavm_linker::program_from_elf(config, polkavm_linker::TargetInstructionSet::JamV1, elf)
@@ -650,6 +681,57 @@ pub fn link_elf_to_jam(elf: &Path, blob: &Path, polkavm: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_guest_memory(
+    artifact: &Path,
+    budget: GuestMemoryBudgetV1,
+) -> Result<GuestMemoryMetadata> {
+    budget.validate().map_err(|error| {
+        anyhow::anyhow!(
+            "invalid [guest.memory] heap budget (heap_initial_bytes={}, heap_max_bytes={}): {error:?}",
+            budget.heap_initial_bytes,
+            budget.heap_max_bytes
+        )
+    })?;
+    let bytes = fs::read(artifact)
+        .with_context(|| format!("reading linked PolkaVM artifact {}", artifact.display()))?;
+    let mut config = PvmConfig::new();
+    config.set_backend(Some(BackendKind::Interpreter));
+    let engine = Engine::new(&config).context("creating PolkaVM artifact verifier")?;
+    let module = Module::new(&engine, &ModuleConfig::new(), bytes.into())
+        .context("validating linked PolkaVM memory map")?;
+    let map = module.memory_map();
+    let stack_limited = map
+        .stack_address_low()
+        .checked_sub(map.heap_base())
+        .context("artifact heap overlaps its stack region")?;
+    let page_mask = !(service_runtime_core::GUEST_MEMORY_PAGE_BYTES - 1);
+    let artifact_max = map.max_heap_size().min(stack_limited) & page_mask;
+    if budget.heap_max_bytes > artifact_max {
+        bail!(
+            "[guest.memory].heap_max_bytes={} exceeds this artifact's effective heap limit of {} bytes (PVM max={}, stack boundary={}); reduce the budget or change the independent stack configuration",
+            budget.heap_max_bytes,
+            artifact_max,
+            map.max_heap_size(),
+            stack_limited
+        );
+    }
+    if budget.heap_initial_bytes > artifact_max {
+        bail!(
+            "[guest.memory].heap_initial_bytes={} exceeds this artifact's effective heap limit of {} bytes",
+            budget.heap_initial_bytes,
+            artifact_max
+        );
+    }
+    Ok(GuestMemoryMetadata {
+        page_bytes: service_runtime_core::GUEST_MEMORY_PAGE_BYTES,
+        heap_initial_bytes: budget.heap_initial_bytes,
+        heap_max_bytes: budget.heap_max_bytes,
+        effective_heap_max_bytes: budget.heap_max_bytes,
+        artifact_max_heap_bytes: artifact_max,
+        policy_max_heap_bytes: GUEST_HEAP_PLATFORM_MAX_BYTES,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_metadata(
     context: ArtifactBuildContext,
@@ -662,6 +744,7 @@ fn build_metadata(
     scriptc: Option<ScriptcBuildMetadata>,
     language_version: &str,
     managed_toolchain: Option<&InstalledToolchain>,
+    guest_memory: GuestMemoryMetadata,
 ) -> BuildMetadata {
     let toolchain = artifacts.metadata;
     BuildMetadata {
@@ -714,6 +797,7 @@ fn build_metadata(
         managed_state_protocol_version: MANAGED_STATE_PROTOCOL_VERSION,
         managed_state_layout_version: MANAGED_STATE_LAYOUT_VERSION,
         runtime_refine_input_version: 1,
+        service_descriptor_version: 2,
         signed_action_version: 1,
         recovery_format_version: RECOVERY_FORMAT_VERSION,
         abi_version: 1,
@@ -736,6 +820,7 @@ fn build_metadata(
         final_elf_linker_overrides: vec!["-z".into(), "notext".into()],
         target_environment: toolchain.target_environment,
         minimum_stack_bytes: toolchain.minimum_stack_bytes,
+        guest_memory,
         clang_version,
         source_hash,
         abi_hash,

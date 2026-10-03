@@ -63,10 +63,26 @@ export type TransactionStatusResult = {
   actionIndex: number | null;
   executionReceipt: string | null;
   error: string | null;
+  errorInfo?: StructuredExecutionError | null;
   bestChainStatus?: "included" | "not_included" | "unknown";
   bestContext?: BestContext;
   finalized?: boolean;
   actionReceipts?: ActionReceipt[];
+};
+
+/** Structured guest/runtime failure data returned by the JamScript Backend.
+ * Additional fields are intentionally allowed so newer Backends can add
+ * diagnostics without forcing an SDK release.
+ */
+export type StructuredExecutionError = {
+  code: string;
+  message: string;
+  stage?: string;
+  submissionState?: "not_submitted";
+  serviceId?: number | null;
+  codeHash?: string;
+  details?: Record<string, unknown>;
+  [key: string]: unknown;
 };
 
 export type WorkStatus =
@@ -116,13 +132,30 @@ export type BackendCapabilitiesV1 = {
 };
 
 export class RpcError extends Error {
+  readonly structuredError?: StructuredExecutionError;
+
   constructor(
     message: string,
     readonly code: number,
     readonly data?: unknown,
   ) {
     super(message);
+    this.structuredError = isStructuredExecutionError(data)
+      ? data
+      : isStructuredExecutionError((data as { cause?: unknown } | null)?.cause)
+        ? {
+            ...((data as { cause: StructuredExecutionError }).cause),
+            submissionState: "not_submitted",
+          }
+        : undefined;
   }
+}
+
+function isStructuredExecutionError(value: unknown): value is StructuredExecutionError {
+  return typeof value === "object"
+    && value !== null
+    && typeof (value as { code?: unknown }).code === "string"
+    && typeof (value as { message?: unknown }).message === "string";
 }
 
 export interface RpcTransport {

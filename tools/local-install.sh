@@ -75,7 +75,7 @@ TOOLCHAIN_OUT="${BUILD_ROOT}/toolchain"
   JAMSCRIPT_CARGO="${CARGO_BIN}" \
   tools/release/toolchain/build-linux.sh "${TOOLCHAIN_OUT}"
 )
-TOOLCHAIN_ARCHIVE="${TOOLCHAIN_OUT}/jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
+TOOLCHAIN_ARCHIVE="${TOOLCHAIN_OUT}/jamscript-toolchain-scriptc-m2-v2-linux-x86_64.tar.zst"
 [[ -f "${TOOLCHAIN_ARCHIVE}" ]] || fail "managed toolchain bundle was not built"
 
 mkdir -p "${LOCAL_BIN}"

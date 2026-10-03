@@ -1,6 +1,8 @@
 #![feature(generic_const_exprs)]
 #![allow(incomplete_features)]
 
+extern crate alloc;
+
 use std::{collections::BTreeMap, env, fs, sync::Arc};
 
 use jam_codec::Encode;
@@ -29,12 +31,12 @@ use minijam_jamcore_api::{
 use minijam_protocol::{StateOperation, PROTOCOL_VERSION_V1};
 use schnorrkel::{context::signing_context, ExpansionMode, MiniSecretKey};
 use service_runtime_core::{
-    application_key_v1, ManagedStateCommitmentV1, RuntimeRefineInputV1,
-    RuntimeRefineOutputV1, ServiceKeyV1, StateAccessPlanV1, MANAGED_STATE_COMMITMENT_KEY_V1,
+    application_key_v1, ManagedStateCommitmentV1, RuntimeRefineInputV1, RuntimeRefineOutputV1,
+    ServiceKeyV1, StateAccessPlanV1, MANAGED_STATE_COMMITMENT_KEY_V1,
 };
 use service_runtime_host::{
     AuthenticatedWorkBuilder, FinalizedContextV1, FinalizedManagedStateSource, FullStateProvider,
-    MaterializedServiceStateProvider,
+    MaterializedServiceStateProvider, ServiceStateProvider,
 };
 
 include!(env!("JAMSCRIPT_E2E_BUILDER_APPLICATION_RS"));
@@ -328,6 +330,7 @@ fn runtime_input_batch(
     RuntimeRefineInputV1 {
         version: 1,
         managed_state: witness,
+        external_state: Vec::new(),
         actions: actions.to_vec(),
     }
     .encode()
@@ -1136,8 +1139,7 @@ impl FinalizedManagedStateSource for LocalDynamicSource<'_> {
 }
 
 fn bounded_bytes(value: &[u8]) -> Vec<u8> {
-    assert!(value.len() < 128);
-    let mut encoded = vec![value.len() as u8];
+    let mut encoded = jam_codec::Compact(value.len() as u64).encode();
     encoded.extend_from_slice(value);
     encoded
 }
@@ -1153,6 +1155,10 @@ fn dynamic_advance_payload(key: &[u8; 32]) -> Vec<u8> {
     bounded_bytes(key)
 }
 
+fn dynamic_memory_probe_payload() -> Vec<u8> {
+    bounded_bytes(&vec![0x5a; 530_000])
+}
+
 fn dynamic_application_key(schema: &[u8], key: &[u8; 32]) -> Vec<u8> {
     application_key_v1(schema, &bounded_bytes(key)).expect("dynamic application key")
 }
@@ -1165,7 +1171,8 @@ fn execute_dynamic_work(
     action: Vec<u8>,
     slot: u8,
     item_gas: u64,
-) -> RuntimeRefineOutputV1 {
+    expect_heap_limit: bool,
+) -> Option<RuntimeRefineOutputV1> {
     let mut source = LocalDynamicSource { state };
     let built = AuthenticatedWorkBuilder::new(&mut source, provider)
         .build_actions(service_key, &GeneratedApplication, vec![action])
@@ -1209,6 +1216,15 @@ fn execute_dynamic_work(
     )
     .expect("real MiniJAM Formal V1 refine");
     let result = &report.report.results[0];
+    eprintln!(
+        "Formal V1 dynamic slot={slot} refine_gas_limit={item_gas} refine_gas_used={}",
+        result.refine_load.gas_used
+    );
+    if expect_heap_limit {
+        eprintln!("Formal V1 expected guest heap failure: {:?}", result.result);
+        assert_eq!(result.result, WorkExecResult::Panic);
+        return None;
+    }
     let output = match &result.result {
         WorkExecResult::Ok(payload) => {
             RuntimeRefineOutputV1::decode(payload.as_ref()).expect("Formal V1 refine output")
@@ -1243,10 +1259,10 @@ fn execute_dynamic_work(
         provider.materialized_root(service_key).unwrap(),
         output.new_root
     );
-    output
+    Some(output)
 }
 
-fn run_dynamic(blob: &[u8], item_gas: u64) {
+fn run_dynamic(blob: &[u8], item_gas: u64, memory_probe: bool, expect_heap_limit: bool) {
     assert_eq!(
         JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION,
         RuntimeRefineInputV1::VERSION,
@@ -1274,7 +1290,9 @@ fn run_dynamic(blob: &[u8], item_gas: u64) {
         seed.encode().unwrap(),
         1,
         item_gas,
+        false,
     );
+    let seed_output = seed_output.expect("successful Formal V1 seed");
     assert_eq!(provider_nonce(&provider, service_key, &sender), Some(1));
     assert_eq!(
         provider_value(
@@ -1307,7 +1325,9 @@ fn run_dynamic(blob: &[u8], item_gas: u64) {
         advance.encode().unwrap(),
         2,
         item_gas,
+        false,
     );
+    let advance_output = advance_output.expect("successful Formal V1 advance");
     assert_ne!(seed_output.new_root, advance_output.new_root);
     eprintln!(
         "Formal V1 dynamic seed parent={} new={} receipts={:?}",
@@ -1334,7 +1354,68 @@ fn run_dynamic(blob: &[u8], item_gas: u64) {
     .expect("dynamic value after advance");
     assert_eq!(&value[..32], &advance_sender);
     assert_eq!(u32::from_le_bytes(value[32..].try_into().unwrap()), 11);
-    println!("MiniJAM Formal V1 dynamic ScriptC E2E passed: seed/advance/replay planner/PVM/Accumulate.");
+
+    if !memory_probe {
+        println!("MiniJAM Formal V1 dynamic ScriptC E2E passed: seed/advance/replay planner/PVM/Accumulate.");
+        return;
+    }
+
+    let (memory_probe, probe_sender) = action(
+        service_key,
+        9,
+        0,
+        10,
+        jamscript_ir::action_selector("memoryProbe"),
+        dynamic_memory_probe_payload(),
+    );
+    let state_root_before_probe = canonical_root(&state);
+    let provider_root_before_probe = provider.materialized_root(service_key).unwrap();
+    let nonce_before_probe = provider_nonce(&provider, service_key, &probe_sender);
+    let probe_output = execute_dynamic_work(
+        &mut state,
+        &mut provider,
+        service_key,
+        code_hash,
+        memory_probe.encode().unwrap(),
+        3,
+        item_gas,
+        expect_heap_limit,
+    );
+    if expect_heap_limit {
+        assert!(
+            probe_output.is_none(),
+            "heap limit probe must fail before output"
+        );
+        assert_eq!(canonical_root(&state), state_root_before_probe);
+        assert_eq!(
+            provider.materialized_root(service_key).unwrap(),
+            provider_root_before_probe
+        );
+        assert_eq!(
+            provider_nonce(&provider, service_key, &probe_sender),
+            nonce_before_probe
+        );
+        println!(
+            "GUEST_MEMORY_MINIJAM_PVM=EXPECTED_HEAP_LIMIT_AND_ATOMIC_STATE action_payload_bytes=530000"
+        );
+        return;
+    }
+    let probe_output = probe_output.expect("successful Formal V1 memory probe");
+    assert_eq!(
+        provider_nonce(&provider, service_key, &probe_sender),
+        Some(1)
+    );
+    assert!(matches!(
+        probe_output.receipts.first().map(|receipt| &receipt.status),
+        Some(service_runtime_core::ActionStatusV1::Applied)
+    ));
+    println!(
+        "GUEST_MEMORY_MINIJAM_PVM=PASS action_payload_bytes=530000 heap_default_max_bytes={}",
+        service_runtime_core::DEFAULT_GUEST_HEAP_MAX_BYTES
+    );
+    println!(
+        "MiniJAM Formal V1 dynamic ScriptC E2E passed: seed/advance/replay planner/PVM/Accumulate."
+    );
 }
 
 fn main() {
@@ -1350,6 +1431,8 @@ fn main() {
     let mut diagnostic_only = false;
     let mut counter_only = false;
     let mut dynamic_only = false;
+    let mut memory_probe = false;
+    let mut expect_heap_limit = false;
     let mut paths = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--diagnostic-item-gas" {
@@ -1366,6 +1449,11 @@ fn main() {
             counter_only = true;
         } else if arg == "--dynamic-only" {
             dynamic_only = true;
+        } else if arg == "--memory-probe" {
+            memory_probe = true;
+        } else if arg == "--expect-heap-limit" {
+            memory_probe = true;
+            expect_heap_limit = true;
         } else {
             paths.push(arg);
         }
@@ -1375,7 +1463,7 @@ fn main() {
             .first()
             .expect("usage: jamscript-minijam-e2e --dynamic-only <dynamic-state-scriptc.blob>");
         let dynamic = fs::read(dynamic_path).expect("read dynamic ScriptC service blob");
-        run_dynamic(&dynamic, item_gas);
+        run_dynamic(&dynamic, item_gas, memory_probe, expect_heap_limit);
         return;
     }
     let counter_path = paths.first().expect(

@@ -2,6 +2,7 @@ use jamscript_ir::{
     action_selector, ActionBodyIr, ActionIr, AuthKind, ExecutionOpIr, ServiceIr, StateEffectIr,
     TypeIr,
 };
+use service_runtime_core::GuestMemoryBudgetV1;
 
 mod descriptor;
 pub use descriptor::generate_service_descriptor_c;
@@ -22,6 +23,7 @@ pub struct ArtifactBuildContext {
     pub service_instance_id: [u8; 32],
     pub management_policy: ManagementPolicyConfig,
     pub diagnostic: bool,
+    pub memory_budget: GuestMemoryBudgetV1,
 }
 
 pub fn generate_no_std_rust(ir: &ServiceIr) -> Result<String, String> {
@@ -100,6 +102,8 @@ fn generate_no_std_rust_with_backend(
     let runtime_input_type = "RuntimeRefineInputV1";
     let runtime_input_version = 1;
     let backend_metadata = backend_metadata_literal(context.service_key);
+    let heap_initial_bytes = context.memory_budget.heap_initial_bytes;
+    let heap_max_bytes = context.memory_budget.heap_max_bytes;
     Ok(format!(
         r##"#![no_std]
 #![allow(static_mut_refs)]
@@ -110,7 +114,7 @@ compile_error!("generated service must be built with the official PolkaVM target
 pub const JAMSCRIPT_RUNTIME_REFINE_INPUT_VERSION: u8 = {runtime_input_version};
 
 use service_runtime_core::{{
-    BackendMetadataV1, ManagedStateCommitmentV1, {runtime_input_type}, RuntimeRefineOutputV1, StateRoot,
+    BackendMetadataV1, GuestFaultStageV1, GuestMemoryBudgetV1, ManagedStateCommitmentV1, {runtime_input_type}, RuntimeRefineOutputV1, StateRoot,
     MANAGED_STATE_COMMITMENT_KEY_V1,
 }};
 #[repr(C)]
@@ -132,7 +136,10 @@ static mut OUTPUT: [u8; 2097152] = [0; 2097152];
 {application_source}
 
 fn run_refine() -> Result<RuntimeRefineOutputV1, service_runtime_guest::GuestError> {{
-    service_runtime_guest::guest_support::reset_runtime();
+    if !service_runtime_guest::guest_support::reset_runtime(
+        GuestMemoryBudgetV1 {{ heap_initial_bytes: {heap_initial_bytes}, heap_max_bytes: {heap_max_bytes} }},
+        GuestFaultStageV1::Refine,
+    ) {{ return Err(service_runtime_guest::GuestError::Environment); }}
     {stage_entry}
     let mut input_size = 0usize;
     let status = unsafe {{ minijam_payload(INPUT.as_mut_ptr(), 1048576, &mut input_size) }};
@@ -153,7 +160,10 @@ fn run_refine() -> Result<RuntimeRefineOutputV1, service_runtime_guest::GuestErr
 }}
 
 fn run_plan() -> Result<(), service_runtime_guest::GuestError> {{
-    service_runtime_guest::guest_support::reset_runtime();
+    if !service_runtime_guest::guest_support::reset_runtime(
+        GuestMemoryBudgetV1 {{ heap_initial_bytes: {heap_initial_bytes}, heap_max_bytes: {heap_max_bytes} }},
+        GuestFaultStageV1::Plan,
+    ) {{ return Err(service_runtime_guest::GuestError::Environment); }}
     let mut input_size = 0usize;
     let status = unsafe {{ minijam_payload(INPUT.as_mut_ptr(), 1048576, &mut input_size) }};
     if status != 0 {{ return Err(service_runtime_guest::GuestError::InvalidInput); }}
@@ -167,7 +177,11 @@ fn run_plan() -> Result<(), service_runtime_guest::GuestError> {{
 
 fn output_for(planning: bool) -> RefineOutput {{
     if planning {{
-        return match run_plan() {{
+        let result = run_plan();
+        if service_runtime_guest::guest_support::has_fault() {{
+            service_runtime_guest::guest_support::trap_with_fault_record();
+        }}
+        return match result {{
             Ok(()) => planner_done_output(),
             Err(service_runtime_guest::GuestError::NeedState(key)) => {{
                 let encoded = match service_runtime_core::encode_planner_need_state(&key) {{
@@ -193,7 +207,11 @@ fn output_for(planning: bool) -> RefineOutput {{
             Err(service_runtime_guest::GuestError::Application) => error_output(3),
         }};
     }}
-    let output = match run_refine() {{
+    let result = run_refine();
+    if service_runtime_guest::guest_support::has_fault() {{
+        service_runtime_guest::guest_support::trap_with_fault_record();
+    }}
+    let output = match result {{
         Ok(output) => output,
         Err(service_runtime_guest::GuestError::NeedState(key)) if planning => {{
             let encoded = match service_runtime_core::encode_planner_need_state(&key) {{
@@ -1082,10 +1100,14 @@ mod tests {
                 service_instance_id: [8; 32],
                 management_policy: ManagementPolicyConfig::Immutable,
                 diagnostic: false,
+                ..ArtifactBuildContext::default()
             },
         )
         .unwrap();
-        assert!(descriptor.contains("jamscript_service_descriptor_v1"));
+        assert!(descriptor.contains("jamscript_service_descriptor_v2"));
+        assert!(descriptor.contains("JAMSCRIPT_SERVICE_DESCRIPTOR_V2"));
+        assert!(descriptor.contains("1048576"));
+        assert!(descriptor.contains("16777216"));
         assert!(descriptor.contains("JAMSCRIPT_AUTH_OWNERSHIP_V1"));
         assert!(descriptor.contains("jamscript_namespace_0"));
         assert!(descriptor.contains("jamscript_scriptc_transfer_entry_v1"));
@@ -1235,6 +1257,7 @@ mod tests {
             service_instance_id: [6; 32],
             management_policy: ManagementPolicyConfig::Key { account: [4; 32] },
             diagnostic: false,
+            ..ArtifactBuildContext::default()
         };
         for ir in services {
             let builder = generate_builder_application_rust(&ir, context).unwrap();
@@ -1409,6 +1432,7 @@ mod tests {
                 service_instance_id: [3; 32],
                 management_policy: ManagementPolicyConfig::Immutable,
                 diagnostic: true,
+                ..ArtifactBuildContext::default()
             },
         )
         .unwrap();

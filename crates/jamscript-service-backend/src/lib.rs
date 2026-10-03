@@ -13,18 +13,19 @@ use jamscript_deployment::{ErrorCode, JsonRpcTransport};
 use parity_scale_codec::Decode as ScaleDecode;
 use parity_scale_codec::Encode as ScaleEncode;
 use polkavm::{
-    BackendKind, CallError as PvmCallError, Config as PvmConfig, Engine, Linker, MemoryAccessError,
-    Module, ModuleConfig, Reg,
+    BackendKind, CallError as PvmCallError, Config as PvmConfig, Engine, GasMeteringKind, Linker,
+    MemoryAccessError, Module, ModuleConfig, Reg,
 };
 use rocksdb::{
     ColumnFamilyDescriptor, Direction, IteratorMode, Options, WriteBatch, WriteOptions, DB,
 };
 use serde_json::{json, Value};
 use service_runtime_core::{
-    BackendMetadataV1, ExecutionContext, RuntimeRefineInputV1, RuntimeRefineOutputV1,
-    ServiceApplication, ServiceKeyV1, StateAccessError, StateAccessPlanV1, StateDiffV1,
-    StateQueryResponseV1, StateRecoveryV1, StateRoot, WireError, EMPTY_STATE_ROOT_V1,
-    MAX_RECOVERY_BYTES, RECOVERY_FORMAT_VERSION,
+    BackendMetadataV1, ExecutionContext, GuestFaultCodeV1, GuestFaultRecordV1, GuestFaultStageV1,
+    RuntimeRefineInputV1, RuntimeRefineOutputV1, ServiceApplication, ServiceKeyV1,
+    StateAccessError, StateAccessPlanV1, StateDiffV1, StateQueryResponseV1, StateRecoveryV1,
+    StateRoot, WireError, EMPTY_STATE_ROOT_V1, GUEST_FAULT_RECORD_V1_LEN, MAX_RECOVERY_BYTES,
+    RECOVERY_FORMAT_VERSION,
 };
 use service_runtime_host::{
     FullStateProvider, MaterializedServiceStateProvider, ProviderError, ServiceStateProvider,
@@ -46,6 +47,10 @@ use std::{
 
 pub const BACKEND_PROTOCOL_VERSION_V1: u32 = 1;
 pub const MAX_PVM_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+// MiniJAM's pinned Stage-1 work-item refine ceiling is 1B gas. The local
+// PolkaVM meter uses a different tariff, but must not impose the unrelated
+// 5M service fee floor as a transaction execution limit.
+const PVM_PREFLIGHT_GAS_LIMIT: i64 = 1_000_000_000;
 pub const BACKEND_DB_SCHEMA_VERSION_V1: u32 = 1;
 pub const BACKEND_DB_CF_META: &str = "meta";
 pub const BACKEND_DB_CF_SERVICES: &str = "services";
@@ -855,6 +860,77 @@ pub struct PvmApplication {
     pub canonical_code_hash: StateRoot,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GuestFaultContext {
+    pub record: GuestFaultRecordV1,
+    pub service_id: Option<u32>,
+    pub code_hash: StateRoot,
+}
+
+impl GuestFaultContext {
+    fn json(&self) -> Value {
+        let code = GuestFaultCodeV1::from_u32(self.record.code)
+            .map(GuestFaultCodeV1::as_str)
+            .unwrap_or("GUEST_FAULT_UNKNOWN");
+        let stage = GuestFaultStageV1::from_u32(self.record.stage)
+            .map(GuestFaultStageV1::as_str)
+            .unwrap_or("unknown");
+        json!({
+            "code": code,
+            "message": guest_fault_message(code),
+            "stage": stage,
+            "serviceId": self.service_id,
+            "codeHash": hash_hex(&self.code_hash),
+            "details": {
+                "requestedBytes": self.record.requested_bytes,
+                "alignment": self.record.alignment,
+                "heapCommittedBytes": self.record.heap_committed_bytes,
+                "heapMaxBytes": self.record.heap_max_bytes,
+                "allocatorLiveRequestedBytes": self.record.live_requested_bytes,
+                "allocatorHighWaterRequestedBytes": self.record.high_water_requested_bytes,
+                "allocatorCumulativeRequestedBytes": self.record.cumulative_requested_bytes,
+            }
+        })
+    }
+}
+
+fn pvm_out_of_gas_info(
+    service_id: Option<u32>,
+    code_hash: StateRoot,
+    stage: &'static str,
+) -> Value {
+    json!({
+        "code": "PVM_OUT_OF_GAS",
+        "message": "PolkaVM execution exhausted its configured gas budget",
+        "stage": stage,
+        "serviceId": service_id,
+        "codeHash": hash_hex(&code_hash),
+        "details": {"gasLimit": PVM_PREFLIGHT_GAS_LIMIT},
+    })
+}
+
+fn pvm_execution_stage(export: &str) -> &'static str {
+    match export {
+        "jamscript_plan_v1" => "plan",
+        "minijam_refine" => "refine",
+        _ => "invocation",
+    }
+}
+
+fn guest_fault_message(code: &str) -> &'static str {
+    match code {
+        "GUEST_HEAP_LIMIT_EXCEEDED" => "Guest allocation exceeded the configured heap budget",
+        "GUEST_MEMORY_GROW_FAILED" => {
+            "Guest memory growth was rejected by the execution environment"
+        }
+        "GUEST_MEMORY_ALLOCATION_FAILED" => "Guest allocation could not be satisfied",
+        "GUEST_PANIC" => "Guest panicked during execution",
+        "GUEST_MEMORY_CONFIG_INVALID" => "Guest heap configuration is invalid for this artifact",
+        "GUEST_ABORT" => "Guest explicitly aborted execution",
+        _ => "Guest reported an unrecognized fault",
+    }
+}
+
 impl PvmApplication {
     pub fn canonical_code_hash(&self) -> StateRoot {
         self.canonical_code_hash
@@ -997,15 +1073,30 @@ impl PvmApplication {
         network_domain: StateRoot,
         service_id: Option<u32>,
     ) -> Result<Vec<u8>, BackendError> {
+        self.invoke_with_gas(
+            export,
+            payload,
+            network_domain,
+            service_id,
+            PVM_PREFLIGHT_GAS_LIMIT,
+        )
+    }
+
+    fn invoke_with_gas(
+        &self,
+        export: &str,
+        payload: &[u8],
+        network_domain: StateRoot,
+        service_id: Option<u32>,
+        gas_limit: i64,
+    ) -> Result<Vec<u8>, BackendError> {
         let mut config = PvmConfig::new();
         config.set_backend(Some(BackendKind::Interpreter));
         let engine = Engine::new(&config).map_err(|error| BackendError::Pvm(error.to_string()))?;
-        let module = Module::new(
-            &engine,
-            &ModuleConfig::new(),
-            self.bytes.as_ref().clone().into(),
-        )
-        .map_err(|error| BackendError::Pvm(error.to_string()))?;
+        let mut module_config = ModuleConfig::new();
+        module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+        let module = Module::new(&engine, &module_config, self.bytes.as_ref().clone().into())
+            .map_err(|error| BackendError::Pvm(error.to_string()))?;
         let payload_for_host = payload.to_vec();
         let mut linker: Linker<(), MemoryAccessError> = Linker::new();
         linker
@@ -1063,8 +1154,9 @@ impl PvmApplication {
         let mut instance = pre
             .instantiate()
             .map_err(|error| BackendError::Pvm(error.to_string()))?;
-        instance.set_gas(5_000_000);
+        instance.set_gas(gas_limit);
         if let Err(error) = instance.call_typed_and_get_result::<u64, _>(&mut (), export, ()) {
+            let program_counter = instance.program_counter();
             let failure_kind = match &error {
                 PvmCallError::Trap => "TRAP",
                 PvmCallError::NotEnoughGas => "OUT_OF_GAS",
@@ -1079,14 +1171,59 @@ impl PvmApplication {
             // runtime location. It never includes the action payload, signature,
             // ownership proof, or wallet credentials.
             eprintln!(
-                "PVM_INVOKE_FAILED serviceId={} codeHash={} artifactDigest={} export={export} selector={action_selector} ownershipKind={ownership_kind} kind={failure_kind} error={error:?} program_counter={:?} gasLimit=5000000 gasRemaining={}",
+                "PVM_INVOKE_FAILED serviceId={} codeHash={} artifactDigest={} export={export} selector={action_selector} ownershipKind={ownership_kind} kind={failure_kind} error={error:?} program_counter={program_counter:?} gasLimit={gas_limit} gasRemaining={}",
                 service_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".into()),
                 hash_hex(&self.canonical_code_hash),
                 hash_hex(&self.artifact_digest),
-                instance.program_counter(),
                 instance.gas(),
             );
-            return Err(BackendError::Pvm(format!("{export}: {error:?}")));
+            if matches!(&error, PvmCallError::NotEnoughGas) {
+                return Err(BackendError::PvmOutOfGas {
+                    service_id,
+                    code_hash: self.canonical_code_hash,
+                    stage: pvm_execution_stage(export),
+                });
+            }
+            if matches!(&error, PvmCallError::Trap) {
+                if let Some(record) =
+                    read_guest_memory_record(&mut instance).filter(|record| record.code != 0)
+                {
+                    let fault = GuestFaultContext {
+                        record,
+                        service_id,
+                        code_hash: self.canonical_code_hash,
+                    };
+                    eprintln!(
+                        "PVM_GUEST_FAULT serviceId={} codeHash={} artifactDigest={} export={export} errorInfo={}",
+                        service_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".into()),
+                        hash_hex(&self.canonical_code_hash),
+                        hash_hex(&self.artifact_digest),
+                        serde_json::to_string(&fault.json()).unwrap_or_else(|_| "{}".into()),
+                    );
+                    return Err(BackendError::GuestFault(fault));
+                }
+            }
+            return Err(BackendError::Pvm(format!(
+                "{export}: {error:?} program_counter={program_counter:?}"
+            )));
+        }
+        if env_u64("MINIJAM_E2E_DIAGNOSTICS", 0) == 1 {
+            if let Some(record) = read_guest_memory_record(&mut instance) {
+                eprintln!(
+                    "PVM_GUEST_MEMORY serviceId={} codeHash={} artifactDigest={} export={export} stage={} heapCommittedBytes={} heapMaxBytes={} allocatorLiveRequestedBytes={} allocatorHighWaterRequestedBytes={} allocatorCumulativeRequestedBytes={}",
+                    service_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".into()),
+                    hash_hex(&self.canonical_code_hash),
+                    hash_hex(&self.artifact_digest),
+                    GuestFaultStageV1::from_u32(record.stage)
+                        .map(GuestFaultStageV1::as_str)
+                        .unwrap_or("unknown"),
+                    record.heap_committed_bytes,
+                    record.heap_max_bytes,
+                    record.live_requested_bytes,
+                    record.high_water_requested_bytes,
+                    record.cumulative_requested_bytes,
+                );
+            }
         }
         let pointer = instance.reg(Reg::A0) as u32;
         let size = instance.reg(Reg::A1) as u32;
@@ -1097,6 +1234,21 @@ impl PvmApplication {
             .read_memory(pointer, size)
             .map_err(|error| BackendError::Pvm(error.to_string()))
     }
+}
+
+fn read_guest_memory_record(
+    instance: &mut polkavm::Instance<(), MemoryAccessError>,
+) -> Option<GuestFaultRecordV1> {
+    let address = instance
+        .call_typed_and_get_result::<u64, _>(&mut (), "jamscript_guest_fault_record_v1", ())
+        .ok()? as u32;
+    if address == 0 {
+        return None;
+    }
+    let bytes = instance
+        .read_memory(address, GUEST_FAULT_RECORD_V1_LEN as u32)
+        .ok()?;
+    GuestFaultRecordV1::decode(&bytes).ok()
 }
 
 fn pvm_action_diagnostic_context(payload: &[u8]) -> (String, String) {
@@ -1258,12 +1410,26 @@ pub enum BackendError {
     StateNotMaterialized,
     ServiceCorrupt(u32),
     Pvm(String),
+    PvmOutOfGas {
+        service_id: Option<u32>,
+        code_hash: StateRoot,
+        stage: &'static str,
+    },
+    NotSubmittedPvmOutOfGas {
+        service_id: Option<u32>,
+        code_hash: StateRoot,
+        stage: &'static str,
+    },
+    GuestFault(GuestFaultContext),
+    NotSubmittedGuestFault(GuestFaultContext),
     CodeHashMismatch,
     WrongNetwork,
     InvalidMetadata,
     StaleContext,
     BestContextUnavailable,
-    QueueFull { retry_after_ms: u64 },
+    QueueFull {
+        retry_after_ms: u64,
+    },
     PredictionStale,
     WorkNotFound,
     Rpc(String),
@@ -1418,6 +1584,7 @@ struct LogicalTransaction {
     package_hash: Option<StateRoot>,
     action_index: Option<usize>,
     error: Option<String>,
+    error_info: Option<Value>,
     submission_unknown: bool,
     best_included: bool,
 }
@@ -1659,6 +1826,7 @@ impl TransactionCoordinator {
                 package_hash: None,
                 action_index: None,
                 error: None,
+                error_info: None,
                 submission_unknown: false,
                 best_included: false,
             },
@@ -1983,6 +2151,10 @@ impl TransactionCoordinator {
     }
 
     fn fail_batch(&self, batch_id: &str, error: String) {
+        self.fail_batch_with_info(batch_id, error, None);
+    }
+
+    fn fail_batch_with_info(&self, batch_id: &str, error: String, error_info: Option<Value>) {
         if let Ok(mut state) = self.state.lock() {
             let Some(batch) = state.batches.get(batch_id) else {
                 return;
@@ -1996,6 +2168,7 @@ impl TransactionCoordinator {
                 if let Some(transaction) = state.transactions.get_mut(&transaction_id) {
                     if transaction.error.is_none() {
                         transaction.error = Some(error.clone());
+                        transaction.error_info = error_info.clone();
                     }
                 }
             }
@@ -2282,6 +2455,16 @@ impl BackendEngine {
         })()
         .map_err(|error| match error {
             BackendError::StaleContext => BackendError::StaleContext,
+            BackendError::GuestFault(fault) => BackendError::NotSubmittedGuestFault(fault),
+            BackendError::PvmOutOfGas {
+                service_id,
+                code_hash,
+                stage,
+            } => BackendError::NotSubmittedPvmOutOfGas {
+                service_id,
+                code_hash,
+                stage,
+            },
             error => BackendError::NotSubmitted(error.to_string()),
         })?;
         // Errors from this call are ambiguous unless they are explicit
@@ -3799,6 +3982,31 @@ impl BackendRpcHandler {
                     self.transactions.fail_batch(&batch_id, error.clone());
                     eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error={error}");
                 }
+                Err(BackendError::NotSubmittedGuestFault(fault)) => {
+                    let info = fault.json();
+                    let code = info["code"]
+                        .as_str()
+                        .unwrap_or("GUEST_FAULT_UNKNOWN")
+                        .to_owned();
+                    let error = format!(
+                        "{code}: {}",
+                        info["message"].as_str().unwrap_or("guest execution failed")
+                    );
+                    self.transactions
+                        .fail_batch_with_info(&batch_id, error.clone(), Some(info));
+                    eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error_code={code}");
+                }
+                Err(BackendError::NotSubmittedPvmOutOfGas {
+                    service_id: _,
+                    code_hash,
+                    stage,
+                }) => {
+                    let error = "PVM_OUT_OF_GAS: local guest preflight exceeded its gas budget";
+                    let info = pvm_out_of_gas_info(Some(service_id), code_hash, stage);
+                    self.transactions
+                        .fail_batch_with_info(&batch_id, error.into(), Some(info));
+                    eprintln!("TX_BATCH_FAILED service_id={service_id} batch_id={batch_id} transaction_count={transaction_count} error_code=PVM_OUT_OF_GAS");
+                }
                 Err(BackendError::QueueFull { retry_after_ms }) => {
                     let error = format!("QUEUE_FULL: retry after {retry_after_ms} ms");
                     self.transactions.fail_batch(&batch_id, error.clone());
@@ -3822,6 +4030,7 @@ impl BackendRpcHandler {
             .transactions
             .transaction(&logical_id)
             .ok_or(BackendError::WorkNotFound)?;
+        let error_info = transaction.error_info.clone();
         if transaction.submission_unknown {
             return Ok(json!({
                 "transactionId": logical_id,
@@ -3831,6 +4040,7 @@ impl BackendRpcHandler {
                 "actionIndex": transaction.action_index,
                 "executionReceipt": Value::Null,
                 "error": transaction.error,
+                "errorInfo": error_info,
             }));
         }
         if let Some(error) = transaction.error {
@@ -3842,6 +4052,7 @@ impl BackendRpcHandler {
                 "actionIndex": transaction.action_index,
                 "executionReceipt": Value::Null,
                 "error": error,
+                "errorInfo": error_info,
             }));
         }
         let Some(package_hash) = transaction.package_hash else {
@@ -3853,6 +4064,7 @@ impl BackendRpcHandler {
                 "actionIndex": transaction.action_index,
                 "executionReceipt": Value::Null,
                 "error": Value::Null,
+                "errorInfo": Value::Null,
             }));
         };
         let work_params = json!({
@@ -4699,6 +4911,45 @@ fn rpc_error(error: &BackendError) -> Value {
             "data": { "retryAfterMs": retry_after_ms },
         });
     }
+    match error {
+        BackendError::GuestFault(fault) => {
+            let info = fault.json();
+            return json!({
+                "code": -32046,
+                "message": info["code"],
+                "data": info,
+            });
+        }
+        BackendError::PvmOutOfGas {
+            service_id,
+            code_hash,
+            stage,
+        } => {
+            let info = pvm_out_of_gas_info(*service_id, *code_hash, stage);
+            return json!({"code": -32047, "message": "PVM_OUT_OF_GAS", "data": info});
+        }
+        BackendError::NotSubmittedGuestFault(fault) => {
+            let fault = fault.json();
+            return json!({
+                "code": -32045,
+                "message": format!("NOT_SUBMITTED: {}", fault["code"].as_str().unwrap_or("GUEST_FAULT_UNKNOWN")),
+                "data": { "code": "NOT_SUBMITTED", "cause": fault },
+            });
+        }
+        BackendError::NotSubmittedPvmOutOfGas {
+            service_id,
+            code_hash,
+            stage,
+        } => {
+            let fault = pvm_out_of_gas_info(*service_id, *code_hash, stage);
+            return json!({
+                "code": -32045,
+                "message": "NOT_SUBMITTED: PVM_OUT_OF_GAS",
+                "data": { "code": "NOT_SUBMITTED", "cause": fault },
+            });
+        }
+        _ => {}
+    }
     let (code, message) = match error {
         BackendError::Rpc(message) => (-32000, message.clone()),
         BackendError::NotSubmitted(message) => (-32045, format!("NOT_SUBMITTED: {message}")),
@@ -5122,10 +5373,117 @@ mod tests {
     use jam_codec::Encode as JamEncode;
     use jamscript_deployment::DeploymentError;
     use parity_scale_codec::Encode as ScaleEncode;
-    use service_runtime_core::{ActionReceiptV1, ActionStatusV1, StateChangeV1, StateDiffV1};
+    use service_runtime_core::{
+        ActionReceiptV1, ActionStatusV1, ManagedStateWitnessV1, StateAccessPlanV1, StateChangeV1,
+        StateDiffV1, EMPTY_STATE_ROOT_V1,
+    };
     use service_runtime_host::MaterializedServiceStateProvider;
     use service_runtime_state::FullState;
     use std::sync::Arc;
+
+    #[test]
+    fn guest_fault_rpc_data_preserves_diagnostics_and_no_submit_cause() {
+        let context = GuestFaultContext {
+            record: GuestFaultRecordV1 {
+                code: GuestFaultCodeV1::HeapLimitExceeded as u32,
+                stage: GuestFaultStageV1::Plan as u32,
+                requested_bytes: 65_536,
+                alignment: 16,
+                heap_committed_bytes: 16 * 1024 * 1024,
+                heap_max_bytes: 16 * 1024 * 1024,
+                live_requested_bytes: 15 * 1024 * 1024,
+                high_water_requested_bytes: 15 * 1024 * 1024,
+                cumulative_requested_bytes: 32 * 1024 * 1024,
+                ..GuestFaultRecordV1::EMPTY
+            },
+            service_id: Some(7),
+            code_hash: [0xabu8; 32],
+        };
+        let rpc = rpc_error(&BackendError::NotSubmittedGuestFault(context));
+        assert_eq!(rpc["data"]["code"], "NOT_SUBMITTED");
+        assert_eq!(rpc["data"]["cause"]["code"], "GUEST_HEAP_LIMIT_EXCEEDED");
+        assert_eq!(rpc["data"]["cause"]["stage"], "plan");
+        assert_eq!(rpc["data"]["cause"]["serviceId"], 7);
+        assert_eq!(rpc["data"]["cause"]["details"]["requestedBytes"], 65_536);
+        assert_eq!(
+            rpc["data"]["cause"]["details"]["heapMaxBytes"],
+            16 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn pvm_out_of_gas_reports_known_stage_and_local_budget() {
+        let info = pvm_out_of_gas_info(Some(7), [0x11; 32], "refine");
+        assert_eq!(info["code"], "PVM_OUT_OF_GAS");
+        assert_eq!(info["stage"], "refine");
+        assert_eq!(info["details"]["gasLimit"], PVM_PREFLIGHT_GAS_LIMIT);
+    }
+
+    #[test]
+    #[ignore = "requires a freshly built PVM guest; set JAMSCRIPT_GUEST_MEMORY_TEST_ARTIFACT"]
+    fn actual_pvm_guest_decodes_an_action_larger_than_the_legacy_heap() {
+        let application = test_pvm_application("JAMSCRIPT_GUEST_MEMORY_TEST_ARTIFACT");
+        let input = large_action_plan_input(530_000);
+        application
+            .invoke_with_gas("jamscript_plan_v1", &input, [0; 32], None, 100_000_000)
+            .expect("PVM invocation should complete after growing and allocating >512 KiB");
+    }
+
+    #[test]
+    #[ignore = "requires a 512 KiB-budget PVM guest; set JAMSCRIPT_GUEST_MEMORY_LIMIT_TEST_ARTIFACT"]
+    fn actual_pvm_guest_reports_heap_limit_for_an_oversized_request() {
+        let application = test_pvm_application("JAMSCRIPT_GUEST_MEMORY_LIMIT_TEST_ARTIFACT");
+        let input = large_action_plan_input(530_000);
+        let error = application
+            .invoke_with_gas("jamscript_plan_v1", &input, [0; 32], None, 100_000_000)
+            .unwrap_err();
+        let BackendError::GuestFault(fault) = error else {
+            panic!("expected a validated guest memory fault, received {error:?}");
+        };
+        assert_eq!(
+            GuestFaultCodeV1::from_u32(fault.record.code),
+            Some(GuestFaultCodeV1::HeapLimitExceeded)
+        );
+        assert_eq!(
+            GuestFaultStageV1::from_u32(fault.record.stage),
+            Some(GuestFaultStageV1::Plan)
+        );
+        assert_eq!(fault.record.heap_max_bytes, 512 * 1024);
+        assert_eq!(fault.record.requested_bytes, 530_000);
+    }
+
+    fn test_pvm_application(environment_variable: &str) -> PvmApplication {
+        let artifact = std::env::var_os(environment_variable)
+            .unwrap_or_else(|| panic!("set {environment_variable} to service.polkavm"));
+        let bytes = fs::read(artifact).expect("read test PVM artifact");
+        let digest = service_runtime_core::blake2_256(&bytes);
+        PvmApplication {
+            artifact_digest: digest,
+            bytes: Arc::new(bytes),
+            canonical_code_hash: digest,
+        }
+    }
+
+    fn large_action_plan_input(action_bytes: usize) -> Vec<u8> {
+        let input = RuntimeRefineInputV1 {
+            version: RuntimeRefineInputV1::VERSION,
+            managed_state: ManagedStateWitnessV1 {
+                version: ManagedStateWitnessV1::VERSION,
+                parent_root: EMPTY_STATE_ROOT_V1,
+                access_plan: StateAccessPlanV1::from_keys(Vec::<Vec<u8>>::new()).unwrap(),
+                storage_proof: Vec::new(),
+            },
+            external_state: Vec::new(),
+            actions: vec![vec![0; action_bytes]],
+        }
+        .encode()
+        .unwrap();
+        assert!(
+            input.len() < 1_048_576,
+            "the test payload must fit the fixed input buffer"
+        );
+        input
+    }
 
     #[derive(Clone)]
     struct SingleResponse(Value);
@@ -5324,6 +5682,7 @@ mod tests {
                     package_hash: None,
                     action_index: None,
                     error: None,
+                    error_info: None,
                     submission_unknown: false,
                     best_included: false,
                 },
@@ -5363,6 +5722,7 @@ mod tests {
                     package_hash: None,
                     action_index: None,
                     error: None,
+                    error_info: None,
                     submission_unknown: false,
                     best_included: false,
                 },

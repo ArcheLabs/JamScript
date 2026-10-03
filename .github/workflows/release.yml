@@ -160,12 +160,12 @@ jobs:
             os: ubuntu-24.04
             setup: setup-host-build-env-linux.sh
             build: build-linux.sh
-            archive: jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst
+            archive: jamscript-toolchain-scriptc-m2-v2-linux-x86_64.tar.zst
           - platform: macos-arm64
             os: macos-15
             setup: setup-host-build-env-macos.sh
             build: build-macos.sh
-            archive: jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst
+            archive: jamscript-toolchain-scriptc-m2-v2-macos-arm64.tar.zst
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
     env:
@@ -299,7 +299,7 @@ jobs:
           git archive --format=tar "${SOURCE_SHA}" | tar -xf - -C "${source_copy}"
           release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}"
           for platform in linux-x86_64 macos-arm64; do
-            bundle="${RUNNER_TEMP}/inputs/jamscript-toolchain-scriptc-m2-v1-${platform}.tar.zst"
+            bundle="${RUNNER_TEMP}/inputs/jamscript-toolchain-scriptc-m2-v2-${platform}.tar.zst"
             if command -v sha256sum >/dev/null 2>&1; then
               sha="$(sha256sum "${bundle}" | awk '{print $1}')"
             else
@@ -342,7 +342,7 @@ jobs:
           rm -rf -- "${assets}"
           mkdir -p "${assets}"
           cli_asset="jamscript-${VERSION}-${{ matrix.platform }}.tar.gz"
-          toolchain_asset="jamscript-toolchain-scriptc-m2-v1-${{ matrix.platform }}.tar.zst"
+          toolchain_asset="jamscript-toolchain-scriptc-m2-v2-${{ matrix.platform }}.tar.zst"
           cp -L "${RUNNER_TEMP}/cli/${cli_asset}" "${assets}/${cli_asset}"
           cp -L "${RUNNER_TEMP}/inputs/${toolchain_asset}" "${assets}/${toolchain_asset}"
           if command -v sha256sum >/dev/null 2>&1; then
@@ -400,8 +400,8 @@ jobs:
           expected=(
             "jamscript-${VERSION}-linux-x86_64.tar.gz"
             "jamscript-${VERSION}-macos-arm64.tar.gz"
-            "jamscript-toolchain-scriptc-m2-v1-linux-x86_64.tar.zst"
-            "jamscript-toolchain-scriptc-m2-v1-macos-arm64.tar.zst"
+            "jamscript-toolchain-scriptc-m2-v2-linux-x86_64.tar.zst"
+            "jamscript-toolchain-scriptc-m2-v2-macos-arm64.tar.zst"
           )
           for asset in "${expected[@]}"; do
             test -s "${assets}/${asset}"

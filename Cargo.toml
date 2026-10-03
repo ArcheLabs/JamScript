@@ -40,6 +40,7 @@ anyhow = "1.0.100"
 base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 blake2b_simd = { version = "1.0.4", default-features = false }
 bounded-collections = { version = "0.2.4", default-features = false }
+buddy_system_allocator = { version = "=0.13.0", default-features = false, features = ["use_spin"] }
 jam-program-blob-common = { version = "=0.1.28", default-features = false, features = ["std", "polkavm"] }
 jam-codec = { version = "0.1.1", default-features = false }
 object = { version = "0.36.7", default-features = false, features = ["read", "std"] }

@@ -11,7 +11,7 @@ case "${PLATFORM}" in
   linux-x86_64|macos-arm64) ;;
   *) echo "unsupported promotion platform: ${PLATFORM}" >&2; exit 1 ;;
 esac
-ASSET="jamscript-toolchain-scriptc-m2-v1-${PLATFORM}.tar.zst"
+ASSET="jamscript-toolchain-scriptc-m2-v2-${PLATFORM}.tar.zst"
 test "$(basename -- "${ARCHIVE}")" = "${ASSET}"
 "${ROOT}/tools/release/toolchain/verify-bundle.sh" "${ARCHIVE}"
 if command -v sha256sum >/dev/null 2>&1; then

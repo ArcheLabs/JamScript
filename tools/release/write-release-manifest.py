@@ -58,7 +58,7 @@ common = None
 for target, cli_path, bundle_path, manifest_path, metadata_path in zip(*fields):
     toolchain = json.loads(manifest_path.read_text(encoding="utf-8"))
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    if toolchain.get("toolchainId") != "scriptc-m2-v1":
+    if toolchain.get("toolchainId") != "scriptc-m2-v2":
         raise SystemExit(f"unexpected toolchain identity for {target}")
     if toolchain.get("platform") != target or metadata.get("platform") != target:
         raise SystemExit(f"toolchain metadata platform mismatch for {target}")
