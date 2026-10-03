@@ -429,6 +429,9 @@ pub mod guest_support {
         false
     }
     pub fn emit_fault_record() {}
+    pub fn trap_with_fault_record() -> ! {
+        panic!("guest trap requested outside a PolkaVM execution target")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
