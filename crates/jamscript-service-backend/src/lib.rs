@@ -5398,9 +5398,10 @@ mod tests {
     use jamscript_deployment::DeploymentError;
     use parity_scale_codec::Encode as ScaleEncode;
     use service_runtime_core::{
-        ActionReceiptV1, ActionStatusV1, ManagedStateWitnessV1, StateAccessPlanV1, StateChangeV1,
-        StateDiffV1, EMPTY_STATE_ROOT_V1,
+        ActionReceiptV1, ActionStatusV1, StateChangeV1, StateDiffV1, EMPTY_STATE_ROOT_V1,
     };
+    #[cfg(feature = "pvm-memory-tests")]
+    use service_runtime_core::{ManagedStateWitnessV1, StateAccessPlanV1};
     use service_runtime_host::MaterializedServiceStateProvider;
     use service_runtime_state::FullState;
     use std::sync::Arc;
